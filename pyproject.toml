@@ -1,0 +1,95 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pyhako"
+version = "0.1.0-rc1"
+description = "Async Python client for Sakamichi Group Message API (Nogizaka46, Sakurazaka46, Hinatazaka46)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name="xebjhm", email="xebjhm@users.noreply.github.com" },
+]
+keywords = ["sakamichi", "nogizaka46", "sakurazaka46", "hinatazaka46", "api", "client", "async"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "aiohttp>=3.9.0",
+    "aiofiles>=23.0.0",
+    "playwright>=1.40.0",
+    "keyring>=24.0.0",
+    "structlog>=24.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/xebjhm/PyHako"
+Repository = "https://github.com/xebjhm/PyHako"
+Issues = "https://github.com/xebjhm/PyHako/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pyhako"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.3.0",
+    "mypy>=1.9.0",
+    "types-aiofiles>=23.1.0",
+    "build>=1.0.0",
+    "twine>=4.0.0",
+    "hatchling>=1.18.0",
+    "hypothesis>=6.141.1",
+    "pytest-benchmark>=5.2.3",
+    "syrupy>=4.9.1",
+    "time-machine>=2.19.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "C",  # flake8-comprehensions
+    "B",  # flake8-bugbear
+    "UP", # pyupgrade
+]
+ignore = []
+
+[tool.ruff.lint.isort]
+known-first-party = ["pyhako"]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q --cov=pyhako --cov-report=term-missing"
+testpaths = [
+    "tests",
+]
+asyncio_mode = "auto"
+pythonpath = ["src"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+ignore_missing_imports = true
