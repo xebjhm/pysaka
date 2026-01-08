@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyhako"
-version = "0.1.0-rc1"
+version = "0.1.0"
 description = "Async Python client for Sakamichi Group Message API (Nogizaka46, Sakurazaka46, Hinatazaka46)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -79,12 +79,15 @@ known-first-party = ["pyhako"]
 
 [tool.pytest.ini_options]
 minversion = "6.0"
-addopts = "-ra -q --cov=pyhako --cov-report=term-missing"
+addopts = "-ra -q --cov=pyhako --cov-report=term-missing -m 'not integration'"
 testpaths = [
     "tests",
 ]
 asyncio_mode = "auto"
 pythonpath = ["src"]
+markers = [
+    "integration: mark test as integration test (requires auth_data)",
+]
 
 [tool.mypy]
 python_version = "3.9"
