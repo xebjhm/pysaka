@@ -220,19 +220,12 @@ class Client:
         refresh_headers = self.headers.copy()
         refresh_headers.pop("Authorization", None)
         
-        # 1. Try refresh_token if available
+        
+        # 1. Try refresh_token if available (Plan A - Unused in Web Flow, kept for future mobile support)
+        # Note: Web flow sets refresh_token=None, so this block is skipped.
         if self.refresh_token:
-            try:
-                async with session.post(url, headers=refresh_headers, json={"refresh_token": self.refresh_token}, ssl=False) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        new_token = data.get('access_token')
-                        if new_token:
-                            await self.update_token(new_token)
-                            logger.info("Token refreshed successfully via refresh_token.")
-                            return True
-            except Exception as e:
-                logger.warning(f"Refresh token attempt failed: {e}")
+             # Kept as placeholder but unreachable in current web-only implementation
+             pass
 
         # 2. Try cookies (Web Session) if available
         if self.cookies:
