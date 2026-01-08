@@ -204,8 +204,9 @@ class Client:
         Returns:
             True if refresh was successful, False otherwise.
         """
-        if not self.refresh_token and not self.cookies:
-            logger.debug("No credentials (refresh_token/cookies) available for refresh.")
+        # Early exit only if ALL refresh methods are unavailable
+        if not self.refresh_token and not self.cookies and not (self.auth_dir and self.auth_dir.exists()):
+            logger.debug("No credentials (refresh_token/cookies/auth_dir) available for refresh.")
             return False
 
         url = f"{self.api_base}/update_token"
