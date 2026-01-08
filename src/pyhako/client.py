@@ -211,10 +211,20 @@ class Client:
 
         url = f"{self.api_base}/update_token"
         
+        # Headers for refresh: exclude Authorization, add Platform/Origin/Referer (as browser does)
+        refresh_headers = {
+            "x-talk-app-id": self.app_id,
+            "user-agent": self.user_agent,
+            "content-type": "application/json",
+            "x-talk-app-platform": "web",
+            "origin": self.config["auth_url"].rstrip('/'),
+            "referer": self.config["auth_url"]
+        }
+        
         # 1. Try refresh_token if available
         if self.refresh_token:
             try:
-                async with session.post(url, headers=self.headers, json={"refresh_token": self.refresh_token}, ssl=False) as resp:
+                async with session.post(url, headers=refresh_headers, json={"refresh_token": self.refresh_token}, ssl=False) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         new_token = data.get('access_token')
@@ -229,7 +239,7 @@ class Client:
         if self.cookies:
             try:
                 # For web sessions, pass cookies with refresh_token:null (as browser does per HAR)
-                async with session.post(url, headers=self.headers, json={"refresh_token": None}, cookies=self.cookies, ssl=False) as resp:
+                async with session.post(url, headers=refresh_headers, json={"refresh_token": None}, cookies=self.cookies, ssl=False) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         new_token = data.get('access_token')
