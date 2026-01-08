@@ -1,5 +1,6 @@
 from .auth import BrowserAuth
 from .client import Client, Group
+from .credentials import get_user_data_dir, get_auth_dir
 from .exceptions import ApiError, AuthError, HakoError
 from .logging import configure_logging
 from .manager import SyncManager
@@ -16,5 +17,7 @@ __all__ = [
     "SyncManager",
     "HakoError",
     "AuthError",
-    "ApiError"
+    "ApiError",
+    "get_user_data_dir",
+    "get_auth_dir"
 ]
