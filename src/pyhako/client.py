@@ -115,11 +115,12 @@ class Client:
             "content-type": "application/json",
             "x-talk-app-platform": "web",
             "origin": self.config["auth_url"].rstrip('/'),
-            "referer": self.config["auth_url"]
+            "referer": self.config["auth_url"],
+            "accept": "application/json",
+            "accept-language": "ja,en-US;q=0.9,en;q=0.8"
         }
-        # Web client relies on Cookies, not Authorization header
-        # if self.access_token:
-        #    self.headers["Authorization"] = f"Bearer {self.access_token}"
+        if self.access_token:
+            self.headers["Authorization"] = f"Bearer {self.access_token}"
 
     async def update_token(self, new_token: str) -> None:
         """
@@ -215,10 +216,14 @@ class Client:
 
         url = f"{self.api_base}/update_token"
         
+        # Headers for refresh: exclude Authorization, but keep Platform/Origin/Referer
+        refresh_headers = self.headers.copy()
+        refresh_headers.pop("Authorization", None)
+        
         # 1. Try refresh_token if available
         if self.refresh_token:
             try:
-                async with session.post(url, headers=self.headers, json={"refresh_token": self.refresh_token}, ssl=False) as resp:
+                async with session.post(url, headers=refresh_headers, json={"refresh_token": self.refresh_token}, ssl=False) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         new_token = data.get('access_token')
@@ -233,7 +238,7 @@ class Client:
         if self.cookies:
             try:
                 # For web sessions, pass cookies with refresh_token:null (as browser does per HAR)
-                async with session.post(url, headers=self.headers, json={"refresh_token": None}, cookies=self.cookies, ssl=False) as resp:
+                async with session.post(url, headers=refresh_headers, json={"refresh_token": None}, cookies=self.cookies, ssl=False) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         new_token = data.get('access_token')
