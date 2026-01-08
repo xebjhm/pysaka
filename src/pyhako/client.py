@@ -228,8 +228,8 @@ class Client:
         # 2. Try cookies (Web Session) if available
         if self.cookies:
             try:
-                # For web sessions, we pass cookies and an empty body or specific payload
-                async with session.post(url, headers=self.headers, json={}, cookies=self.cookies, ssl=False) as resp:
+                # For web sessions, pass cookies with refresh_token:null (as browser does per HAR)
+                async with session.post(url, headers=self.headers, json={"refresh_token": None}, cookies=self.cookies, ssl=False) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         new_token = data.get('access_token')
