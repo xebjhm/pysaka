@@ -20,6 +20,42 @@ Thank you for your interest in contributing!
     uv run pytest
     ```
 
+## Testing
+
+### Unit Tests (CI Default)
+Unit tests run automatically in CI and exclude integration tests:
+```bash
+uv run pytest tests/
+```
+
+### Integration Tests (Local Only)
+Integration tests require **prior login** with the CLI. They test real browser refresh and API calls.
+
+**Prerequisites**:
+1. Login first: `pyhako-cli -s <group>` (run interactively)
+2. Verify auth_data exists: `~/.local/share/pyhako/auth_data`
+
+**Run integration tests**:
+```bash
+uv run pytest tests/test_integration.py -m integration -v
+```
+
+### CLI Build Testing (Shift-Left)
+Test the PyInstaller build locally before pushing to CI.
+
+**Build locally**:
+```bash
+cd ../PyHakoCLI
+uv run python scripts/build_local.py
+```
+
+**Smoke test**:
+```bash
+uv run python scripts/test_build.py
+# Or test directly:
+./dist/pyhako-cli --help
+```
+
 ## Coding Standards
 
 - **Linting**: We use `ruff`. Run `uv run ruff check .` before committing.
