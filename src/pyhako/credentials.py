@@ -31,6 +31,40 @@ def _decompress_data(data: str) -> str:
 def is_windows() -> bool:
     return platform.system() == "Windows"
 
+def get_user_data_dir() -> "Path":
+    """
+    Get the platform-specific user data directory for pyhako.
+    
+    Returns:
+        - Windows: %APPDATA%/pyhako
+        - macOS: ~/Library/Application Support/pyhako
+        - Linux: ~/.local/share/pyhako
+    """
+    from pathlib import Path
+    
+    system = platform.system()
+    
+    if system == "Windows":
+        appdata = Path.home() / "AppData" / "Roaming" / SERVICE_NAME
+    elif system == "Darwin":  # macOS
+        appdata = Path.home() / "Library" / "Application Support" / SERVICE_NAME
+    else:  # Linux and others
+        appdata = Path.home() / ".local" / "share" / SERVICE_NAME
+    
+    appdata.mkdir(parents=True, exist_ok=True)
+    return appdata
+
+def get_auth_dir() -> "Path":
+    """
+    Get the browser auth data directory for session persistence.
+    
+    Returns:
+        Path to `{user_data_dir}/auth_data` (e.g. ~/.local/share/pyhako/auth_data)
+    """
+    auth_dir = get_user_data_dir() / "auth_data"
+    auth_dir.mkdir(parents=True, exist_ok=True)
+    return auth_dir
+
 class CredentialStore(ABC):
     @abstractmethod
     def save(self, group: str, token_data: dict[str, Any]) -> None:
