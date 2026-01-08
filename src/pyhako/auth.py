@@ -170,9 +170,18 @@ class BrowserAuth:
             return None
 
     @staticmethod
-    async def refresh_token_headless(group: Group, auth_dir: Union[str, Path]) -> Optional[LoginCredentials]:
+    async def refresh_token_headless(
+        group: Group, 
+        auth_dir: Union[str, Path],
+        auto_install: bool = True
+    ) -> Optional[LoginCredentials]:
         """
         Refreshes access token via headless browser using persistent context.
+        
+        Args:
+            group: Target group for authentication.
+            auth_dir: Path to persistent browser context directory.
+            auto_install: If True, automatically install Playwright chromium if missing.
         """
         auth_dir = Path(auth_dir)
         if not auth_dir.exists():
@@ -196,8 +205,46 @@ class BrowserAuth:
                     args=["--disable-blink-features=AutomationControlled"]
                 )
             except Exception as e:
-                logger.error(f"Failed to launch headless browser: {e}")
-                return None
+                if "Executable doesn't exist" in str(e) and auto_install:
+                    # UX: Explain why we are downloading
+                    logger.info("Downloading headless browser for auto-refresh (One-time setup)...")
+                    # Force Playwright to look in global cache, not frozen bundle
+                    import os
+                    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+                    
+                    try:
+                        from playwright.__main__ import main
+                        import sys
+                        
+                        # In frozen environment, calling subprocess with sys.executable fails
+                        # caused by the executable trying to parse '-m' as an argument.
+                        # We must call the internal CLI entry point directly.
+                        old_argv = sys.argv
+                        try:
+                            sys.argv = ["playwright", "install", "chromium"]
+                            main()
+                        except SystemExit:
+                            # Playwright CLI calls sys.exit(), which is expected
+                            pass
+                        except Exception as e:
+                            logger.error(f"Failed to install Playwright browser: {e}")
+                            return None
+                        finally:
+                            sys.argv = old_argv
+                        logger.info("Playwright chromium installed successfully. Retrying...")
+                        
+                        # Retry launch after installation
+                        context = await p.chromium.launch_persistent_context(
+                            user_data_dir=str(auth_dir),
+                            headless=True,
+                            args=["--disable-blink-features=AutomationControlled"]
+                        )
+                    except Exception as install_error:
+                        logger.error(f"Failed to auto-install Playwright browser: {install_error}")
+                        return None
+                else:
+                    logger.error(f"Failed to launch headless browser: {e}")
+                    return None
 
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
