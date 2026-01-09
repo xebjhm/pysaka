@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -68,6 +68,9 @@ async def test_refresh_cookie_success(client, mock_session):
     mock_resp = mock_session.post.return_value.__aenter__.return_value
     mock_resp.status = 200
     mock_resp.json.return_value = {"access_token": "cookie_token"}
+    # Mock cookies mapping for iteration
+    mock_resp.cookies = MagicMock()
+    mock_resp.cookies.items.return_value = []
 
     success = await client.refresh_access_token(mock_session)
     assert success is True
@@ -75,7 +78,7 @@ async def test_refresh_cookie_success(client, mock_session):
     # Verify post called with cookies
     call_kwargs = mock_session.post.call_args[1]
     assert call_kwargs['cookies'] == {"session": "valid_cookie"}
-    assert call_kwargs['json'] == {}
+    assert call_kwargs['json'] == {"refresh_token": None}
 
 @pytest.mark.asyncio
 async def test_get_profile(client, mock_session):
