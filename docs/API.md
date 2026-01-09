@@ -40,6 +40,49 @@ Main API client supporting all Sakamichi groups.
 - **timestamp**: (Optional) Timestamp metadata.
 - **Returns**: `True` if success/exists.
 
+## Blog Scrapers
+Public blog scrapers for official member blogs. No authentication required.
+
+### `BaseBlogScraper`
+Abstract base class for all blog scrapers.
+
+### `NogizakaBlogScraper(session: aiohttp.ClientSession)`
+Scraper for Nogizaka46 official blog (www.nogizaka46.com).
+
+### `SakurazakaBlogScraper(session: aiohttp.ClientSession)`
+Scraper for Sakurazaka46 official blog (sakurazaka46.com).
+
+### `HinatazakaBlogScraper(session: aiohttp.ClientSession)`
+Scraper for Hinatazaka46 official blog (www.hinatazaka46.com).
+
+#### Common Methods
+All scrapers implement:
+
+##### `get_members() -> dict[str, str]`
+- **Returns**: Dictionary mapping `member_id` to `member_name` for active members.
+
+##### `get_blogs(member_id: str, since_date: datetime = None) -> AsyncIterator[BlogEntry]`
+- **member_id**: The member's unique identifier.
+- **since_date**: (Optional) Stop when reaching blogs before this date.
+- **Yields**: `BlogEntry` objects for each blog post.
+
+##### `get_blog_detail(blog_id: str) -> BlogEntry`
+- **blog_id**: The unique identifier of the blog post.
+- **Returns**: A `BlogEntry` with full content.
+
+### `BlogEntry`
+Dataclass representing a blog post.
+
+#### Attributes
+- **id**: `str` - Unique blog identifier.
+- **title**: `str` - Blog post title.
+- **content**: `str` - HTML content of the blog.
+- **published_at**: `datetime` - Publication timestamp (JST).
+- **url**: `str` - Full URL to the blog post.
+- **images**: `list[str]` - List of image URLs.
+- **member_id**: `str` - Member identifier.
+- **member_name**: `str` - Member display name.
+
 ## Enums
 ### `Group`
 - `Group.NOGIZAKA46`
