@@ -38,6 +38,7 @@ PyHako provides a robust, type-hinted, and async interface to interact with the 
 - 🍪 **Auto-Refresh**: Automatically refreshes access tokens using captured cookies.
 - 🚀 **Async/Await**: Built on `aiohttp` for high-performance concurrent requests.
 - 📦 **Multi-Group**: Supports Nogizaka46, Sakurazaka46, and Hinatazaka46 out of the box.
+- 📝 **Blog Scraper**: Backup official blogs (HTML + images) for all three groups.
 - 🛠️ **Type Hinted**: 100% type coverage for better IDE support.
 
 ## Configuration
@@ -106,6 +107,29 @@ async def main():
 asyncio.run(main())
 ```
 
+### 3. Blog Scraping (No Auth Required)
+Scrape official blogs for any group without authentication.
+
+```python
+import asyncio
+import aiohttp
+from pyhako.blog import NogizakaBlogScraper, HinatazakaBlogScraper, SakurazakaBlogScraper
+
+async def scrape_blogs():
+    async with aiohttp.ClientSession() as session:
+        scraper = NogizakaBlogScraper(session)
+
+        # Get all active members
+        members = await scraper.get_members()
+        print(f"Found {len(members)} members")
+
+        # Get blogs for a specific member
+        async for blog in scraper.get_blogs(member_id="some_member_code"):
+            print(f"{blog.title} - {blog.published_at}")
+
+asyncio.run(scrape_blogs())
+```
+
 ## API Reference
 
 ### `Client`
@@ -125,6 +149,18 @@ The main entry point.
 Helper for OAuth2 flow.
 
 - `login(group, headless=False, ...)`: Perform login and capture tokens.
+
+### Blog Scrapers
+Public blog scrapers (no authentication required).
+
+- `NogizakaBlogScraper(session)`: Nogizaka46 official blog.
+- `SakurazakaBlogScraper(session)`: Sakurazaka46 official blog.
+- `HinatazakaBlogScraper(session)`: Hinatazaka46 official blog.
+
+Each scraper provides:
+- `get_members()`: Get dict of member_id -> member_name.
+- `get_blogs(member_id, since_date=None)`: AsyncIterator of BlogEntry objects.
+- `get_blog_detail(blog_id)`: Fetch single blog by ID.
 
 ## Contributing
 Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details.
