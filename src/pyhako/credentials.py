@@ -1,9 +1,10 @@
 
+import base64
 import json
 import platform
 import zlib
-import base64
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Optional
 
 import structlog
@@ -24,14 +25,14 @@ def _decompress_data(data: str) -> str:
     try:
         compressed = base64.b64decode(data.encode('ascii'))
         return zlib.decompress(compressed).decode('utf-8')
-    except:
+    except Exception:
         # Fallback: data might not be compressed (legacy)
         return data
 
 def is_windows() -> bool:
     return platform.system() == "Windows"
 
-def get_user_data_dir() -> "Path":
+def get_user_data_dir() -> Path:
     """
     Get the platform-specific user data directory for pyhako.
     
@@ -40,21 +41,19 @@ def get_user_data_dir() -> "Path":
         - macOS: ~/Library/Application Support/pyhako
         - Linux: ~/.local/share/pyhako
     """
-    from pathlib import Path
-    
     system = platform.system()
-    
+
     if system == "Windows":
         appdata = Path.home() / "AppData" / "Roaming" / SERVICE_NAME
     elif system == "Darwin":  # macOS
         appdata = Path.home() / "Library" / "Application Support" / SERVICE_NAME
     else:  # Linux and others
         appdata = Path.home() / ".local" / "share" / SERVICE_NAME
-    
+
     appdata.mkdir(parents=True, exist_ok=True)
     return appdata
 
-def get_auth_dir() -> "Path":
+def get_auth_dir() -> Path:
     """
     Get the browser auth data directory for session persistence.
     
@@ -94,7 +93,6 @@ class KeyringStore(CredentialStore):
 
                 # Try fallback
                 try:
-                    import keyrings.alt
                     from keyrings.alt.file import PlaintextKeyring
                     keyring.set_keyring(PlaintextKeyring())
                     logger.warning("Switched to PlaintextKeyring (keyrings.alt) as fallback.")
@@ -104,14 +102,14 @@ class KeyringStore(CredentialStore):
                     keyring.delete_password("pyhako_probe", "probe")
                 except ImportError:
                     logger.error("keyrings.alt not found. Cannot provide fallback.")
-                    raise e
+                    raise e from None
                 except Exception as fallback_error:
                     logger.error(f"Fallback backend also failed: {fallback_error}")
-                    raise e
+                    raise e from None
 
             self._keyring = keyring
         except ImportError:
-            raise HakoError("keyring package is not installed.")
+            raise HakoError("keyring package is not installed.") from None
 
     def save(self, group: str, token_data: dict[str, Any]) -> None:
         # Keyring stores strings - compress JSON to fit Windows Credential Manager limits
@@ -120,7 +118,7 @@ class KeyringStore(CredentialStore):
             compressed = _compress_data(json_data)
             self._keyring.set_password(SERVICE_NAME, group, compressed)
         except Exception as e:
-             raise HakoError(f"Failed to save credentials to keyring: {e}")
+             raise HakoError(f"Failed to save credentials to keyring: {e}") from e
 
     def load(self, group: str) -> Optional[dict[str, Any]]:
         try:
@@ -168,7 +166,7 @@ class TokenManager:
             logger.debug("Using KeyringStore")
         except Exception as e:
             logger.error(f"Keyring initialization failed: {e}")
-            raise HakoError(f"Secure storage (keyring) is required but failed to initialize: {e}")
+            raise HakoError(f"Secure storage (keyring) is required but failed to initialize: {e}") from e
 
     def save_session(self, group: str, access_token: str, refresh_token: str = None, cookies: dict = None) -> None:
         data = {
