@@ -1,5 +1,4 @@
 import asyncio
-import logging
 from pathlib import Path
 
 import aiohttp

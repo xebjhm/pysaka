@@ -8,7 +8,7 @@ import aiofiles
 import aiohttp
 import structlog
 
-from .client import Client
+from .client import GROUP_CONFIG, Client
 from .utils import get_media_extension, normalize_message, sanitize_name
 
 logger = structlog.get_logger()
@@ -16,7 +16,7 @@ logger = structlog.get_logger()
 class SyncManager:
     """
     Manages synchronization of messages and media for a specific client.
-
+    
     Handles state tracking, message fetching, deduplication, and media downloading.
     """
 
@@ -113,8 +113,9 @@ class SyncManager:
         gname = sanitize_name(group['name'])
         mname = sanitize_name(member['name'])
 
-        group_dir = self.output_dir / f"{gid}_{gname}"
-        member_dir = group_dir / f"{mid}_{mname}"
+        service_name = GROUP_CONFIG[self.client.group].get("display_name", self.client.group.value)
+        group_dir = self.output_dir / service_name / "messages" / f"{gid} {gname}"
+        member_dir = group_dir / f"{mid} {mname}"
         member_dir.mkdir(parents=True, exist_ok=True)
         for t in ['picture', 'video', 'voice']:
             (member_dir / t).mkdir(exist_ok=True)

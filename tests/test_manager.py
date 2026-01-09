@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from pyhako.client import Client
+from pyhako.client import Client, Group
 from pyhako.manager import SyncManager
 
 
@@ -14,6 +14,8 @@ def mock_client():
     client = MagicMock(spec=Client)
     client.get_messages = AsyncMock()
     client.download_file = AsyncMock()
+    # Set a valid group for GROUP_CONFIG lookup
+    client.group = Group.NOGIZAKA46 
     return client
 
 @pytest.fixture
@@ -78,7 +80,9 @@ async def test_sync_member_flow(sync_manager):
     assert str(media_queue[0]['path']).endswith('.jpg')
 
     # Check messages.json content
-    member_dir = sync_manager.output_dir / "1_Grp" / "10_Mem"
+    # Updated logic: Service/messages/GID GName/MID MName
+    # Group.NOGIZAKA46 display_name is "乃木坂46" (assuming config is standard)
+    member_dir = sync_manager.output_dir / "乃木坂46" / "messages" / "1 Grp" / "10 Mem"
     json_path = member_dir / "messages.json"
     assert json_path.exists()
 
