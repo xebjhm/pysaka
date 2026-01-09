@@ -44,8 +44,10 @@ class BrowserAuth:
         if isinstance(group, str):
             try:
                 group = Group(group.lower())
-            except ValueError:
-                raise ValueError(f"Invalid group: {group}. Must be one of {[g.value for g in Group]}")
+            except ValueError as err:
+                raise ValueError(
+                    f"Invalid group: {group}. Must be one of {[g.value for g in Group]}"
+                ) from err
 
         config = GROUP_CONFIG[group]
         target_url = config["auth_url"]
@@ -112,14 +114,24 @@ class BrowserAuth:
                             captured_data['access_token'] = token
                             captured_data['x-talk-app-id'] = headers.get('x-talk-app-id') or headers.get('X-Talk-App-ID')
                             captured_data['user-agent'] = headers.get('user-agent') or headers.get('User-Agent')
-                            
-                            
+
+
                             if not token_future.done():
                                 token_future.set_result(True)
 
             page.on("response", handle_response)
 
             try:
+                # CRITICAL: Force clear stale state before fresh login
+                # This prevents capturing mixed state (Valid Token + Old/Invalid Session Cookie)
+                # if the app tries to resume an expired session.
+                await context.clear_cookies()
+                try:
+                    await page.goto(target_url, wait_until="commit", timeout=5000) # Short wait to access origin
+                    await page.evaluate("window.localStorage.clear(); window.sessionStorage.clear();")
+                except:
+                    pass # Ignore errors clearing storage (e.g. if page load fails)
+
                 await page.goto(target_url, timeout=60000)
             except Exception as e:
                 logger.warning(f"Navigation error (ignoring): {e}")
@@ -133,10 +145,15 @@ class BrowserAuth:
                 target_domain = group.value  # e.g. 'hinatazaka46', 'nogizaka46'
                 # Filter to keep only cookies relevant to the service (ignore Google/Analytics)
                 relevant_cookies = {}
+
+                logger.debug("--- Capturing Cookies ---")
                 for c in cookies_list:
+                    if c['name'] == 'session':
+                        logger.debug(f"Found session cookie: {c['value']} | Domain: {c.get('domain')} | Path: {c.get('path')}")
+
                     if target_domain in c.get('domain', ''):
                         relevant_cookies[c['name']] = c['value']
-                
+
                 captured_data['cookies'] = relevant_cookies
                 logger.debug(f"Captured {len(relevant_cookies)} session cookies.")
 
@@ -148,7 +165,7 @@ class BrowserAuth:
 
                 return {
                     "access_token": captured_data['access_token'],
-                    "refresh_token": None, 
+                    "refresh_token": None,
                     "cookies": captured_data['cookies'],
                     "app_id": captured_data.get('x-talk-app-id', ''),
                     "user_agent": captured_data.get('user-agent', '')
@@ -171,7 +188,7 @@ class BrowserAuth:
 
     @staticmethod
     async def refresh_token_headless(
-        group: Group, 
+        group: Group,
         auth_dir: Union[str, Path],
         auto_install: bool = True
     ) -> Optional[LoginCredentials]:
@@ -192,7 +209,7 @@ class BrowserAuth:
         config = GROUP_CONFIG[group]
         api_host = config["api_base"]
         auth_url = config["auth_url"]
-        
+
         captured_data = {}
         token_future = asyncio.Future()
 
@@ -211,11 +228,12 @@ class BrowserAuth:
                     # Force Playwright to look in global cache, not frozen bundle
                     import os
                     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
-                    
+
                     try:
-                        from playwright.__main__ import main
                         import sys
-                        
+
+                        from playwright.__main__ import main
+
                         # In frozen environment, calling subprocess with sys.executable fails
                         # caused by the executable trying to parse '-m' as an argument.
                         # We must call the internal CLI entry point directly.
@@ -232,7 +250,7 @@ class BrowserAuth:
                         finally:
                             sys.argv = old_argv
                         logger.info("Playwright chromium installed successfully. Retrying...")
-                        
+
                         # Retry launch after installation
                         context = await p.chromium.launch_persistent_context(
                             user_data_dir=str(auth_dir),
@@ -251,7 +269,7 @@ class BrowserAuth:
 
                 async def handle_response(response):
                     if token_future.done(): return
-                    
+
                     # Match API host (robust check)
                     if api_host.replace("https://", "").split("/")[0] in response.request.url and response.status == 200:
                         headers = response.request.headers
@@ -265,10 +283,10 @@ class BrowserAuth:
                                 token_future.set_result(True)
 
                 page.on("response", handle_response)
-                
+
                 logger.info(f"Navigating to {auth_url} for silent refresh...")
                 await page.goto(auth_url, timeout=45000, wait_until="networkidle")
-                
+
                 try:
                     await asyncio.wait_for(token_future, timeout=45)
                 except asyncio.TimeoutError:
@@ -282,7 +300,7 @@ class BrowserAuth:
                 for c in cookies_list:
                    if target_domain in c.get('domain', ''):
                         relevant_cookies[c['name']] = c['value']
-                
+
                 return {
                     "access_token": captured_data['access_token'],
                     "refresh_token": None,

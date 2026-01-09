@@ -15,9 +15,9 @@ def sanitize_name(name: str) -> str:
         name: The raw input string.
 
     Returns:
-        Safe string with spaces/_/slashes handled.
+        Safe string with '/' replaced by '_', but preserving spaces for readability.
     """
-    return name.replace(' ', '_').replace('/', '_').strip()
+    return name.replace('/', '_').strip()
 
 def get_media_extension(url: Optional[str], msg_type: str) -> str:
     """
