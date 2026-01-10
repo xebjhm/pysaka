@@ -9,6 +9,7 @@ import aiohttp
 import structlog
 
 from .client import GROUP_CONFIG, Client
+from .media import get_media_dimensions
 from .utils import get_media_extension, normalize_message, sanitize_name
 
 logger = structlog.get_logger()
@@ -242,10 +243,20 @@ class SyncManager:
                         queue.append({
                             'url': media_url,
                             'path': filepath,
-                            'timestamp': msg.get('published_at')
+                            'timestamp': msg.get('published_at'),
+                            'message_id': msg['id'],
+                            'media_type': msg_type,
+                            'member_dir': member_dir,
                         })
 
                     p_msg['media_file'] = str(filepath.relative_to(self.output_dir))
+
+                    # Extract dimensions if file exists (already downloaded or will be processed)
+                    if filepath.exists():
+                        width, height = get_media_dimensions(filepath, msg_type)
+                        if width and height:
+                            p_msg['width'] = width
+                            p_msg['height'] = height
 
                 processed.append(p_msg)
             except Exception as e:
@@ -259,7 +270,7 @@ class SyncManager:
         queue: list[dict[str, Any]],
         concurrency: int = 5,
         progress_callback: Optional[Any] = None
-    ) -> None:
+    ) -> dict[Path, dict[int, tuple[Optional[int], Optional[int]]]]:
         """
         Downloads files in the queue using a semaphore for concurrency.
 
@@ -268,13 +279,18 @@ class SyncManager:
             queue: List of media items to download.
             concurrency: Max concurrent downloads.
             progress_callback: Optional callback.
+
+        Returns:
+            Dict mapping member_dir to {message_id: (width, height)} for downloaded media.
         """
         if not queue:
-            return
+            return {}
 
         sem = asyncio.Semaphore(concurrency)
         total = len(queue)
         completed = 0
+        # Group dimensions by member_dir for efficient batch updates
+        dimensions_by_dir: dict[Path, dict[int, tuple[Optional[int], Optional[int]]]] = {}
 
         async def worker(item: dict[str, Any]) -> None:
             nonlocal completed
@@ -286,6 +302,16 @@ class SyncManager:
                     item['timestamp']
                 )
                 if res:
+                    # Extract dimensions after successful download
+                    media_type = item.get('media_type', '')
+                    member_dir = item.get('member_dir')
+                    if media_type in ('picture', 'video') and member_dir:
+                        width, height = get_media_dimensions(item['path'], media_type)
+                        if width and height:
+                            if member_dir not in dimensions_by_dir:
+                                dimensions_by_dir[member_dir] = {}
+                            dimensions_by_dir[member_dir][item['message_id']] = (width, height)
+
                     completed += 1
                     if progress_callback:
                         if asyncio.iscoroutinefunction(progress_callback):
@@ -294,3 +320,40 @@ class SyncManager:
                             progress_callback(completed, total)
 
         await asyncio.gather(*[worker(item) for item in queue])
+        return dimensions_by_dir
+
+    async def update_message_dimensions(
+        self,
+        messages_file: Path,
+        dimensions: dict[int, tuple[Optional[int], Optional[int]]]
+    ) -> None:
+        """
+        Update messages.json with extracted media dimensions.
+
+        Args:
+            messages_file: Path to messages.json file.
+            dimensions: Dict mapping message_id to (width, height).
+        """
+        if not dimensions or not messages_file.exists():
+            return
+
+        try:
+            async with aiofiles.open(messages_file, encoding='utf-8') as f:
+                data = json.loads(await f.read())
+
+            updated = False
+            for msg in data.get('messages', []):
+                msg_id = msg.get('id')
+                if msg_id in dimensions:
+                    width, height = dimensions[msg_id]
+                    if width and height:
+                        msg['width'] = width
+                        msg['height'] = height
+                        updated = True
+
+            if updated:
+                async with aiofiles.open(messages_file, 'w', encoding='utf-8') as f:
+                    await f.write(json.dumps(data, ensure_ascii=False, indent=2))
+
+        except Exception as e:
+            logger.error("Failed to update message dimensions", file=str(messages_file), error=str(e))
