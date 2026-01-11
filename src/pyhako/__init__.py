@@ -1,7 +1,7 @@
 from .auth import BrowserAuth
 from .client import Client, Group
-from .credentials import get_user_data_dir, get_auth_dir
-from .exceptions import ApiError, AuthError, HakoError
+from .credentials import get_auth_dir, get_user_data_dir
+from .exceptions import ApiError, AuthError, HakoError, SessionExpiredError
 from .logging import configure_logging
 from .manager import SyncManager
 from .utils import sanitize_name
@@ -18,6 +18,8 @@ __all__ = [
     "HakoError",
     "AuthError",
     "ApiError",
+    "SessionExpiredError",
     "get_user_data_dir",
-    "get_auth_dir"
+    "get_auth_dir",
+    "configure_logging",
 ]

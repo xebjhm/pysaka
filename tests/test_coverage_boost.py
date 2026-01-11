@@ -6,6 +6,8 @@ import pytest
 from aiohttp import ClientError
 
 from pyhako import ApiError, Group
+from pyhako.auth import BrowserAuth
+from pyhako.credentials import KeyringStore, TokenManager
 
 # --- Client Coverage Boost ---
 
@@ -69,7 +71,7 @@ def test_token_manager_save_load_integration():
 
 # --- Auth Coverage Boost ---
 
-from pyhako.auth import BrowserAuth
+
 
 
 @pytest.mark.asyncio
@@ -128,7 +130,7 @@ async def test_fetch_json_network_error(client, mock_session):
 
 # --- Credentials Coverage Boost ---
 
-from pyhako.credentials import KeyringStore, TokenManager
+
 
 
 def test_token_manager_keyring_fallback():
@@ -142,19 +144,7 @@ def test_token_manager_keyring_fallback():
         assert isinstance(tm.store, KeyringStore)
         mock_set.assert_called()
 
-def test_token_manager_save_load_integration():
-    """Test high level save/load logic flows."""
-    with patch("keyring.set_password"), patch("keyring.delete_password"):
-        tm = TokenManager()
-        # Mock internal store
-        tm.store = MagicMock()
-        tm.store.load.return_value = {'access_token': 'at'}
 
-        data = tm.load_session("nogizaka46")
-        assert data["access_token"] == "at"
-
-        tm.save_session("nogizaka46", "at", "rt", {})
-        tm.store.save.assert_called()
 
 # --- Auth Coverage Boost ---
 

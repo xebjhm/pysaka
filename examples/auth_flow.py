@@ -1,5 +1,4 @@
 import asyncio
-import logging
 
 import pyhako
 from pyhako import BrowserAuth, Group

@@ -8,7 +8,7 @@ import aiohttp
 import structlog
 
 from .credentials import TokenManager
-from .exceptions import ApiError
+from .exceptions import ApiError, SessionExpiredError
 from .utils import get_media_extension
 
 logger = structlog.get_logger()
@@ -22,17 +22,20 @@ GROUP_CONFIG = {
     Group.HINATAZAKA46: {
         "api_base": "https://api.message.hinatazaka46.com/v2",
         "app_id": "jp.co.sonymusic.communication.keyakizaka 2.5",
-        "auth_url": "https://message.hinatazaka46.com/"
+        "auth_url": "https://message.hinatazaka46.com/",
+        "display_name": "日向坂46"
     },
     Group.NOGIZAKA46: {
         "api_base": "https://api.message.nogizaka46.com/v2",
         "app_id": "jp.co.sonymusic.communication.nogizaka 2.5",
-        "auth_url": "https://message.nogizaka46.com/"
+        "auth_url": "https://message.nogizaka46.com/",
+        "display_name": "乃木坂46"
     },
     Group.SAKURAZAKA46: {
         "api_base": "https://api.message.sakurazaka46.com/v2",
         "app_id": "jp.co.sonymusic.communication.sakurazaka 2.5",
-        "auth_url": "https://message.sakurazaka46.com/"
+        "auth_url": "https://message.sakurazaka46.com/",
+        "display_name": "櫻坂46"
     }
 }
 
@@ -81,7 +84,7 @@ class Client:
             try:
                 group = Group(group.lower())
             except ValueError:
-                raise ValueError(f"Invalid group: {group}. Must be one of {[g.value for g in Group]}")
+                raise ValueError(f"Invalid group: {group}. Must be one of {[g.value for g in Group]}") from None
 
         self.group = group
         self.config = GROUP_CONFIG[group]
@@ -112,19 +115,28 @@ class Client:
         self.headers = {
             "x-talk-app-id": self.app_id,
             "user-agent": self.user_agent,
-            "content-type": "application/json"
+            "content-type": "application/json",
+            "x-talk-app-platform": "web",
+            "origin": self.config["auth_url"].rstrip('/'),
+            "referer": self.config["auth_url"],
+            "accept": "application/json",
+            "accept-language": "ja,en-US;q=0.9,en;q=0.8"
         }
         if self.access_token:
             self.headers["Authorization"] = f"Bearer {self.access_token}"
 
-    async def update_token(self, new_token: str) -> None:
+    async def update_token(self, new_token: str, new_refresh_token: Optional[str] = None) -> None:
         """
         Update the instance's access token and headers.
 
         Args:
             new_token: The new Bearer token string.
+            new_refresh_token: Optional new refresh token.
         """
         self.access_token = new_token
+        if new_refresh_token:
+            self.refresh_token = new_refresh_token
+
         self.headers["Authorization"] = f"Bearer {new_token}"
         logger.debug("Access token updated.")
 
@@ -190,9 +202,12 @@ class Client:
                     return None
         except ApiError:
             raise
+        except SessionExpiredError as e:
+            logger.debug(f"Session expired during request to {endpoint}: {e}")
+            raise
         except aiohttp.ClientError as e:
             logger.error(f"Network error fetching {url}: {e}")
-            raise ApiError(f"Network error: {e}")
+            raise ApiError(f"Network error: {e}") from e
         except Exception as e:
             logger.error(f"Unexpected error fetching {url}: {e}")
             return None
@@ -210,35 +225,64 @@ class Client:
             return False
 
         url = f"{self.api_base}/update_token"
-        
-        # 1. Try refresh_token if available
+
+        # Headers for refresh: exclude Authorization, but keep Platform/Origin/Referer
+        refresh_headers = self.headers.copy()
+        refresh_headers.pop("Authorization", None)
+
+
+        # 1. Try refresh_token if available (Plan A - Unused in Web Flow, kept for future mobile support)
+        # Note: Web flow sets refresh_token=None, so this block is skipped.
         if self.refresh_token:
+            logger.debug("Attempting refresh using refresh_token...")
             try:
-                async with session.post(url, headers=self.headers, json={"refresh_token": self.refresh_token}, ssl=False) as resp:
+                async with session.post(url, headers=refresh_headers, json={"refresh_token": self.refresh_token}, ssl=False) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        new_token = data.get('access_token')
-                        if new_token:
-                            await self.update_token(new_token)
+                        new_at = data.get('access_token')
+                        if new_at:
+                            await self.update_token(new_at, data.get('refresh_token'))
                             logger.info("Token refreshed successfully via refresh_token.")
                             return True
+                    elif resp.status in (400, 401):
+                        logger.warning(f"refresh_token failed (Status {resp.status}). Falling back...")
             except Exception as e:
-                logger.warning(f"Refresh token attempt failed: {e}")
+                 logger.warning(f"Error during refresh_token attempt: {e}")
 
         # 2. Try cookies (Web Session) if available
         if self.cookies:
             try:
-                # For web sessions, we pass cookies and an empty body or specific payload
-                async with session.post(url, headers=self.headers, json={}, cookies=self.cookies, ssl=False) as resp:
+                # For web sessions, pass cookies with refresh_token:null (as browser does per HAR)
+                async with session.post(url, headers=refresh_headers, json={"refresh_token": None}, cookies=self.cookies, ssl=False) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         new_token = data.get('access_token')
                         if new_token:
                             await self.update_token(new_token)
+
+                            # CRITICAL: Capture new session cookies from response
+                            # The server rotates the session cookie on each update_token call
+                            if resp.cookies:
+                                for key, cookie in resp.cookies.items():
+                                    self.cookies[key] = cookie.value
+                                logger.debug(f"Updated session cookies from response: {list(resp.cookies.keys())}")
+
                             logger.info("Token refreshed successfully via session cookies.")
                             return True
+                    elif resp.status == 400:
+                        # Session invalidated (e.g., user logged in from another browser)
+                        body = await resp.json()
+                        if body.get('code') == 'invalid_parameter':
+                            logger.debug("Session invalidated - user may have logged in elsewhere.")
+                            raise SessionExpiredError(
+                                "Your session has been invalidated. "
+                                "This usually happens when you log in from another browser."
+                            )
+                        logger.warning(f"Cookie refresh failed: {body}")
                     else:
-                        logger.warning(f"Cookie refresh failed: Status {resp.status}, Body: {await resp.text()}")
+                        logger.warning(f"Cookie refresh failed: Status {resp.status}")
+            except SessionExpiredError:
+                raise
             except Exception as e:
                 logger.warning(f"Cookie refresh attempt failed: {e}")
 
@@ -248,18 +292,18 @@ class Client:
                 # Lazy import to avoid circular dependency
                 from .auth import BrowserAuth
                 logger.info("Attempting headless browser refresh (Plan C)...")
-                
+
                 # Check if playwright is installed by trying import, though BrowserAuth import essentially checked it
                 creds = await BrowserAuth.refresh_token_headless(self.group, self.auth_dir)
                 if creds:
                     # Update local state
                     await self.update_token(creds['access_token'])
                     self.cookies = creds.get('cookies', {})
-                    
+
                     # Persist immediately
                     if self.token_manager:
                         self.token_manager.save_session(self.group.value, self.access_token, self.refresh_token, self.cookies)
-                    
+
                     logger.info("Headless refresh successful!")
                     return True
             except Exception as e:
@@ -425,9 +469,12 @@ class Client:
         """
         raw_type = message.get('type')
         msg_type = 'text'
-        if raw_type in ['image', 'picture']: msg_type = 'picture'
-        elif raw_type in ['video', 'movie']: msg_type = 'video'
-        elif raw_type == 'voice': msg_type = 'voice'
+        if raw_type in ['image', 'picture']:
+            msg_type = 'picture'
+        elif raw_type in ['video', 'movie']:
+            msg_type = 'video'
+        elif raw_type == 'voice':
+            msg_type = 'voice'
 
         media_url = message.get('file') or message.get('thumbnail')
         if not media_url or msg_type == 'text':

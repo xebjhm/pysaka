@@ -10,16 +10,12 @@ Run with:
 
 Skip in CI by default.
 """
-import os
-import asyncio
-from pathlib import Path
 
 import pytest
 
 from pyhako import Client, Group, get_auth_dir
 from pyhako.auth import BrowserAuth
 from pyhako.credentials import TokenManager, get_user_data_dir
-
 
 # Skip all tests in this module if no auth data
 pytestmark = [
@@ -37,7 +33,7 @@ def auth_dir():
     return get_auth_dir()
 
 
-@pytest.fixture  
+@pytest.fixture
 def token_manager():
     """Get token manager for credential access."""
     return TokenManager()
@@ -66,7 +62,7 @@ class TestHeadlessRefresh:
             except Exception as e:
                 print(f"⚠️ {group.value}: {e}")
                 continue
-        
+
         pytest.skip("No group has valid auth session")
 
     @pytest.mark.asyncio
@@ -74,7 +70,7 @@ class TestHeadlessRefresh:
         """Test that Playwright chromium auto-installs if missing."""
         # This test verifies the auto-install mechanism works
         # It will only trigger if chromium is not installed
-        
+
         for group in Group:
             try:
                 result = await BrowserAuth.refresh_token_headless(
@@ -89,7 +85,7 @@ class TestHeadlessRefresh:
             except Exception as e:
                 print(f"⚠️ {group.value}: {e}")
                 continue
-        
+
         pytest.skip("No valid session to test auto-install")
 
 
@@ -100,7 +96,7 @@ class TestAPIIntegration:
     async def test_api_groups_fetch(self, token_manager):
         """Test fetching groups from real API."""
         import aiohttp
-        
+
         # Find a group with valid token
         for group in Group:
             try:
@@ -111,10 +107,10 @@ class TestAPIIntegration:
                         access_token=session_data['access_token'],
                         auth_dir=str(get_auth_dir())
                     )
-                    
+
                     async with aiohttp.ClientSession() as session:
                         groups = await client.get_groups(session)
-                        
+
                         # Verify response structure
                         assert isinstance(groups, list)
                         if groups:
@@ -125,7 +121,7 @@ class TestAPIIntegration:
             except Exception as e:
                 print(f"⚠️ {group.value}: {e}")
                 continue
-        
+
         pytest.skip("No group has valid token")
 
 
