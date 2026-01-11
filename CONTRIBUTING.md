@@ -180,11 +180,20 @@ uv run pytest tests/
 
 ### Integration Tests (Local Only)
 
-Integration tests require **prior login** with the CLI. They test real browser refresh and API calls.
+Integration tests require stored credentials. They test real browser refresh and API calls.
 
 **Prerequisites**:
-1. Login first: `pyhako-cli -s <group>` (run interactively)
-2. Verify auth_data exists: `~/.local/share/pyhako/auth_data`
+
+1. Run the login script to store credentials:
+   ```bash
+   uv run python scripts/login.py
+   # Or specify a group:
+   uv run python scripts/login.py --group sakurazaka46
+   ```
+
+2. A browser window will open - complete the login process
+
+3. Credentials are automatically stored in your system keyring
 
 **Run integration tests**:
 ```bash
@@ -196,15 +205,6 @@ uv run pytest tests/test_integration.py -m integration -v
 We use Hypothesis for property-based testing:
 ```bash
 uv run pytest tests/ --hypothesis-show-statistics
-```
-
-### CLI Build Testing (Shift-Left)
-
-Test the PyInstaller build locally before pushing to CI:
-```bash
-cd ../PyHakoCLI
-uv run python scripts/build_local.py
-uv run python scripts/test_build.py
 ```
 
 ---
