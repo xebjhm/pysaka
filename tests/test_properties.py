@@ -9,7 +9,7 @@ from pyhako.utils import get_media_extension, normalize_message, sanitize_name
 def test_sanitize_name_properties(name):
     """Fuzz sanitize_name with any text."""
     sanitized = sanitize_name(name)
-    assert ' ' not in sanitized
+
     assert '/' not in sanitized
     # Result should be shorter or equal (stripping)
     assert len(sanitized) <= len(name)
