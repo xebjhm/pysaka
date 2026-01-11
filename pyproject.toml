@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyhako"
-version = "0.1.0"
+version = "0.1.1"
 description = "Async Python client for Sakamichi Group Message API (Nogizaka46, Sakurazaka46, Hinatazaka46)"
 readme = "README.md"
 requires-python = ">=3.9"
