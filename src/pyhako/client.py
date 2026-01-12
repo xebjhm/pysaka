@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import json
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -309,6 +312,81 @@ class Client:
             except Exception as e:
                 logger.warning(f"Headless refresh failed: {e}")
 
+        return False
+
+    def get_token_expiry_seconds(self) -> Optional[int]:
+        """
+        Extract expiry time from the current access token (JWT).
+
+        Returns:
+            Seconds remaining until token expiry, or None if cannot parse.
+        """
+        if not self.access_token:
+            return None
+
+        try:
+            parts = self.access_token.split('.')
+            if len(parts) < 2:
+                return None
+
+            # JWT payload is base64url encoded
+            payload = parts[1]
+            # Add padding for base64 decode
+            payload += '=' * (4 - len(payload) % 4)
+            decoded = base64.b64decode(payload)
+            data = json.loads(decoded)
+
+            if 'exp' in data:
+                exp_timestamp = data['exp']
+                now = datetime.now(timezone.utc).timestamp()
+                return int(exp_timestamp - now)
+        except Exception:
+            pass
+
+        return None
+
+    async def refresh_if_needed(
+        self,
+        session: aiohttp.ClientSession,
+        min_seconds_remaining: int = 300
+    ) -> bool:
+        """
+        Refresh token only if it expires within min_seconds_remaining.
+
+        This implements "lazy refresh" - avoiding unnecessary API calls when
+        the token is still valid for a reasonable time.
+
+        Args:
+            session: Active aiohttp ClientSession.
+            min_seconds_remaining: Threshold in seconds. Refresh if token
+                expires within this time. Default: 300 (5 minutes).
+
+        Returns:
+            True if refresh happened, False if skipped (token still valid).
+
+        Raises:
+            SessionExpiredError: If refresh fails due to invalidated session.
+        """
+        remaining = self.get_token_expiry_seconds()
+
+        if remaining is None:
+            # Can't parse expiry, refresh to be safe
+            logger.warning("Cannot parse token expiry, refreshing conservatively")
+            return await self.refresh_access_token(session)
+
+        if remaining <= min_seconds_remaining:
+            logger.info(
+                "Token expires soon, refreshing",
+                remaining_seconds=remaining,
+                threshold_seconds=min_seconds_remaining
+            )
+            return await self.refresh_access_token(session)
+
+        logger.debug(
+            "Token still valid, skipping refresh",
+            remaining_seconds=remaining,
+            threshold_seconds=min_seconds_remaining
+        )
         return False
 
     async def get_groups(self, session: aiohttp.ClientSession, include_inactive: bool = False) -> list[dict[str, Any]]:
