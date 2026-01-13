@@ -667,3 +667,212 @@ class Client:
         if data and "products" in data:
             return data["products"]
         return []
+
+    # -------------------------------------------------------------------------
+    # New API methods discovered via HAR analysis (Official App Feature Parity)
+    # -------------------------------------------------------------------------
+
+    async def post_json(
+        self,
+        session: aiohttp.ClientSession,
+        endpoint: str,
+        data: Optional[dict[str, Any]] = None
+    ) -> Optional[dict[str, Any]]:
+        """
+        Helper method to perform JSON POST requests.
+
+        Args:
+            session: Active aiohttp ClientSession.
+            endpoint: API endpoint path (e.g. "/messages/123/favorite").
+            data: Request body as dict (can be None for empty body).
+
+        Returns:
+            JSON response as dict or None if failed.
+        """
+        url = f"{self.api_base}{endpoint}"
+        try:
+            async with session.post(url, headers=self.headers, json=data, ssl=False) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                elif resp.status == 401:
+                    logger.info(f"Unauthorized (401) at POST {endpoint}. Attempting refresh...")
+                    if await self.refresh_access_token(session):
+                        async with session.post(url, headers=self.headers, json=data, ssl=False) as resp_retry:
+                            if resp_retry.status == 200:
+                                return await resp_retry.json()
+                    return None
+                elif resp.status >= 500:
+                    raise ApiError(f"Server error {resp.status}", resp.status)
+                else:
+                    logger.warning(f"Unexpected status {resp.status} at POST {endpoint}")
+                    return None
+        except ApiError:
+            raise
+        except aiohttp.ClientError as e:
+            logger.error(f"Network error posting to {url}: {e}")
+            raise ApiError(f"Network error: {e}") from e
+
+    async def delete_json(
+        self,
+        session: aiohttp.ClientSession,
+        endpoint: str
+    ) -> bool:
+        """
+        Helper method to perform DELETE requests.
+
+        Args:
+            session: Active aiohttp ClientSession.
+            endpoint: API endpoint path.
+
+        Returns:
+            True if successful (2xx), False otherwise.
+        """
+        url = f"{self.api_base}{endpoint}"
+        try:
+            async with session.delete(url, headers=self.headers, ssl=False) as resp:
+                if resp.status in (200, 204):
+                    return True
+                elif resp.status == 401:
+                    if await self.refresh_access_token(session):
+                        async with session.delete(url, headers=self.headers, ssl=False) as resp_retry:
+                            return resp_retry.status in (200, 204)
+                    return False
+                else:
+                    logger.warning(f"DELETE {endpoint} returned {resp.status}")
+                    return False
+        except Exception as e:
+            logger.error(f"Error deleting {url}: {e}")
+            return False
+
+    async def get_letters(
+        self,
+        session: aiohttp.ClientSession,
+        group_id: int,
+        updated_from: Optional[str] = None,
+        count: int = 200
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch user's sent letters/cards to a member.
+
+        Args:
+            session: Active aiohttp ClientSession.
+            group_id: The ID of the group/member.
+            updated_from: ISO timestamp to fetch letters updated after.
+            count: Number of letters to fetch (default 200).
+
+        Returns:
+            List of letter objects.
+        """
+        params: dict[str, Any] = {"count": count}
+        if updated_from:
+            params["updated_from"] = updated_from
+
+        data = await self.fetch_json(session, f"/groups/{group_id}/letters", params)
+        if data and "letters" in data:
+            return data["letters"]
+        return []
+
+    async def get_past_messages(
+        self,
+        session: aiohttp.ClientSession,
+        group_id: int
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch historical messages (before user's subscription start date).
+
+        Note: This returns messages the user has access to but were sent
+        before their subscription began. Does NOT mark messages as read.
+
+        Args:
+            session: Active aiohttp ClientSession.
+            group_id: The ID of the group/member.
+
+        Returns:
+            List of historical message objects.
+        """
+        data = await self.fetch_json(session, f"/groups/{group_id}/past_messages")
+        if data and "messages" in data:
+            return data["messages"]
+        return []
+
+    async def get_subscription_streak(
+        self,
+        session: aiohttp.ClientSession,
+        group_id: int
+    ) -> Optional[dict[str, Any]]:
+        """
+        Fetch consecutive subscription days for a member.
+
+        Args:
+            session: Active aiohttp ClientSession.
+            group_id: The ID of the group/member.
+
+        Returns:
+            Dict with streak information or None if failed.
+        """
+        return await self.fetch_json(session, f"/groups/{group_id}/consecutive-subscription-day")
+
+    async def get_member(
+        self,
+        session: aiohttp.ClientSession,
+        member_id: int
+    ) -> Optional[dict[str, Any]]:
+        """
+        Fetch individual member details.
+
+        Args:
+            session: Active aiohttp ClientSession.
+            member_id: The ID of the member.
+
+        Returns:
+            Member details dict or None if failed.
+        """
+        return await self.fetch_json(session, f"/members/{member_id}")
+
+    async def get_account(self, session: aiohttp.ClientSession) -> Optional[dict[str, Any]]:
+        """
+        Fetch user account information.
+
+        Args:
+            session: Active aiohttp ClientSession.
+
+        Returns:
+            Account info dict or None if failed.
+        """
+        return await self.fetch_json(session, "/account")
+
+    async def add_favorite(
+        self,
+        session: aiohttp.ClientSession,
+        message_id: int
+    ) -> bool:
+        """
+        Add a message to favorites (server-side).
+
+        Args:
+            session: Active aiohttp ClientSession.
+            message_id: The ID of the message to favorite.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        result = await self.post_json(session, f"/messages/{message_id}/favorite", data=None)
+        # API returns {} on success
+        return result is not None
+
+    async def remove_favorite(
+        self,
+        session: aiohttp.ClientSession,
+        message_id: int
+    ) -> bool:
+        """
+        Remove a message from favorites (server-side).
+
+        Args:
+            session: Active aiohttp ClientSession.
+            message_id: The ID of the message to unfavorite.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        return await self.delete_json(session, f"/messages/{message_id}/favorite")
