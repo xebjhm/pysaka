@@ -9,7 +9,7 @@ import aiohttp
 import structlog
 
 from .client import GROUP_CONFIG, Client
-from .media import get_media_dimensions
+from .media import get_audio_metadata, get_media_dimensions
 from .utils import get_media_extension, normalize_message, sanitize_name
 
 logger = structlog.get_logger()
@@ -270,7 +270,7 @@ class SyncManager:
         queue: list[dict[str, Any]],
         concurrency: int = 5,
         progress_callback: Optional[Any] = None
-    ) -> dict[Path, dict[int, tuple[Optional[int], Optional[int]]]]:
+    ) -> dict[Path, dict[int, dict[str, Any]]]:
         """
         Downloads files in the queue using a semaphore for concurrency.
 
@@ -281,7 +281,8 @@ class SyncManager:
             progress_callback: Optional callback.
 
         Returns:
-            Dict mapping member_dir to {message_id: (width, height)} for downloaded media.
+            Dict mapping member_dir to {message_id: metadata_dict} for downloaded media.
+            metadata_dict contains: width, height, media_duration, is_muted (as applicable).
         """
         if not queue:
             return {}
@@ -289,8 +290,8 @@ class SyncManager:
         sem = asyncio.Semaphore(concurrency)
         total = len(queue)
         completed = 0
-        # Group dimensions by member_dir for efficient batch updates
-        dimensions_by_dir: dict[Path, dict[int, tuple[Optional[int], Optional[int]]]] = {}
+        # Group metadata by member_dir for efficient batch updates
+        metadata_by_dir: dict[Path, dict[int, dict[str, Any]]] = {}
 
         async def worker(item: dict[str, Any]) -> None:
             nonlocal completed
@@ -302,15 +303,30 @@ class SyncManager:
                     item['timestamp']
                 )
                 if res:
-                    # Extract dimensions after successful download
                     media_type = item.get('media_type', '')
                     member_dir = item.get('member_dir')
-                    if media_type in ('picture', 'video') and member_dir:
-                        width, height = get_media_dimensions(item['path'], media_type)
-                        if width and height:
-                            if member_dir not in dimensions_by_dir:
-                                dimensions_by_dir[member_dir] = {}
-                            dimensions_by_dir[member_dir][item['message_id']] = (width, height)
+                    if member_dir:
+                        metadata: dict[str, Any] = {}
+
+                        # Extract dimensions for pictures and videos
+                        if media_type in ('picture', 'video'):
+                            width, height = get_media_dimensions(item['path'], media_type)
+                            if width and height:
+                                metadata['width'] = width
+                                metadata['height'] = height
+
+                        # Extract audio metadata for videos and voice messages
+                        if media_type in ('video', 'voice'):
+                            audio_meta = get_audio_metadata(item['path'], media_type)
+                            if audio_meta.get('duration') is not None:
+                                metadata['media_duration'] = audio_meta['duration']
+                            if audio_meta.get('is_muted') is not None:
+                                metadata['is_muted'] = audio_meta['is_muted']
+
+                        if metadata:
+                            if member_dir not in metadata_by_dir:
+                                metadata_by_dir[member_dir] = {}
+                            metadata_by_dir[member_dir][item['message_id']] = metadata
 
                     completed += 1
                     if progress_callback:
@@ -320,21 +336,22 @@ class SyncManager:
                             progress_callback(completed, total)
 
         await asyncio.gather(*[worker(item) for item in queue])
-        return dimensions_by_dir
+        return metadata_by_dir
 
-    async def update_message_dimensions(
+    async def update_message_metadata(
         self,
         messages_file: Path,
-        dimensions: dict[int, tuple[Optional[int], Optional[int]]]
+        metadata: dict[int, dict[str, Any]]
     ) -> None:
         """
-        Update messages.json with extracted media dimensions.
+        Update messages.json with extracted media metadata.
 
         Args:
             messages_file: Path to messages.json file.
-            dimensions: Dict mapping message_id to (width, height).
+            metadata: Dict mapping message_id to metadata dict
+                      (may contain: width, height, media_duration, is_muted).
         """
-        if not dimensions or not messages_file.exists():
+        if not metadata or not messages_file.exists():
             return
 
         try:
@@ -344,16 +361,16 @@ class SyncManager:
             updated = False
             for msg in data.get('messages', []):
                 msg_id = msg.get('id')
-                if msg_id in dimensions:
-                    width, height = dimensions[msg_id]
-                    if width and height:
-                        msg['width'] = width
-                        msg['height'] = height
-                        updated = True
+                if msg_id in metadata:
+                    msg_metadata = metadata[msg_id]
+                    for key, value in msg_metadata.items():
+                        if value is not None:
+                            msg[key] = value
+                            updated = True
 
             if updated:
                 async with aiofiles.open(messages_file, 'w', encoding='utf-8') as f:
                     await f.write(json.dumps(data, ensure_ascii=False, indent=2))
 
         except Exception as e:
-            logger.error("Failed to update message dimensions", file=str(messages_file), error=str(e))
+            logger.error("Failed to update message metadata", file=str(messages_file), error=str(e))
