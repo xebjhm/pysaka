@@ -122,17 +122,58 @@ class BrowserAuth:
             page.on("response", handle_response)
 
             try:
-                # CRITICAL: Force clear stale state before fresh login
+                # CRITICAL: Selectively clear stale state before fresh login
                 # This prevents capturing mixed state (Valid Token + Old/Invalid Session Cookie)
                 # if the app tries to resume an expired session.
-                await context.clear_cookies()
+                # IMPROVED: Only clear service-domain cookies, preserve OAuth provider cookies
+                logger.info(
+                    "Selectively clearing browser state before login. "
+                    "Service domain cookies will be cleared, OAuth provider cookies preserved."
+                )
+
+                # Get all cookies and selectively clear only service-domain ones
+                all_cookies = await context.cookies()
+                # Domains to preserve (OAuth providers)
+                preserved_domains = [
+                    # Google OAuth
+                    'google.com', 'accounts.google.com', 'googleapis.com', '.google.com',
+                    # Apple OAuth
+                    'apple.com', 'appleid.apple.com', 'idmsa.apple.com', 'icloud.com',
+                    # LINE OAuth
+                    'line.me', 'access.line.me', 'auth.line.me', '.line.me'
+                ]
+                cookies_to_clear = []
+
+                for cookie in all_cookies:
+                    cookie_domain = cookie.get('domain', '')
+                    # Check if cookie should be preserved (OAuth provider related)
+                    should_preserve = any(preserved in cookie_domain or cookie_domain.endswith(preserved) for preserved in preserved_domains)
+
+                    if should_preserve:
+                        logger.debug(f"Preserving cookie: {cookie['name']} (domain: {cookie_domain})")
+                    else:
+                        # Clear service-domain and other non-OAuth cookies
+                        cookies_to_clear.append(cookie)
+                        logger.debug(f"Will clear cookie: {cookie['name']} (domain: {cookie_domain})")
+
+                # Clear non-OAuth cookies one by one
+                for cookie in cookies_to_clear:
+                    try:
+                        await context.clear_cookies(domain=cookie.get('domain'), name=cookie.get('name'))
+                    except Exception as cookie_err:
+                        logger.debug(f"Failed to clear cookie {cookie.get('name')}: {cookie_err}")
+
+                logger.info(f"Cleared {len(cookies_to_clear)} service cookies, preserved {len(all_cookies) - len(cookies_to_clear)} Google/OAuth cookies")
+
                 try:
                     await page.goto(target_url, wait_until="commit", timeout=5000) # Short wait to access origin
                     await page.evaluate("window.localStorage.clear(); window.sessionStorage.clear();")
-                except:
-                    pass # Ignore errors clearing storage (e.g. if page load fails)
+                    logger.debug("Browser storage cleared successfully")
+                except Exception as clear_err:
+                    logger.debug(f"Storage clear attempt (non-fatal): {clear_err}")
 
                 await page.goto(target_url, timeout=60000)
+                logger.debug(f"Navigated to auth URL: {target_url}")
             except Exception as e:
                 logger.warning(f"Navigation error (ignoring): {e}")
 
@@ -267,6 +308,12 @@ class BrowserAuth:
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
 
+                # NOTE: Do NOT clear cookies or localStorage here!
+                # The headless refresh relies on the existing browser session state
+                # (service cookies + localStorage token) to load the web app.
+                # The web app will then make API calls with the token, which we capture.
+                # Clearing state would break the session and show login page instead.
+
                 async def handle_response(response):
                     if token_future.done(): return
 
@@ -279,6 +326,11 @@ class BrowserAuth:
                             captured_data['access_token'] = token
                             captured_data['x-talk-app-id'] = headers.get('x-talk-app-id') or headers.get('X-Talk-App-ID')
                             captured_data['user-agent'] = headers.get('user-agent') or headers.get('User-Agent')
+
+                            # DEBUG: Log captured token info
+                            logger.debug(f"[DEBUG] Headless captured token prefix: {token[:20]}...")
+                            logger.debug(f"[DEBUG] Captured from URL: {response.request.url}")
+
                             if not token_future.done():
                                 token_future.set_result(True)
 
