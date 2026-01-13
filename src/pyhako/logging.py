@@ -1,14 +1,26 @@
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import structlog
 
 
-def configure_logging() -> None:
+def configure_logging(
+    log_file: str | Path | None = None,
+    log_level: int = logging.INFO,
+    console_level: int = logging.INFO,
+    file_level: int = logging.DEBUG,
+) -> None:
     """
     Configure structured logging for PyHako.
+
+    Args:
+        log_file: Optional path to log file. If provided, adds FileHandler.
+        log_level: Root logger level (default: INFO)
+        console_level: Console handler level (default: INFO)
+        file_level: File handler level (default: DEBUG)
 
     Respects HAKO_ENV environment variable:
     - 'development' (default): Colored, human-readable console output.
@@ -30,7 +42,6 @@ def configure_logging() -> None:
 
     # Structlog processors
     processors = shared_processors + [
-        # Prepare for logging stdlib
         structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
     ]
 
@@ -41,33 +52,62 @@ def configure_logging() -> None:
         cache_logger_on_first_use=True,
     )
 
-    # Configure standard logging to redirect to structlog
-    formatter = structlog.stdlib.ProcessorFormatter(
-        # These run solely on log entries that originate from stdlib logging messages.
+    # Determine renderer based on environment
+    if env == "production":
+        console_renderer = structlog.processors.JSONRenderer()
+        file_renderer = structlog.processors.JSONRenderer()
+    else:
+        console_renderer = structlog.dev.ConsoleRenderer()
+        # File gets plain text for readability in log files
+        file_renderer = structlog.dev.ConsoleRenderer(colors=False)
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+
+    # Remove existing handlers to avoid duplicates
+    for h in root_logger.handlers[:]:
+        root_logger.removeHandler(h)
+
+    # Console Handler (stdout)
+    console_formatter = structlog.stdlib.ProcessorFormatter(
         foreign_pre_chain=shared_processors,
-        # These run on all log entries.
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-             structlog.processors.JSONRenderer() if env == "production" else structlog.dev.ConsoleRenderer(),
+            console_renderer,
         ],
     )
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(console_formatter)
+    console_handler.setLevel(console_level)
+    root_logger.addHandler(console_handler)
 
-    root_logger = logging.getLogger()
+    # File Handler (optional)
+    if log_file:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Avoid adding duplicate handlers if configure_logging is called multiple times
-    if root_logger.handlers:
-        for h in root_logger.handlers:
-             root_logger.removeHandler(h)
+        file_formatter = structlog.stdlib.ProcessorFormatter(
+            foreign_pre_chain=shared_processors,
+            processors=[
+                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                file_renderer,
+            ],
+        )
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setFormatter(file_formatter)
+        file_handler.setLevel(file_level)
+        root_logger.addHandler(file_handler)
 
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(formatter)
-
-    root_logger.addHandler(handler)
-    root_logger.setLevel(logging.INFO)
-
-    # Silence noisy libraries
-    logging.getLogger("parso").setLevel(logging.WARNING)
-    logging.getLogger("asyncio").setLevel(logging.WARNING)
+    # Silence noisy libraries - these are very verbose at DEBUG level
+    noisy_loggers = [
+        "parso", "asyncio", "httpcore", "httpx",
+        "aiohttp", "urllib3", "charset_normalizer",
+        "chardet", "PIL", "aiohttp.access",
+        "urllib3.connectionpool",
+    ]
+    for lib in noisy_loggers:
+        logging.getLogger(lib).setLevel(logging.WARNING)
 
 
 def _redact_secrets(
