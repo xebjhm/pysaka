@@ -25,8 +25,9 @@ def _decompress_data(data: str) -> str:
     try:
         compressed = base64.b64decode(data.encode('ascii'))
         return zlib.decompress(compressed).decode('utf-8')
-    except Exception:
+    except Exception as e:
         # Fallback: data might not be compressed (legacy)
+        logger.debug("Data not compressed (legacy format), using raw", error=str(e))
         return data
 
 def is_windows() -> bool:
@@ -135,8 +136,9 @@ class KeyringStore(CredentialStore):
         # 1. Delete from currently active backend
         try:
             self._keyring.delete_password(SERVICE_NAME, group)
-        except Exception:
-            pass # Use silence error if not found
+            logger.debug("Deleted credentials from keyring", group=group)
+        except Exception as e:
+            logger.debug("Keyring delete failed (may not exist)", group=group, error=str(e))
 
         # 2. Explicitly try to clean up keyrings.alt (Plaintext)
         # This handles cases where user switched between Headless/GUI environments
@@ -145,9 +147,9 @@ class KeyringStore(CredentialStore):
             alt_kr = keyrings.alt.file.PlaintextKeyring()
             try:
                 alt_kr.delete_password(SERVICE_NAME, group)
-                logger.debug(f"Cleaned up residue from keyrings.alt for {group}")
-            except Exception:
-                pass
+                logger.debug("Cleaned up residue from keyrings.alt", group=group)
+            except Exception as e:
+                logger.debug("keyrings.alt delete failed (may not exist)", group=group, error=str(e))
         except ImportError:
             pass
 
@@ -178,7 +180,30 @@ class TokenManager:
         logger.info(f"Session saved for {group}")
 
     def load_session(self, group: str) -> Optional[dict[str, Any]]:
-        return self.store.load(group)
+        data = self.store.load(group)
+        if data:
+            logger.debug("Session loaded", group=group, has_token=bool(data.get('access_token')), has_refresh=bool(data.get('refresh_token')))
+        else:
+            logger.debug("No session found", group=group)
+        return data
 
     def delete_session(self, group: str) -> None:
         self.store.delete(group)
+        logger.info("Session deleted", group=group)
+
+
+# Singleton instance
+_token_manager: Optional[TokenManager] = None
+
+
+def get_token_manager() -> TokenManager:
+    """
+    Get the singleton TokenManager instance.
+
+    This avoids repeated keyring probe operations and log spam
+    when TokenManager is accessed from multiple modules.
+    """
+    global _token_manager
+    if _token_manager is None:
+        _token_manager = TokenManager()
+    return _token_manager
