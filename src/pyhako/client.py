@@ -180,12 +180,15 @@ class Client:
             ApiError: If the API returns a server error (5xx) or other unhandled status.
         """
         url = f"{self.api_base}{endpoint}"
+        logger.debug("API GET request", endpoint=endpoint, params=params)
         try:
             async with session.get(url, headers=self.headers, params=params, ssl=False) as resp:
                 if resp.status == 200:
-                    return await resp.json()
+                    data = await resp.json()
+                    logger.debug("API GET success", endpoint=endpoint, status=200)
+                    return data
                 elif resp.status == 401:
-                    logger.info(f"Unauthorized (401) at {endpoint}. Attempting automatic token refresh...")
+                    logger.warning("API returned 401 Unauthorized", endpoint=endpoint, will_retry=True)
                     if await self.refresh_access_token(session):
                         # Retry the request with new token
                         async with session.get(url, headers=self.headers, params=params, ssl=False) as resp_retry:
@@ -222,9 +225,24 @@ class Client:
         Returns:
             True if refresh was successful, False otherwise.
         """
+        # DEBUG: Log refresh attempt start with available credentials
+        has_refresh_token = bool(self.refresh_token)
+        has_cookies = bool(self.cookies)
+        has_auth_dir = bool(self.auth_dir and self.auth_dir.exists())
+        cookie_keys = list(self.cookies.keys()) if self.cookies else []
+
+        logger.info(
+            "Token refresh attempt starting",
+            has_refresh_token=has_refresh_token,
+            has_cookies=has_cookies,
+            has_auth_dir=has_auth_dir,
+            cookie_keys=cookie_keys,
+            current_token_expiry_seconds=self.get_token_expiry_seconds()
+        )
+
         # Early exit only if ALL refresh methods are unavailable
         if not self.refresh_token and not self.cookies and not (self.auth_dir and self.auth_dir.exists()):
-            logger.debug("No credentials (refresh_token/cookies/auth_dir) available for refresh.")
+            logger.warning("No credentials (refresh_token/cookies/auth_dir) available for refresh.")
             return False
 
         url = f"{self.api_base}/update_token"
@@ -254,40 +272,81 @@ class Client:
 
         # 2. Try cookies (Web Session) if available
         if self.cookies:
+            logger.debug(
+                "Attempting cookie-based refresh (Plan B)",
+                cookie_count=len(self.cookies),
+                session_cookie_present='session' in self.cookies
+            )
             try:
                 # For web sessions, pass cookies with refresh_token:null (as browser does per HAR)
                 async with session.post(url, headers=refresh_headers, json={"refresh_token": None}, cookies=self.cookies, ssl=False) as resp:
+                    # Safe cookie key extraction (handles both real responses and mocks)
+                    try:
+                        response_cookie_keys = list(resp.cookies.keys()) if resp.cookies else []
+                    except (TypeError, AttributeError):
+                        response_cookie_keys = []
+
+                    logger.info(
+                        "Cookie refresh response received",
+                        status=resp.status,
+                        response_cookies=response_cookie_keys
+                    )
+
                     if resp.status == 200:
                         data = await resp.json()
                         new_token = data.get('access_token')
                         if new_token:
+                            old_expiry = self.get_token_expiry_seconds()
                             await self.update_token(new_token)
+                            new_expiry = self.get_token_expiry_seconds()
 
                             # CRITICAL: Capture new session cookies from response
                             # The server rotates the session cookie on each update_token call
+                            cookies_updated = []
                             if resp.cookies:
                                 for key, cookie in resp.cookies.items():
                                     self.cookies[key] = cookie.value
-                                logger.debug(f"Updated session cookies from response: {list(resp.cookies.keys())}")
+                                    cookies_updated.append(key)
+                                logger.info(
+                                    "Session cookies updated from response",
+                                    updated_cookies=cookies_updated,
+                                    new_cookie_count=len(self.cookies)
+                                )
 
-                            logger.info("Token refreshed successfully via session cookies.")
+                            logger.info(
+                                "Token refreshed successfully via session cookies",
+                                old_expiry_seconds=old_expiry,
+                                new_expiry_seconds=new_expiry
+                            )
                             return True
                     elif resp.status == 400:
                         # Session invalidated (e.g., user logged in from another browser)
                         body = await resp.json()
+                        logger.warning(
+                            "Cookie refresh returned 400",
+                            response_code=body.get('code'),
+                            response_message=body.get('message')
+                        )
                         if body.get('code') == 'invalid_parameter':
-                            logger.debug("Session invalidated - user may have logged in elsewhere.")
+                            logger.error("Session invalidated - user may have logged in elsewhere or session expired on server.")
                             raise SessionExpiredError(
                                 "Your session has been invalidated. "
                                 "This usually happens when you log in from another browser."
                             )
                         logger.warning(f"Cookie refresh failed: {body}")
+                    elif resp.status == 401:
+                        logger.warning("Cookie refresh returned 401 - session cookies may be expired")
                     else:
-                        logger.warning(f"Cookie refresh failed: Status {resp.status}")
+                        body_text = await resp.text()
+                        logger.warning(
+                            "Cookie refresh failed with unexpected status",
+                            status=resp.status,
+                            response_body=body_text[:500]
+                        )
             except SessionExpiredError:
                 raise
             except Exception as e:
-                logger.warning(f"Cookie refresh attempt failed: {e}")
+                logger.error(f"Cookie refresh attempt failed with exception: {e}", exc_info=True)
 
         # 3. Try Headless Browser (Plan C)
         if self.auth_dir and self.auth_dir.exists():
@@ -369,14 +428,31 @@ class Client:
         """
         remaining = self.get_token_expiry_seconds()
 
+        # DEBUG: Always log token state check
+        logger.info(
+            "Checking if token refresh needed",
+            remaining_seconds=remaining,
+            threshold_seconds=min_seconds_remaining,
+            token_present=bool(self.access_token),
+            cookies_present=bool(self.cookies),
+            cookie_count=len(self.cookies) if self.cookies else 0
+        )
+
         if remaining is None:
             # Can't parse expiry, refresh to be safe
-            logger.warning("Cannot parse token expiry, refreshing conservatively")
+            logger.warning("Cannot parse token expiry (JWT decode failed), refreshing conservatively")
+            return await self.refresh_access_token(session)
+
+        if remaining <= 0:
+            logger.warning(
+                "Token already expired!",
+                expired_by_seconds=abs(remaining)
+            )
             return await self.refresh_access_token(session)
 
         if remaining <= min_seconds_remaining:
             logger.info(
-                "Token expires soon, refreshing",
+                "Token expires soon, triggering refresh",
                 remaining_seconds=remaining,
                 threshold_seconds=min_seconds_remaining
             )
@@ -385,6 +461,7 @@ class Client:
         logger.debug(
             "Token still valid, skipping refresh",
             remaining_seconds=remaining,
+            remaining_minutes=round(remaining / 60, 1),
             threshold_seconds=min_seconds_remaining
         )
         return False
@@ -690,12 +767,15 @@ class Client:
             JSON response as dict or None if failed.
         """
         url = f"{self.api_base}{endpoint}"
+        logger.debug("API POST request", endpoint=endpoint, data_keys=list(data.keys()) if data else None)
         try:
             async with session.post(url, headers=self.headers, json=data, ssl=False) as resp:
                 if resp.status == 200:
-                    return await resp.json()
+                    result = await resp.json()
+                    logger.debug("API POST success", endpoint=endpoint, status=200)
+                    return result
                 elif resp.status == 401:
-                    logger.info(f"Unauthorized (401) at POST {endpoint}. Attempting refresh...")
+                    logger.warning("API POST returned 401 Unauthorized", endpoint=endpoint, will_retry=True)
                     if await self.refresh_access_token(session):
                         async with session.post(url, headers=self.headers, json=data, ssl=False) as resp_retry:
                             if resp_retry.status == 200:
