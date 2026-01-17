@@ -1,5 +1,9 @@
 from .auth import BrowserAuth
 from .client import Client, Group
+from .config import (
+    MEDIA_DOWNLOAD_CONCURRENCY_INCREMENTAL,
+    MEDIA_DOWNLOAD_CONCURRENCY_INITIAL,
+)
 from .credentials import get_auth_dir, get_user_data_dir
 from .exceptions import ApiError, AuthError, HakoError, SessionExpiredError
 from .logging import configure_logging
@@ -22,4 +26,7 @@ __all__ = [
     "get_user_data_dir",
     "get_auth_dir",
     "configure_logging",
+    # Config exports
+    "MEDIA_DOWNLOAD_CONCURRENCY_INITIAL",
+    "MEDIA_DOWNLOAD_CONCURRENCY_INCREMENTAL",
 ]

@@ -6,16 +6,22 @@ import asyncio
 import re
 from collections.abc import AsyncIterator
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import structlog
 from bs4 import BeautifulSoup
 
 from .base import BaseBlogScraper, BlogEntry
+from .config import (
+    DETAIL_DELAY,
+    FULL_CONTENT_PAGE_DELAY,
+    JST,
+    MAX_PAGES_SAFETY_CAP,
+    PAGE_DELAY,
+    parse_jst_datetime,
+)
+from .hinatazaka import MemberInfo
 
 logger = structlog.get_logger(__name__)
-
-JST = ZoneInfo("Asia/Tokyo")
 
 
 class SakurazakaBlogScraper(BaseBlogScraper):
@@ -76,15 +82,205 @@ class SakurazakaBlogScraper(BaseBlogScraper):
 
             return members
 
+    async def get_members_with_thumbnails(self) -> list[MemberInfo]:
+        """Fetch blog members with their profile thumbnail URLs.
+
+        Scrapes the artist search page to get member profile images.
+        No authentication required.
+
+        Returns:
+            List of MemberInfo objects with id, name, and thumbnail_url.
+        """
+        members: list[MemberInfo] = []
+        seen_ids: set[str] = set()
+
+        url = f"{self.base_url}/s/s46/search/artist"
+        params = {"ima": "0000"}
+
+        async with self.session.get(url, params=params) as resp:
+            if resp.status != 200:
+                logger.warning(
+                    "failed_to_fetch_members_with_thumbnails",
+                    status=resp.status,
+                    url=url,
+                )
+                return []
+
+            html = await resp.text()
+            soup = BeautifulSoup(html, "html.parser")
+
+            # Find all member links in format /s/s46/artist/{ID}
+            for link in soup.select('a[href*="/s/s46/artist/"]'):
+                href = str(link.get("href", ""))
+                match = re.search(r"/s/s46/artist/(\d+)", href)
+                if not match:
+                    continue
+
+                member_id = match.group(1)
+                if member_id in seen_ids:
+                    continue
+                seen_ids.add(member_id)
+
+                # Find the image within the link
+                img = link.select_one("img")
+                thumbnail_url = ""
+                if img:
+                    src = img.get("src", "")
+                    if src:
+                        thumbnail_url = self.normalize_url(src)
+
+                # Get member name - first div contains kanji
+                name = ""
+                divs = link.select("div")
+                if divs:
+                    name = divs[0].get_text(strip=True)
+                if not name and img:
+                    # Fallback: try img alt attribute
+                    name = str(img.get("alt", ""))
+
+                if name and thumbnail_url:
+                    members.append(
+                        MemberInfo(
+                            id=member_id,
+                            name=name,
+                            thumbnail_url=thumbnail_url,
+                        )
+                    )
+
+        return members
+
+    async def get_blogs_metadata(
+        self,
+        member_id: str,
+        since_date: datetime | None = None,
+        max_pages: int = 3,
+        member_name: str | None = None,
+    ) -> AsyncIterator[BlogEntry]:
+        """Yield blog metadata (lightweight) for a specific member.
+
+        FAST: Parses list pages only, NO detail fetches required.
+        Use this for sync_blog_metadata() to quickly index blogs.
+
+        Args:
+            member_id: The member's UUID (ct parameter).
+            since_date: If provided, stop when reaching blogs before this date.
+            max_pages: Maximum pages to fetch per member.
+            member_name: If provided, only yield blogs where author matches.
+                The Sakurazaka list page sometimes includes "featured" blogs
+                from other members - this filters them out.
+
+        Yields:
+            BlogEntry objects with id, title, published_at, url, images (thumbnail only).
+            content will be empty - fetch with get_blog_detail() when needed.
+        """
+        page = 0
+        seen_ids: set[str] = set()
+
+        while page < max_pages:
+            url = f"{self.base_url}/s/s46/diary/blog/list"
+            params = {"ima": "0000", "ct": member_id, "page": page}
+
+            async with self.session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    break
+
+                html = await resp.text()
+                soup = BeautifulSoup(html, "html.parser")
+
+                # Find all blog entry boxes
+                boxes = soup.select("li.box")
+
+                if not boxes:
+                    break
+
+                found_new = False
+                for box in boxes:
+                    link = box.select_one('a[href*="/diary/detail/"]')
+                    if not link:
+                        continue
+
+                    href = link.get("href", "")
+                    match = re.search(r"/diary/detail/(\d+)", href)
+                    if not match:
+                        continue
+
+                    blog_id = match.group(1)
+                    if blog_id in seen_ids:
+                        continue
+
+                    # Extract author name from list entry
+                    # Filter out "featured" blogs that don't belong to this member
+                    author_elem = box.select_one(".name")
+                    author_name = author_elem.get_text(strip=True) if author_elem else ""
+                    if member_name and author_name:
+                        # Normalize spaces for comparison (full-width vs half-width)
+                        normalized_author = author_name.replace(" ", "").replace("\u3000", "")
+                        normalized_member = member_name.replace(" ", "").replace("\u3000", "")
+                        if normalized_author != normalized_member:
+                            # Blog belongs to different member, skip
+                            logger.debug(
+                                "skipping_featured_blog",
+                                blog_id=blog_id,
+                                expected=member_name,
+                                actual=author_name,
+                            )
+                            continue
+
+                    seen_ids.add(blog_id)
+                    found_new = True
+
+                    # Parse date from list
+                    date_elem = box.select_one(".date")
+                    date_text = date_elem.get_text(strip=True) if date_elem else ""
+                    published_at = parse_jst_datetime(date_text)
+
+                    if since_date and published_at < since_date:
+                        return
+
+                    # Parse title from list
+                    title_elem = box.select_one(".title, .ttl, h3")
+                    title = title_elem.get_text(strip=True) if title_elem else ""
+
+                    # Extract blog thumbnail from CSS background-image on span.img
+                    # Sakurazaka stores thumbnails in style="background-image: url(...)"
+                    images: list[str] = []
+                    thumbnail_span = box.select_one("span.img")
+                    if thumbnail_span:
+                        style = thumbnail_span.get("style", "")
+                        bg_match = re.search(
+                            r'background-image:\s*url\(["\']?([^"\')\s]+)["\']?\)', style
+                        )
+                        if bg_match:
+                            images.append(bg_match.group(1))
+
+                    blog_url = self.normalize_url(href)
+
+                    yield BlogEntry(
+                        id=blog_id,
+                        title=title,
+                        content="",  # Empty - fetch with get_blog_detail() when needed
+                        published_at=published_at,
+                        url=blog_url,
+                        images=images,
+                        member_id=member_id,
+                        member_name=author_name,
+                    )
+
+                if not found_new:
+                    break
+
+                page += 1
+                await asyncio.sleep(PAGE_DELAY)
+
     async def get_blogs(
         self,
         member_id: str,
         since_date: datetime | None = None,
     ) -> AsyncIterator[BlogEntry]:
-        """Yield blog entries for a specific member.
+        """Yield blog entries with FULL content for a specific member.
 
-        Scrapes the member's blog list page and yields entries.
-        Pagination is handled automatically.
+        NOTE: This is SLOW - fetches full detail for each blog.
+        For metadata sync, use get_blogs_metadata() instead.
 
         Args:
             member_id: The member's UUID (ct parameter).
@@ -96,7 +292,7 @@ class SakurazakaBlogScraper(BaseBlogScraper):
         page = 0
         seen_ids: set[str] = set()
 
-        while True:
+        while page < MAX_PAGES_SAFETY_CAP:
             url = f"{self.base_url}/s/s46/diary/blog/list"
             params = {"ima": "0000", "ct": member_id, "page": page}
 
@@ -113,14 +309,19 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                 html = await resp.text()
                 soup = BeautifulSoup(html, "html.parser")
 
-                # Find all blog entries on this page
-                blog_links = soup.select('a[href*="/diary/detail/"]')
+                # Find all blog entry boxes (specific to member's blog list)
+                # Use li.box to avoid picking up unrelated blog links
+                boxes = soup.select("li.box")
 
-                if not blog_links:
+                if not boxes:
                     break
 
                 found_new = False
-                for link in blog_links:
+                for box in boxes:
+                    link = box.select_one('a[href*="/diary/detail/"]')
+                    if not link:
+                        continue
+
                     href = link.get("href", "")
                     match = re.search(r"/diary/detail/(\d+)", href)
                     if not match:
@@ -134,21 +335,14 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                     found_new = True
 
                     # Extract preview data from list for early date filtering
-                    box = link.find_parent("li", class_="box")
-                    if box:
-                        date_elem = box.select_one(".date")
-                        date_text = date_elem.get_text(strip=True) if date_elem else ""
+                    date_elem = box.select_one(".date")
+                    date_text = date_elem.get_text(strip=True) if date_elem else ""
 
-                        # Check date filter early (from preview)
-                        if since_date and date_text:
-                            try:
-                                # Format: "2026/1/08"
-                                preview_date = datetime.strptime(date_text, "%Y/%m/%d")
-                                preview_date = preview_date.replace(tzinfo=JST)
-                                if preview_date < since_date:
-                                    return
-                            except ValueError:
-                                pass
+                    # Check date filter early (from preview)
+                    if since_date and date_text:
+                        preview_date = parse_jst_datetime(date_text)
+                        if preview_date < since_date:
+                            return
 
                     # Fetch full blog detail
                     try:
@@ -162,7 +356,7 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                         yield entry
 
                         # Polite delay between requests
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(DETAIL_DELAY)
                     except ValueError as e:
                         logger.warning(
                             "blog_detail_fetch_failed",
@@ -174,7 +368,7 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                     break
 
                 page += 1
-                await asyncio.sleep(1)  # Polite delay between pages
+                await asyncio.sleep(FULL_CONTENT_PAGE_DELAY)
 
     async def get_blog_detail(self, blog_id: str) -> BlogEntry:
         """Fetch the full content of a specific blog post.
@@ -226,17 +420,8 @@ class SakurazakaBlogScraper(BaseBlogScraper):
 
         # Extract date
         date_elem = soup.select_one(".date")
-        published_at = datetime.now(JST)
-        if date_elem:
-            date_text = date_elem.get_text(strip=True)
-            # Try various formats
-            for fmt in ["%Y/%m/%d %H:%M", "%Y/%m/%d", "%Y.%m.%d %H:%M", "%Y.%m.%d"]:
-                try:
-                    published_at = datetime.strptime(date_text, fmt)
-                    published_at = published_at.replace(tzinfo=JST)
-                    break
-                except ValueError:
-                    continue
+        date_text = date_elem.get_text(strip=True) if date_elem else ""
+        published_at = parse_jst_datetime(date_text)
 
         # Extract member name
         name_elem = soup.select_one(".name, .prof-name, .blog-name")
@@ -257,18 +442,14 @@ class SakurazakaBlogScraper(BaseBlogScraper):
         for selector in content_selectors:
             content_elem = soup.select_one(selector)
             if content_elem:
-                content = str(content_elem)
+                # Normalize URLs within the HTML content
+                content = self.normalize_html_urls(str(content_elem))
 
                 # Extract image URLs
                 for img in content_elem.select("img"):
                     src = img.get("src", "")
                     if src:
-                        # Make absolute URL
-                        if src.startswith("/"):
-                            src = f"{self.base_url}{src}"
-                        elif not src.startswith("http"):
-                            src = f"{self.base_url}/{src}"
-                        images.append(src)
+                        images.append(self.normalize_url(src))
                 break
 
         # Also check for og:image
@@ -289,3 +470,48 @@ class SakurazakaBlogScraper(BaseBlogScraper):
             member_id="",
             member_name=member_name,
         )
+
+    async def get_blog_thumbnail(self, blog_id: str) -> str | None:
+        """Fetch just the thumbnail (og:image) for a blog post.
+
+        This is a lightweight alternative to get_blog_detail() when only
+        the thumbnail is needed. Sakurazaka list pages don't show blog
+        thumbnails, so this fetches the og:image from the detail page.
+
+        Args:
+            blog_id: The unique identifier of the blog post.
+
+        Returns:
+            The og:image URL if found, None otherwise.
+        """
+        url = f"{self.base_url}/s/s46/diary/detail/{blog_id}"
+        params = {"ima": "0000", "cd": "blog"}
+
+        try:
+            async with self.session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return None
+
+                html = await resp.text()
+                soup = BeautifulSoup(html, "html.parser")
+
+                # Try og:image first (most reliable for thumbnails)
+                og_image = soup.select_one('meta[property="og:image"]')
+                if og_image:
+                    img_url = og_image.get("content", "")
+                    if img_url:
+                        return img_url
+
+                # Fallback: first image in content
+                content_elem = soup.select_one(".box-article, .blog-detail-txt, .article-body")
+                if content_elem:
+                    img = content_elem.select_one("img")
+                    if img:
+                        src = img.get("src", "")
+                        if src:
+                            return self.normalize_url(src)
+
+                return None
+        except Exception as e:
+            logger.warning("get_blog_thumbnail_failed", blog_id=blog_id, error=str(e))
+            return None

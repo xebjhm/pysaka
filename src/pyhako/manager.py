@@ -9,6 +9,10 @@ import aiohttp
 import structlog
 
 from .client import GROUP_CONFIG, Client
+from .config import (
+    MEDIA_DOWNLOAD_CONCURRENCY_INCREMENTAL,
+    MEDIA_DOWNLOAD_CONCURRENCY_INITIAL,
+)
 from .media import get_audio_metadata, get_media_dimensions
 from .utils import get_media_extension, normalize_message, sanitize_name
 
@@ -257,6 +261,12 @@ class SyncManager:
                         if width and height:
                             p_msg['width'] = width
                             p_msg['height'] = height
+
+                # Skip empty text messages (no content and no media)
+                # These are often system/metadata entries from subscription
+                if msg_type == 'text' and not p_msg.get('content') and not media_url:
+                    logger.debug("Skipping empty text message", message_id=msg.get('id'))
+                    continue
 
                 processed.append(p_msg)
             except Exception as e:
