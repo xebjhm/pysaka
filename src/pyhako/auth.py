@@ -122,55 +122,39 @@ class BrowserAuth:
             page.on("response", handle_response)
 
             try:
-                # CRITICAL: Selectively clear stale state before fresh login
-                # This prevents capturing mixed state (Valid Token + Old/Invalid Session Cookie)
-                # if the app tries to resume an expired session.
-                # IMPROVED: Only clear service-domain cookies, preserve OAuth provider cookies
-                logger.info(
-                    "Selectively clearing browser state before login. "
-                    "Service domain cookies will be cleared, OAuth provider cookies preserved."
-                )
-
-                # Get all cookies and selectively clear only service-domain ones
-                all_cookies = await context.cookies()
-                # Domains to preserve (OAuth providers)
-                preserved_domains = [
-                    # Google OAuth
-                    'google.com', 'accounts.google.com', 'googleapis.com', '.google.com',
-                    # Apple OAuth
-                    'apple.com', 'appleid.apple.com', 'idmsa.apple.com', 'icloud.com',
-                    # LINE OAuth
-                    'line.me', 'access.line.me', 'auth.line.me', '.line.me'
-                ]
-                cookies_to_clear = []
-
-                for cookie in all_cookies:
-                    cookie_domain = cookie.get('domain', '')
-                    # Check if cookie should be preserved (OAuth provider related)
-                    should_preserve = any(preserved in cookie_domain or cookie_domain.endswith(preserved) for preserved in preserved_domains)
-
-                    if should_preserve:
-                        logger.debug(f"Preserving cookie: {cookie['name']} (domain: {cookie_domain})")
-                    else:
-                        # Clear service-domain and other non-OAuth cookies
-                        cookies_to_clear.append(cookie)
-                        logger.debug(f"Will clear cookie: {cookie['name']} (domain: {cookie_domain})")
-
-                # Clear non-OAuth cookies one by one
-                for cookie in cookies_to_clear:
-                    try:
-                        await context.clear_cookies(domain=cookie.get('domain'), name=cookie.get('name'))
-                    except Exception as cookie_err:
-                        logger.debug(f"Failed to clear cookie {cookie.get('name')}: {cookie_err}")
-
-                logger.info(f"Cleared {len(cookies_to_clear)} service cookies, preserved {len(all_cookies) - len(cookies_to_clear)} Google/OAuth cookies")
+                # DESIGN DECISION: Trust the persistent browser context for OAuth session management.
+                #
+                # Previous implementation tried to selectively clear cookies, but this caused issues:
+                # - Google cookies may be set on regional domains (e.g., .google.com.tw)
+                # - Selective clearing can miss edge cases and break OAuth session persistence
+                # - OAuth providers (Google/Apple/LINE) manage their own session state
+                #
+                # Industry best practice: Don't interfere with OAuth provider cookies.
+                # The persistent context (user_data_dir) preserves all browser state including:
+                # - OAuth session cookies (Google SID, HSID, Apple auth, LINE session)
+                # - Account chooser state (allows "select account" instead of re-login)
+                #
+                # We only clear the SERVICE domain's localStorage/sessionStorage to ensure
+                # the web app starts fresh without stale application state.
 
                 try:
-                    await page.goto(target_url, wait_until="commit", timeout=5000) # Short wait to access origin
+                    await page.goto(target_url, wait_until="commit", timeout=5000)
                     await page.evaluate("window.localStorage.clear(); window.sessionStorage.clear();")
-                    logger.debug("Browser storage cleared successfully")
+                    logger.debug("Service domain localStorage/sessionStorage cleared")
                 except Exception as clear_err:
                     logger.debug(f"Storage clear attempt (non-fatal): {clear_err}")
+
+                # Pre-warm Google's session by visiting accounts.google.com.
+                # This ensures Google cookies are established on the correct domain
+                # (accounts.google.com) before the OAuth redirect. Without this,
+                # users with regional Google sessions (e.g., .google.com.tw) may see
+                # "Signed out" during OAuth because accounts.google.com lacks their cookies.
+                try:
+                    logger.debug("Pre-warming Google OAuth session...")
+                    await page.goto("https://accounts.google.com/", wait_until="domcontentloaded", timeout=10000)
+                    await asyncio.sleep(0.5)  # Brief pause to let cookies sync
+                except Exception as warmup_err:
+                    logger.debug(f"Google session warmup (non-fatal): {warmup_err}")
 
                 await page.goto(target_url, timeout=60000)
                 logger.debug(f"Navigated to auth URL: {target_url}")
