@@ -8,7 +8,7 @@ import aiofiles
 import aiohttp
 import structlog
 
-from .client import GROUP_CONFIG, Client
+from .client import Client
 from .config import (
     MEDIA_DOWNLOAD_CONCURRENCY_INCREMENTAL,
     MEDIA_DOWNLOAD_CONCURRENCY_INITIAL,
@@ -118,8 +118,9 @@ class SyncManager:
         gname = sanitize_name(group['name'])
         mname = sanitize_name(member['name'])
 
-        service_name = GROUP_CONFIG[self.client.group].get("display_name", self.client.group.value)
-        group_dir = self.output_dir / service_name / "messages" / f"{gid} {gname}"
+        # output_dir is already service-specific (e.g., output/日向坂46/)
+        # so we only need to add messages/ and the group directory
+        group_dir = self.output_dir / "messages" / f"{gid} {gname}"
         member_dir = group_dir / f"{mid} {mname}"
         member_dir.mkdir(parents=True, exist_ok=True)
         for t in ['picture', 'video', 'voice']:

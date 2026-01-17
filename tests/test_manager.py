@@ -80,9 +80,8 @@ async def test_sync_member_flow(sync_manager):
     assert str(media_queue[0]['path']).endswith('.jpg')
 
     # Check messages.json content
-    # Updated logic: Service/messages/GID GName/MID MName
-    # Group.NOGIZAKA46 display_name is "乃木坂46" (assuming config is standard)
-    member_dir = sync_manager.output_dir / "乃木坂46" / "messages" / "1 Grp" / "10 Mem"
+    # output_dir is already service-specific, so path is: messages/GID GName/MID MName
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
     json_path = member_dir / "messages.json"
     assert json_path.exists()
 
