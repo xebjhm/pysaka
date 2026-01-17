@@ -7,16 +7,20 @@ import json
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import structlog
 from bs4 import BeautifulSoup
 
 from .base import BaseBlogScraper, BlogEntry
+from .config import (
+    FULL_CONTENT_PAGE_DELAY,
+    JST,
+    MAX_PAGES_SAFETY_CAP,
+    PAGE_DELAY,
+    parse_jst_datetime,
+)
 
 logger = structlog.get_logger(__name__)
-
-JST = ZoneInfo("Asia/Tokyo")
 
 
 def parse_jsonp(text: str, callback: str = "res") -> dict[str, Any]:
@@ -96,12 +100,99 @@ class NogizakaBlogScraper(BaseBlogScraper):
                 )
                 return {}
 
+    async def get_blogs_metadata(
+        self,
+        member_id: str,
+        since_date: datetime | None = None,
+        max_pages: int = 3,
+    ) -> AsyncIterator[BlogEntry]:
+        """Yield blog metadata (lightweight) for a specific member.
+
+        FAST: Uses JSON API, only extracts basic metadata.
+        Skips heavy HTML parsing of content for images.
+
+        Args:
+            member_id: The member's code (ct parameter).
+            since_date: If provided, stop when reaching blogs before this date.
+            max_pages: Maximum pages to fetch per member.
+
+        Yields:
+            BlogEntry objects with metadata only.
+        """
+        offset = 0
+        page_size = 32
+        seen_ids: set[str] = set()
+        page_count = 0
+
+        while page_count < max_pages:
+            url = f"{self.base_url}/s/n46/api/list/blog"
+            params = {
+                "ct": member_id,
+                "rw": page_size,
+                "st": offset,
+                "callback": "res",
+            }
+
+            async with self.session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    break
+
+                text = await resp.text()
+                try:
+                    data = parse_jsonp(text)
+                except (ValueError, json.JSONDecodeError):
+                    break
+
+                blogs = data.get("data", [])
+                if not blogs:
+                    break
+
+                found_new = False
+                for blog in blogs:
+                    blog_id = blog.get("code", "")
+                    if not blog_id or blog_id in seen_ids:
+                        continue
+
+                    seen_ids.add(blog_id)
+                    found_new = True
+
+                    # Parse date
+                    date_str = blog.get("date", "")
+                    published_at = parse_jst_datetime(date_str)
+
+                    if since_date and published_at < since_date:
+                        return
+
+                    # Use main image as thumbnail - skip content image parsing
+                    images: list[str] = []
+                    main_img = blog.get("img", "")
+                    if main_img:
+                        images.append(main_img)
+
+                    yield BlogEntry(
+                        id=blog_id,
+                        title=blog.get("title", ""),
+                        content="",  # Empty for metadata-only
+                        published_at=published_at,
+                        url=blog.get("link", ""),
+                        images=images,
+                        member_id=blog.get("arti_code", ""),
+                        member_name=blog.get("name", ""),
+                    )
+
+                if not found_new or len(blogs) < page_size:
+                    break
+
+                offset += page_size
+                page_count += 1
+                await asyncio.sleep(PAGE_DELAY)
+
     async def get_blogs(
         self,
         member_id: str,
         since_date: datetime | None = None,
     ) -> AsyncIterator[BlogEntry]:
-        """Yield blog entries for a specific member.
+        """Yield blog entries with FULL content for a specific member.
 
         Uses the JSON API which returns full blog content.
         Pagination is handled automatically.
@@ -116,8 +207,9 @@ class NogizakaBlogScraper(BaseBlogScraper):
         offset = 0
         page_size = 32
         seen_ids: set[str] = set()
+        page_count = 0
 
-        while True:
+        while page_count < MAX_PAGES_SAFETY_CAP:
             url = f"{self.base_url}/s/n46/api/list/blog"
             params = {
                 "ct": member_id,
@@ -179,7 +271,8 @@ class NogizakaBlogScraper(BaseBlogScraper):
                     break
 
                 offset += page_size
-                await asyncio.sleep(1)  # Polite delay between pages
+                page_count += 1
+                await asyncio.sleep(FULL_CONTENT_PAGE_DELAY)
 
     async def get_blog_detail(self, blog_id: str) -> BlogEntry:
         """Fetch the full content of a specific blog post.
@@ -225,17 +318,7 @@ class NogizakaBlogScraper(BaseBlogScraper):
 
         # Parse date: "2026/01/08 20:17:04"
         date_str = blog.get("date", "")
-        published_at = datetime.now(JST)
-        if date_str:
-            try:
-                published_at = datetime.strptime(date_str, "%Y/%m/%d %H:%M:%S")
-                published_at = published_at.replace(tzinfo=JST)
-            except ValueError:
-                logger.warning(
-                    "failed_to_parse_date",
-                    date_str=date_str,
-                    blog_id=blog_id,
-                )
+        published_at = parse_jst_datetime(date_str)
 
         # Extract images from content
         images: list[str] = []
@@ -243,12 +326,7 @@ class NogizakaBlogScraper(BaseBlogScraper):
         for img in soup.select("img"):
             src = img.get("src", "")
             if src:
-                # Make absolute URL
-                if src.startswith("/"):
-                    src = f"{self.base_url}{src}"
-                elif not src.startswith("http"):
-                    src = f"{self.base_url}/{src}"
-                images.append(src)
+                images.append(self.normalize_url(src))
 
         # Also add the main image if present
         main_img = blog.get("img", "")

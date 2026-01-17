@@ -56,6 +56,53 @@ class BaseBlogScraper(ABC):
         """
         self.session = session
 
+    def normalize_url(self, url: str) -> str:
+        """Normalize a URL to be absolute.
+
+        Handles relative URLs, protocol-relative URLs, and absolute URLs.
+
+        Args:
+            url: The URL to normalize.
+
+        Returns:
+            Absolute URL string.
+        """
+        if not url:
+            return ""
+        if url.startswith("//"):
+            return f"https:{url}"
+        if url.startswith("/"):
+            return f"{self.base_url}{url}"
+        if not url.startswith("http"):
+            return f"{self.base_url}/{url}"
+        return url
+
+    def normalize_html_urls(self, html: str) -> str:
+        """Normalize all URLs within HTML content to be absolute.
+
+        Handles src and href attributes that contain relative URLs.
+        This ensures images and links work when rendered outside the
+        original site context.
+
+        Args:
+            html: HTML content string.
+
+        Returns:
+            HTML with all URLs normalized to absolute URLs.
+        """
+        import re
+
+        def replace_url(match: re.Match) -> str:
+            attr = match.group(1)  # 'src' or 'href'
+            quote = match.group(2)  # '"' or "'"
+            url = match.group(3)
+            normalized = self.normalize_url(url)
+            return f'{attr}={quote}{normalized}{quote}'
+
+        # Match src="..." or href="..." with either double or single quotes
+        pattern = r'(src|href)=(["\'])([^"\']+)\2'
+        return re.sub(pattern, replace_url, html)
+
     @abstractmethod
     async def get_members(self) -> dict[str, str]:
         """Fetch available blog members from the official site.
@@ -66,15 +113,40 @@ class BaseBlogScraper(ABC):
         pass
 
     @abstractmethod
+    def get_blogs_metadata(
+        self,
+        member_id: str,
+        since_date: datetime | None = None,
+        max_pages: int = 3,
+        member_name: str | None = None,
+    ) -> AsyncIterator[BlogEntry]:
+        """Yield blog metadata (lightweight) for a specific member.
+
+        FAST: Parses list pages only, NO detail fetches.
+        Use for sync_blog_metadata() to quickly index blogs.
+
+        Args:
+            member_id: The ID of the member whose blogs to fetch.
+            since_date: If provided, only yield blogs published after this date.
+            max_pages: Maximum pages to fetch per member.
+            member_name: If provided, filter to only blogs by this member.
+                Some sites include "featured" blogs from other members.
+
+        Yields:
+            BlogEntry objects with metadata only (content is empty).
+        """
+        pass
+
+    @abstractmethod
     def get_blogs(
         self,
         member_id: str,
         since_date: datetime | None = None,
     ) -> AsyncIterator[BlogEntry]:
-        """Yield blog entries for a specific member.
+        """Yield blog entries with FULL content for a specific member.
 
-        This is an async generator that yields BlogEntry objects.
-        It handles pagination internally and can filter by date.
+        NOTE: This is SLOW - fetches full detail for each blog.
+        For metadata sync, use get_blogs_metadata() instead.
 
         Args:
             member_id: The ID of the member whose blogs to fetch.
@@ -102,3 +174,22 @@ class BaseBlogScraper(ABC):
             ValueError: If the blog post is not found.
         """
         pass
+
+    async def get_blog_thumbnail(self, blog_id: str) -> str | None:
+        """Fetch just the thumbnail URL for a blog post.
+
+        This is a lightweight alternative to get_blog_detail() when only
+        the thumbnail is needed. Default implementation fetches full detail
+        and extracts the first image. Subclasses can override for efficiency.
+
+        Args:
+            blog_id: The unique identifier of the blog post.
+
+        Returns:
+            The thumbnail URL if found, None otherwise.
+        """
+        try:
+            entry = await self.get_blog_detail(blog_id)
+            return entry.images[0] if entry.images else None
+        except Exception:
+            return None

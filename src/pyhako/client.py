@@ -549,6 +549,21 @@ class Client:
                 break
 
             messages = data.get('messages', [])
+
+            # DEBUG: Log suspicious messages with low IDs or missing content
+            for m in messages:
+                msg_id = m.get('id', 0)
+                if msg_id < 100000:  # Suspicious low ID
+                    logger.warning(
+                        "API returned suspicious low-ID message",
+                        message_id=msg_id,
+                        member_id=m.get('member_id'),
+                        group_id=group_id,
+                        type=m.get('type'),
+                        has_text=bool(m.get('text')),
+                        published_at=m.get('published_at'),
+                        raw_keys=list(m.keys())
+                    )
             if not messages:
                 break
 
