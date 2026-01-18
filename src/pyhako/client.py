@@ -525,10 +525,17 @@ class Client:
 
         Returns:
             List of message objects sorted by ID ascending.
+
+        Note:
+            Messages are returned by API sorted by published_at DESC, NOT id DESC.
+            Message IDs don't correlate strictly with timestamps - a message can have
+            a lower ID but later timestamp. We collect all messages and filter by ID
+            at the end, using timestamp-based pagination stopping.
         """
         all_messages: dict[int, dict[str, Any]] = {}
         page = 0
         current_continuation = None
+        since_timestamp: Optional[str] = None
 
         while True:
             params: dict[str, Any] = {
@@ -567,15 +574,17 @@ class Client:
             if not messages:
                 break
 
-            # Add to collection
-            reached_since_id = False
+            # Collect ALL messages first, filter by since_id later
+            # This is necessary because messages are ordered by published_at, not id
+            found_since_id = False
             for m in messages:
                 msg_id = m['id']
-                if since_id and msg_id <= since_id:
-                    reached_since_id = True
-                    break
-
                 all_messages[msg_id] = m
+
+                # Track the timestamp of since_id message when we find it
+                if since_id and msg_id == since_id:
+                    since_timestamp = m.get('published_at')
+                    found_since_id = True
 
             if progress_callback and messages:
                 oldest_in_batch = messages[-1].get('published_at')
@@ -584,8 +593,18 @@ class Client:
                 else:
                     progress_callback(oldest_in_batch, len(all_messages))
 
-            if reached_since_id:
+            # Stop conditions:
+            # 1. We found the since_id message in this batch
+            # 2. OR the oldest message in this batch has timestamp <= since_timestamp
+            #    (meaning we've gone past the point where new messages could exist)
+            if found_since_id:
                 break
+
+            # If we have a since_timestamp and oldest message is older, we can stop
+            if since_timestamp and messages:
+                oldest_timestamp = messages[-1].get('published_at', '')
+                if oldest_timestamp and oldest_timestamp <= since_timestamp:
+                    break
 
             current_continuation = data.get('continuation')
             if not current_continuation or current_continuation == params.get("continuation"):
@@ -593,6 +612,10 @@ class Client:
 
             page += 1
             await asyncio.sleep(0.5)
+
+        # Filter to only messages with id > since_id
+        if since_id:
+            all_messages = {k: v for k, v in all_messages.items() if k > since_id}
 
         return sorted(all_messages.values(), key=lambda x: x['id'])
 
