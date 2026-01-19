@@ -15,7 +15,6 @@ from .base import BaseBlogScraper, BlogEntry
 from .config import (
     DETAIL_DELAY,
     FULL_CONTENT_PAGE_DELAY,
-    JST,
     MAX_PAGES_SAFETY_CAP,
     PAGE_DELAY,
     parse_jst_datetime,
@@ -429,11 +428,12 @@ class HinatazakaBlogScraper(BaseBlogScraper):
                 page += 1
                 await asyncio.sleep(FULL_CONTENT_PAGE_DELAY)
 
-    async def get_blog_detail(self, blog_id: str) -> BlogEntry:
+    async def get_blog_detail(self, blog_id: str, member_id: str | None = None) -> BlogEntry:
         """Fetch the full content of a specific blog post.
 
         Args:
             blog_id: The unique identifier of the blog post.
+            member_id: Optional member ID (unused for Hinatazaka - direct URL access).
 
         Returns:
             A BlogEntry with full content.
@@ -441,6 +441,8 @@ class HinatazakaBlogScraper(BaseBlogScraper):
         Raises:
             ValueError: If the blog post cannot be parsed.
         """
+        # member_id is unused - Hinatazaka has direct detail URLs
+        _ = member_id
         url = f"{self.base_url}/s/official/diary/detail/{blog_id}"
         params = {"ima": "0000", "cd": "member"}
 

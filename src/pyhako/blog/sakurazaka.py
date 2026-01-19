@@ -14,7 +14,6 @@ from .base import BaseBlogScraper, BlogEntry
 from .config import (
     DETAIL_DELAY,
     FULL_CONTENT_PAGE_DELAY,
-    JST,
     MAX_PAGES_SAFETY_CAP,
     PAGE_DELAY,
     parse_jst_datetime,
@@ -251,7 +250,7 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                             r'background-image:\s*url\(["\']?([^"\')\s]+)["\']?\)', style
                         )
                         if bg_match:
-                            images.append(bg_match.group(1))
+                            images.append(self.normalize_url(bg_match.group(1)))
 
                     blog_url = self.normalize_url(href)
 
@@ -370,11 +369,12 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                 page += 1
                 await asyncio.sleep(FULL_CONTENT_PAGE_DELAY)
 
-    async def get_blog_detail(self, blog_id: str) -> BlogEntry:
+    async def get_blog_detail(self, blog_id: str, member_id: str | None = None) -> BlogEntry:
         """Fetch the full content of a specific blog post.
 
         Args:
             blog_id: The unique identifier of the blog post.
+            member_id: Optional member ID (unused for Sakurazaka - direct URL access).
 
         Returns:
             A BlogEntry with full content.
@@ -382,6 +382,8 @@ class SakurazakaBlogScraper(BaseBlogScraper):
         Raises:
             ValueError: If the blog post cannot be parsed.
         """
+        # member_id is unused - Sakurazaka has direct detail URLs
+        _ = member_id
         url = f"{self.base_url}/s/s46/diary/detail/{blog_id}"
         params = {"ima": "0000", "cd": "blog"}
 
@@ -458,7 +460,7 @@ class SakurazakaBlogScraper(BaseBlogScraper):
             if og_image:
                 img_url = og_image.get("content", "")
                 if img_url:
-                    images.append(img_url)
+                    images.append(self.normalize_url(img_url))
 
         return BlogEntry(
             id=blog_id,
@@ -500,7 +502,7 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                 if og_image:
                     img_url = og_image.get("content", "")
                     if img_url:
-                        return img_url
+                        return self.normalize_url(img_url)
 
                 # Fallback: first image in content
                 content_elem = soup.select_one(".box-article, .blog-detail-txt, .article-body")

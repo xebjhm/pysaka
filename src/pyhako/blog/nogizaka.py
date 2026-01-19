@@ -12,13 +12,13 @@ import structlog
 from bs4 import BeautifulSoup
 
 from .base import BaseBlogScraper, BlogEntry
-from .hinatazaka import MemberInfo
 from .config import (
     FULL_CONTENT_PAGE_DELAY,
     MAX_PAGES_SAFETY_CAP,
     PAGE_DELAY,
     parse_jst_datetime,
 )
+from .hinatazaka import MemberInfo
 
 logger = structlog.get_logger(__name__)
 
@@ -220,7 +220,7 @@ class NogizakaBlogScraper(BaseBlogScraper):
                     images: list[str] = []
                     main_img = blog.get("img", "")
                     if main_img:
-                        images.append(main_img)
+                        images.append(self.normalize_url(main_img))
 
                     yield BlogEntry(
                         id=blog_id,
@@ -327,7 +327,7 @@ class NogizakaBlogScraper(BaseBlogScraper):
                 page_count += 1
                 await asyncio.sleep(FULL_CONTENT_PAGE_DELAY)
 
-    async def get_blog_detail(self, blog_id: str) -> BlogEntry:
+    async def get_blog_detail(self, blog_id: str, member_id: str | None = None) -> BlogEntry:
         """Fetch the full content of a specific blog post.
 
         For Nogizaka, the list API already returns full content.
@@ -335,6 +335,8 @@ class NogizakaBlogScraper(BaseBlogScraper):
 
         Args:
             blog_id: The unique identifier of the blog post (code).
+            member_id: Optional member code (ct parameter) to narrow the search.
+                Providing this significantly speeds up lookups for old blogs.
 
         Returns:
             A BlogEntry with full content.
@@ -344,18 +346,21 @@ class NogizakaBlogScraper(BaseBlogScraper):
         """
         # The Nogizaka API returns full content in list responses.
         # We search through pages to find the blog by ID.
-        # Most requests will be for recent blogs, so start from the beginning.
+        # If member_id is provided, filter by ct parameter for faster lookup.
         offset = 0
         page_size = 32
         max_pages = MAX_PAGES_SAFETY_CAP
 
         for _ in range(max_pages):
             url = f"{self.base_url}/s/n46/api/list/blog"
-            params = {
+            params: dict[str, str | int] = {
                 "rw": page_size,
                 "st": offset,
                 "callback": "res",
             }
+            # Filter by member if provided - significantly speeds up old blog lookups
+            if member_id:
+                params["ct"] = member_id
 
             async with self.session.get(url, params=params) as resp:
                 if resp.status != 200:
