@@ -144,18 +144,6 @@ class BrowserAuth:
                 except Exception as clear_err:
                     logger.debug(f"Storage clear attempt (non-fatal): {clear_err}")
 
-                # Pre-warm Google's session by visiting accounts.google.com.
-                # This ensures Google cookies are established on the correct domain
-                # (accounts.google.com) before the OAuth redirect. Without this,
-                # users with regional Google sessions (e.g., .google.com.tw) may see
-                # "Signed out" during OAuth because accounts.google.com lacks their cookies.
-                try:
-                    logger.debug("Pre-warming Google OAuth session...")
-                    await page.goto("https://accounts.google.com/", wait_until="domcontentloaded", timeout=10000)
-                    await asyncio.sleep(0.5)  # Brief pause to let cookies sync
-                except Exception as warmup_err:
-                    logger.debug(f"Google session warmup (non-fatal): {warmup_err}")
-
                 await page.goto(target_url, timeout=60000)
                 logger.debug(f"Navigated to auth URL: {target_url}")
             except Exception as e:
