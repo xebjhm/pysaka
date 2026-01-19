@@ -1,19 +1,17 @@
 """Extended tests for pyhako.credentials module to improve coverage."""
 
-import platform
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pyhako.credentials import (
+    KeyringStore,
+    TokenManager,
     _compress_data,
     _decompress_data,
     get_auth_dir,
     get_user_data_dir,
     is_windows,
-    KeyringStore,
-    TokenManager,
 )
 from pyhako.exceptions import HakoError
 

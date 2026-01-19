@@ -311,9 +311,11 @@ class BrowserAuth:
                             captured_data['x-talk-app-id'] = headers.get('x-talk-app-id') or headers.get('X-Talk-App-ID')
                             captured_data['user-agent'] = headers.get('user-agent') or headers.get('User-Agent')
 
-                            # DEBUG: Log captured token info
-                            logger.debug(f"[DEBUG] Headless captured token prefix: {token[:20]}...")
-                            logger.debug(f"[DEBUG] Captured from URL: {response.request.url}")
+                            logger.debug(
+                                "Headless refresh captured token",
+                                token_prefix=token[:20],
+                                capture_url=str(response.request.url),
+                            )
 
                             if not token_future.done():
                                 token_future.set_result(True)

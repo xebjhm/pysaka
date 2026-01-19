@@ -9,10 +9,6 @@ import aiohttp
 import structlog
 
 from .client import Client
-from .config import (
-    MEDIA_DOWNLOAD_CONCURRENCY_INCREMENTAL,
-    MEDIA_DOWNLOAD_CONCURRENCY_INITIAL,
-)
 from .media import get_audio_metadata, get_media_dimensions
 from .utils import get_media_extension, normalize_message, sanitize_name
 

@@ -1,10 +1,7 @@
 """Tests for media dimension extraction module."""
 
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from pyhako.media import get_image_dimensions, get_media_dimensions, get_video_dimensions
 
@@ -88,6 +85,7 @@ class TestGetVideoDimensions:
         with patch.dict("sys.modules", {"pymediainfo": MagicMock(MediaInfo=mock_mediainfo_class)}):
             # Re-import to pick up the mock
             import importlib
+
             import pyhako.media
             importlib.reload(pyhako.media)
 
@@ -109,6 +107,7 @@ class TestGetVideoDimensions:
 
         with patch.dict("sys.modules", {"pymediainfo": MagicMock(MediaInfo=mock_mediainfo_class)}):
             import importlib
+
             import pyhako.media
             importlib.reload(pyhako.media)
 
@@ -124,6 +123,7 @@ class TestGetVideoDimensions:
 
         with patch.dict("sys.modules", {"pymediainfo": MagicMock(MediaInfo=mock_mediainfo_class)}):
             import importlib
+
             import pyhako.media
             importlib.reload(pyhako.media)
 
@@ -173,6 +173,7 @@ class TestGetMediaDimensions:
 
         with patch.dict("sys.modules", {"pymediainfo": MagicMock(MediaInfo=mock_mediainfo_class)}):
             import importlib
+
             import pyhako.media
             importlib.reload(pyhako.media)
 

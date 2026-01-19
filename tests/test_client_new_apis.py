@@ -1,8 +1,9 @@
 """Tests for new API methods added for official app feature parity."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
 import aiohttp
+import pytest
 
 from pyhako import ApiError, Client, Group
 

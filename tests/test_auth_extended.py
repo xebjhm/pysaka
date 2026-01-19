@@ -1,7 +1,6 @@
 """Extended tests for pyhako.auth module to improve coverage."""
 
 import asyncio
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
