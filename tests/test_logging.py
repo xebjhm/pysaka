@@ -2,13 +2,9 @@
 
 import logging
 import os
-from io import StringIO
 from unittest.mock import patch
 
-import pytest
-import structlog
-
-from pyhako.logging import configure_logging, _redact_secrets
+from pyhako.logging import _redact_secrets, configure_logging
 
 
 class TestConfigureLogging:

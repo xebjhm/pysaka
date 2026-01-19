@@ -15,7 +15,7 @@ def mock_client():
     client.get_messages = AsyncMock()
     client.download_file = AsyncMock()
     # Set a valid group for GROUP_CONFIG lookup
-    client.group = Group.NOGIZAKA46 
+    client.group = Group.NOGIZAKA46
     return client
 
 @pytest.fixture
