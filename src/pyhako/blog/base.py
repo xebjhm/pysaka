@@ -158,7 +158,7 @@ class BaseBlogScraper(ABC):
         pass
 
     @abstractmethod
-    async def get_blog_detail(self, blog_id: str) -> BlogEntry:
+    async def get_blog_detail(self, blog_id: str, member_id: str | None = None) -> BlogEntry:
         """Fetch the full content of a specific blog post.
 
         Some APIs return truncated content in list views. This method
@@ -166,6 +166,9 @@ class BaseBlogScraper(ABC):
 
         Args:
             blog_id: The unique identifier of the blog post.
+            member_id: Optional member ID to narrow the search. Some scrapers
+                (like Nogizaka) search through all blogs which is slow.
+                Providing member_id significantly speeds up the lookup.
 
         Returns:
             A BlogEntry with full content.
