@@ -1,7 +1,4 @@
 import asyncio
-import base64
-import json
-from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -12,7 +9,7 @@ import structlog
 
 from .credentials import TokenManager
 from .exceptions import ApiError, SessionExpiredError
-from .utils import get_media_extension
+from .utils import get_jwt_remaining_seconds, get_media_extension
 
 logger = structlog.get_logger()
 
@@ -225,7 +222,6 @@ class Client:
         Returns:
             True if refresh was successful, False otherwise.
         """
-        # DEBUG: Log refresh attempt start with available credentials
         has_refresh_token = bool(self.refresh_token)
         has_cookies = bool(self.cookies)
         has_auth_dir = bool(self.auth_dir and self.auth_dir.exists())
@@ -377,32 +373,22 @@ class Client:
         """
         Extract expiry time from the current access token (JWT).
 
+        Parses the JWT payload to extract the 'exp' claim and calculates
+        seconds remaining until expiry. Does not verify the token signature.
+
         Returns:
-            Seconds remaining until token expiry, or None if cannot parse.
+            Seconds remaining until token expiry (can be negative if expired),
+            or None if no token is set or token cannot be parsed.
+
+        Example:
+            >>> remaining = client.get_token_expiry_seconds()
+            >>> if remaining is not None and remaining < 300:
+            ...     # Token expires in less than 5 minutes
+            ...     await client.refresh_access_token(session)
         """
         if not self.access_token:
             return None
-
-        try:
-            parts = self.access_token.split('.')
-            if len(parts) < 2:
-                return None
-
-            # JWT payload is base64url encoded
-            payload = parts[1]
-            # Add padding for base64 decode
-            payload += '=' * (4 - len(payload) % 4)
-            decoded = base64.b64decode(payload)
-            data = json.loads(decoded)
-
-            if 'exp' in data:
-                exp_timestamp = data['exp']
-                now = datetime.now(timezone.utc).timestamp()
-                return int(exp_timestamp - now)
-        except Exception:
-            pass
-
-        return None
+        return get_jwt_remaining_seconds(self.access_token)
 
     async def refresh_if_needed(
         self,
@@ -428,7 +414,6 @@ class Client:
         """
         remaining = self.get_token_expiry_seconds()
 
-        # DEBUG: Always log token state check
         logger.info(
             "Checking if token refresh needed",
             remaining_seconds=remaining,
@@ -557,7 +542,7 @@ class Client:
 
             messages = data.get('messages', [])
 
-            # DEBUG: Log suspicious messages with low IDs or missing content
+            # Warn about messages with unusually low IDs (potential API issues)
             for m in messages:
                 msg_id = m.get('id', 0)
                 if msg_id < 100000:  # Suspicious low ID
