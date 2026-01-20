@@ -11,14 +11,13 @@ from typing import Any
 import structlog
 from bs4 import BeautifulSoup
 
-from .base import BaseBlogScraper, BlogEntry
+from .base import BaseBlogScraper, BlogEntry, MemberInfo
 from .config import (
     FULL_CONTENT_PAGE_DELAY,
     MAX_PAGES_SAFETY_CAP,
     PAGE_DELAY,
     parse_jst_datetime,
 )
-from .hinatazaka import MemberInfo
 
 logger = structlog.get_logger(__name__)
 

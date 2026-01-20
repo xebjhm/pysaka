@@ -10,7 +10,7 @@ from datetime import datetime
 import structlog
 from bs4 import BeautifulSoup
 
-from .base import BaseBlogScraper, BlogEntry
+from .base import BaseBlogScraper, BlogEntry, MemberInfo
 from .config import (
     DETAIL_DELAY,
     FULL_CONTENT_PAGE_DELAY,
@@ -18,7 +18,6 @@ from .config import (
     PAGE_DELAY,
     parse_jst_datetime,
 )
-from .hinatazaka import MemberInfo
 
 logger = structlog.get_logger(__name__)
 
