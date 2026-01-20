@@ -21,7 +21,7 @@ import aiohttp
 
 from pyhako.client import Group
 
-from .base import BaseBlogScraper, BlogEntry
+from .base import BaseBlogScraper, BlogEntry, MemberInfo
 from .config import (
     DOWNLOAD_CONCURRENCY_INCREMENTAL,
     DOWNLOAD_CONCURRENCY_INITIAL,
@@ -32,7 +32,7 @@ from .config import (
     SYNC_CONCURRENCY_INITIAL,
     parse_jst_datetime,
 )
-from .hinatazaka import HinatazakaBlogScraper, MemberInfo
+from .hinatazaka import HinatazakaBlogScraper
 from .nogizaka import NogizakaBlogScraper
 from .sakurazaka import SakurazakaBlogScraper
 

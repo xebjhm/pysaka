@@ -5,13 +5,12 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from datetime import datetime
 
 import structlog
 from bs4 import BeautifulSoup
 
-from .base import BaseBlogScraper, BlogEntry
+from .base import BaseBlogScraper, BlogEntry, MemberInfo
 from .config import (
     DETAIL_DELAY,
     FULL_CONTENT_PAGE_DELAY,
@@ -21,21 +20,6 @@ from .config import (
 )
 
 logger = structlog.get_logger(__name__)
-
-
-@dataclass
-class MemberInfo:
-    """Member information with thumbnail URL.
-
-    Attributes:
-        id: Member ID (ct parameter for blogs).
-        name: Member name in Japanese.
-        thumbnail_url: URL to member's profile image on CDN.
-    """
-
-    id: str
-    name: str
-    thumbnail_url: str
 
 
 class HinatazakaBlogScraper(BaseBlogScraper):

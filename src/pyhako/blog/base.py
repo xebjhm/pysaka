@@ -11,6 +11,23 @@ import aiohttp
 
 
 @dataclass
+class MemberInfo:
+    """Member information with thumbnail URL.
+
+    Used by scrapers that support fetching member lists with profile images.
+
+    Attributes:
+        id: Member ID (ct parameter for blogs).
+        name: Member name in Japanese.
+        thumbnail_url: URL to member's profile image on CDN.
+    """
+
+    id: str
+    name: str
+    thumbnail_url: str
+
+
+@dataclass
 class BlogEntry:
     """Represents a single blog post from any group's official site.
 
