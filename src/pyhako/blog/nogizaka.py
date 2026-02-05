@@ -369,7 +369,7 @@ class NogizakaBlogScraper(BaseBlogScraper):
                 try:
                     data = parse_jsonp(text)
                 except (ValueError, json.JSONDecodeError) as e:
-                    raise ValueError(f"Failed to parse blog API response: {e}")
+                    raise ValueError(f"Failed to parse blog API response: {e}") from e
 
                 blogs = data.get("data", [])
                 if not blogs:

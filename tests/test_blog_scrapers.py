@@ -1,20 +1,17 @@
 """Comprehensive tests for blog scraper async methods using mocked HTTP responses."""
 
-import asyncio
 from datetime import datetime
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
-from aiohttp import ClientResponseError
 
 from pyhako.blog import (
     HinatazakaBlogScraper,
     NogizakaBlogScraper,
     SakurazakaBlogScraper,
 )
-from pyhako.blog.base import MemberInfo
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -248,7 +245,7 @@ class TestHinatazakaBlogScraperAsync:
         """Test blog detail fetch with HTTP error."""
         mock_session.get.return_value = MockResponse(text="", status=404, url="https://example.com")
 
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017 - testing that any error is raised
             await scraper.get_blog_detail("99999")
 
 

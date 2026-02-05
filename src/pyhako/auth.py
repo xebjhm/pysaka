@@ -194,7 +194,7 @@ class BrowserAuth:
                         await context.close()
                     else:
                         await browser.close()
-                except:
+                except Exception:
                     pass
 
             return None
@@ -207,7 +207,7 @@ class BrowserAuth:
     ) -> Optional[LoginCredentials]:
         """
         Refreshes access token via headless browser using persistent context.
-        
+
         Args:
             group: Target group for authentication.
             auth_dir: Path to persistent browser context directory.
@@ -341,5 +341,5 @@ class BrowserAuth:
             finally:
                 try:
                     await context.close()
-                except:
+                except Exception:
                     pass
