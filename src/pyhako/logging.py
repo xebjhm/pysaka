@@ -130,7 +130,7 @@ def _redact_secrets(
             event_dict[key] = "***REDACTED***"
 
     # Shallow redaction for dictionary values (handling headers/cookies dicts)
-    for key, value in event_dict.items():
+    for _, value in event_dict.items():
         if isinstance(value, dict):
             for sub_key in value:
                 if sub_key.lower() in sensitive_keys:
