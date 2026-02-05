@@ -42,10 +42,12 @@ Main API client supporting all Sakamichi groups.
 - **timestamp**: (Optional) Timestamp metadata.
 - **Returns**: `True` if success/exists.
 
-#### `refresh_access_token(session) -> str`
+#### `refresh_access_token(session) -> bool`
 - **session**: Active aiohttp session.
-- **Returns**: New access token.
-- **Raises**: `SessionExpiredError` if session is invalid and cannot be refreshed.
+- **Returns**: `True` if refresh succeeded, `False` if no credentials configured.
+- **Raises**:
+  - `SessionExpiredError` if session is invalid server-side (e.g., logged in elsewhere).
+  - `RefreshFailedError` if all refresh attempts failed unexpectedly.
 
 ## Sync Manager
 
@@ -179,7 +181,7 @@ async with aiohttp.ClientSession() as session:
 ## Exceptions
 
 ### `SessionExpiredError`
-Raised when the OAuth session is expired and cannot be refreshed.
+Raised when the session has been invalidated server-side (e.g., user logged in from another device).
 
 ```python
 from pyhako import Client, SessionExpiredError
@@ -187,7 +189,21 @@ from pyhako import Client, SessionExpiredError
 try:
     await client.refresh_access_token(session)
 except SessionExpiredError:
-    print("Session expired. Please login again.")
+    # Expected scenario - session revoked server-side
+    print("Session expired. Please log in again.")
+```
+
+### `RefreshFailedError`
+Raised when all token refresh attempts fail unexpectedly. This indicates a potential bug or unexpected server behavior.
+
+```python
+from pyhako import Client, RefreshFailedError
+
+try:
+    await client.refresh_access_token(session)
+except RefreshFailedError:
+    # Unexpected failure - consider reporting
+    print("Refresh failed unexpectedly. Please log in again.")
 ```
 
 ## Enums

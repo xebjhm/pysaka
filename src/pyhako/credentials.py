@@ -36,7 +36,7 @@ def is_windows() -> bool:
 def get_user_data_dir() -> Path:
     """
     Get the platform-specific user data directory for pyhako.
-    
+
     Returns:
         - Windows: %APPDATA%/pyhako
         - macOS: ~/Library/Application Support/pyhako
@@ -57,7 +57,7 @@ def get_user_data_dir() -> Path:
 def get_auth_dir() -> Path:
     """
     Get the browser auth data directory for session persistence.
-    
+
     Returns:
         Path to `{user_data_dir}/auth_data` (e.g. ~/.local/share/pyhako/auth_data)
     """

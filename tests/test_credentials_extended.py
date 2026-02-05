@@ -156,7 +156,7 @@ class TestKeyringStore:
              patch("keyring.set_keyring"):
             # This should attempt fallback - may fail but we're testing the path
             try:
-                store = KeyringStore()
+                KeyringStore()
             except Exception:
                 # The fallback may not work without the actual module,
                 # but we've tested the fallback attempt path
