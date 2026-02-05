@@ -8,7 +8,7 @@ import aiohttp
 import structlog
 
 from .credentials import TokenManager
-from .exceptions import ApiError, SessionExpiredError
+from .exceptions import ApiError, RefreshFailedError, SessionExpiredError
 from .utils import get_jwt_remaining_seconds, get_media_extension
 
 logger = structlog.get_logger()
@@ -367,7 +367,12 @@ class Client:
             except Exception as e:
                 logger.warning(f"Headless refresh failed: {e}")
 
-        return False
+        # All refresh plans exhausted - this is unexpected and should be reported
+        logger.error("All token refresh plans failed - raising RefreshFailedError")
+        raise RefreshFailedError(
+            "All token refresh attempts failed unexpectedly. "
+            "Please log in again to continue using the service."
+        )
 
     def get_token_expiry_seconds(self) -> Optional[int]:
         """
@@ -471,7 +476,7 @@ class Client:
             sub = g.get('subscription')
             if sub:
                 state = sub.get('state')
-                if state == 'active' or (include_inactive and state in ['expired', 'suspended', 'canceled']):
+                if state == 'active' or (include_inactive and state in ['expired', 'suspended', 'canceled', 'cancelled']):
                     filtered.append(g)
         return filtered
 
