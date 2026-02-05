@@ -98,7 +98,7 @@ class BrowserAuth:
 
             # Token capture container
             captured_data: dict[str, Any] = {}
-            token_future = asyncio.Future()
+            token_future: asyncio.Future[None] = asyncio.Future()
 
             async def handle_response(response):
                 if token_future.done(): return
@@ -223,8 +223,8 @@ class BrowserAuth:
         api_host = config["api_base"]
         auth_url = config["auth_url"]
 
-        captured_data = {}
-        token_future = asyncio.Future()
+        captured_data: dict[str, Any] = {}
+        token_future: asyncio.Future[None] = asyncio.Future()
 
         async with async_playwright() as p:
             try:
@@ -257,8 +257,8 @@ class BrowserAuth:
                         except SystemExit:
                             # Playwright CLI calls sys.exit(), which is expected
                             pass
-                        except Exception as e:
-                            logger.error(f"Failed to install Playwright browser: {e}")
+                        except Exception as inner_e:
+                            logger.error(f"Failed to install Playwright browser: {inner_e}")
                             return None
                         finally:
                             sys.argv = old_argv

@@ -170,7 +170,7 @@ class TokenManager:
             logger.error(f"Keyring initialization failed: {e}")
             raise HakoError(f"Secure storage (keyring) is required but failed to initialize: {e}") from e
 
-    def save_session(self, group: str, access_token: str, refresh_token: str = None, cookies: dict = None) -> None:
+    def save_session(self, group: str, access_token: str, refresh_token: Optional[str] = None, cookies: Optional[dict[Any, Any]] = None) -> None:
         data = {
             "access_token": access_token,
             "refresh_token": refresh_token,

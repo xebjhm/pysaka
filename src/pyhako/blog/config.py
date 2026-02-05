@@ -3,6 +3,7 @@
 Centralized location for tunable parameters to make it easy
 to adjust sync behavior without modifying scraper code.
 """
+from __future__ import annotations
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
