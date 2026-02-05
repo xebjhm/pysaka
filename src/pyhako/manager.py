@@ -178,7 +178,6 @@ class SyncManager:
                     "thumbnail": member.get('thumbnail'),
                     "phone_image": member.get('phone_image'),
                     "group_thumbnail": group.get('thumbnail'),
-                    "is_active": group.get('subscription', {}).get('state') == 'active'
                 },
                 "total_messages": len(merged),
                 "message_type_counts": type_counts,
