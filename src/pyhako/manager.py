@@ -17,7 +17,7 @@ logger = structlog.get_logger()
 class SyncManager:
     """
     Manages synchronization of messages and media for a specific client.
-    
+
     Handles state tracking, message fetching, deduplication, and media downloading.
     """
 

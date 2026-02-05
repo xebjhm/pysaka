@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import structlog
 
 logger = structlog.get_logger()
 
 
-def get_image_dimensions(filepath: Path) -> tuple[Optional[int], Optional[int]]:
+def get_image_dimensions(filepath: Path) -> tuple[int | None, int | None]:
     """
     Extract dimensions from an image file using Pillow.
 
@@ -28,7 +27,7 @@ def get_image_dimensions(filepath: Path) -> tuple[Optional[int], Optional[int]]:
         return None, None
 
 
-def get_video_dimensions(filepath: Path) -> tuple[Optional[int], Optional[int]]:
+def get_video_dimensions(filepath: Path) -> tuple[int | None, int | None]:
     """
     Extract dimensions from a video file using pymediainfo.
 
@@ -50,7 +49,7 @@ def get_video_dimensions(filepath: Path) -> tuple[Optional[int], Optional[int]]:
         return None, None
 
 
-def get_media_dimensions(filepath: Path, media_type: str) -> tuple[Optional[int], Optional[int]]:
+def get_media_dimensions(filepath: Path, media_type: str) -> tuple[int | None, int | None]:
     """
     Extract dimensions from a media file based on its type.
 
@@ -69,7 +68,7 @@ def get_media_dimensions(filepath: Path, media_type: str) -> tuple[Optional[int]
         return None, None
 
 
-def get_audio_metadata(filepath: Path, media_type: str) -> dict[str, Optional[float | bool]]:
+def get_audio_metadata(filepath: Path, media_type: str) -> dict[str, float | bool | None]:
     """
     Extract audio metadata from a media file using pymediainfo.
 
@@ -80,7 +79,7 @@ def get_audio_metadata(filepath: Path, media_type: str) -> dict[str, Optional[fl
     Returns:
         Dict with 'duration' (seconds) and 'is_muted' (True if video has no audio track).
     """
-    result: dict[str, Optional[float | bool]] = {
+    result: dict[str, float | bool | None] = {
         'duration': None,
         'is_muted': None,
     }
