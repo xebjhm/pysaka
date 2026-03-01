@@ -116,7 +116,19 @@ class SyncManager:
 
         # output_dir is already service-specific (e.g., output/日向坂46/)
         # so we only need to add messages/ and the group directory
-        group_dir = self.output_dir / "messages" / f"{gid} {gname}"
+        messages_dir = self.output_dir / "messages"
+        group_dir = messages_dir / f"{gid} {gname}"
+
+        # If group was renamed on server (e.g., "12th Single" → "16th Single"),
+        # rename the existing directory instead of creating a duplicate.
+        if not group_dir.exists() and messages_dir.exists():
+            for existing in messages_dir.iterdir():
+                if existing.is_dir() and existing.name.startswith(f"{gid} "):
+                    logger.info("Group renamed on server, renaming directory",
+                                old=existing.name, new=group_dir.name)
+                    existing.rename(group_dir)
+                    break
+
         member_dir = group_dir / f"{mid} {mname}"
         member_dir.mkdir(parents=True, exist_ok=True)
         for t in ['picture', 'video', 'voice']:
