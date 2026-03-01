@@ -17,25 +17,36 @@ class Group(Enum):
     HINATAZAKA46 = "hinatazaka46"
     NOGIZAKA46 = "nogizaka46"
     SAKURAZAKA46 = "sakurazaka46"
+    YODEL = "yodel"
 
 GROUP_CONFIG = {
     Group.HINATAZAKA46: {
         "api_base": "https://api.message.hinatazaka46.com/v2",
         "app_id": "jp.co.sonymusic.communication.keyakizaka 2.5",
         "auth_url": "https://message.hinatazaka46.com/",
-        "display_name": "日向坂46"
+        "display_name": "日向坂46",
+        "organization_id": 1
     },
     Group.NOGIZAKA46: {
         "api_base": "https://api.message.nogizaka46.com/v2",
         "app_id": "jp.co.sonymusic.communication.nogizaka 2.5",
         "auth_url": "https://message.nogizaka46.com/",
-        "display_name": "乃木坂46"
+        "display_name": "乃木坂46",
+        "organization_id": 1
     },
     Group.SAKURAZAKA46: {
         "api_base": "https://api.message.sakurazaka46.com/v2",
         "app_id": "jp.co.sonymusic.communication.sakurazaka 2.5",
         "auth_url": "https://message.sakurazaka46.com/",
-        "display_name": "櫻坂46"
+        "display_name": "櫻坂46",
+        "organization_id": 1
+    },
+    Group.YODEL: {
+        "api_base": "https://api.service.yodel-app.com/v2",
+        "app_id": "jp.co.sonymusic.communication.yodel 2.5",
+        "auth_url": "https://service.yodel-app.com/",
+        "display_name": "Yodel",
+        "organization_id": None
     }
 }
 
@@ -462,22 +473,39 @@ class Client:
 
         Args:
             session: Active aiohttp ClientSession.
-            include_inactive: If True, includes expired/suspended subscriptions.
+            include_inactive: If True, includes expired/suspended subscriptions
+                              for open groups.
 
         Returns:
-            List of group objects.
+            List of group objects. Includes closed groups (state='closed')
+            for graduation detection — callers should skip syncing these
+            as their timeline/members endpoints return 404.
         """
-        groups = await self.fetch_json(session, "/groups", {"organization_id": 1})
+        org_id = self.config.get("organization_id")
+        params = {"organization_id": org_id} if org_id is not None else None
+        groups = await self.fetch_json(session, "/groups", params)
         if not groups:
             return []
 
         filtered = []
         for g in groups:
+            # Always include closed groups for graduation detection.
+            # Callers must skip syncing these (timeline/members return 404).
+            if g.get('state') == 'closed':
+                filtered.append(g)
+                continue
+
+            # Open groups: check subscription state
             sub = g.get('subscription')
-            if sub:
-                state = sub.get('state')
-                if state == 'active' or (include_inactive and state in ['expired', 'suspended', 'canceled', 'cancelled']):
-                    filtered.append(g)
+            sub_state = sub.get('state') if sub else None
+
+            if sub_state == 'active':
+                filtered.append(g)
+            elif include_inactive and sub_state is not None:
+                # Include expired/suspended open groups the user previously subscribed to.
+                # Skip groups with no subscription (never subscribed — avoids pulling
+                # all unsubscribed orgs when organization_id is omitted for Yodel).
+                filtered.append(g)
         return filtered
 
     async def get_members(self, session: aiohttp.ClientSession, group_id: int) -> list[dict[str, Any]]:
