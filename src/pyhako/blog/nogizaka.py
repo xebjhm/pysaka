@@ -11,7 +11,7 @@ from typing import Any
 import structlog
 from bs4 import BeautifulSoup
 
-from .base import BaseBlogScraper, BlogEntry, MemberInfo
+from .base import BaseBlogScraper, BlogEntry, BlogGoneError, MemberInfo
 from .config import (
     FULL_CONTENT_PAGE_DELAY,
     MAX_PAGES_SAFETY_CAP,
@@ -362,6 +362,8 @@ class NogizakaBlogScraper(BaseBlogScraper):
                 params["ct"] = member_id
 
             async with self.session.get(url, params=params) as resp:
+                if resp.status in (404, 410):
+                    raise BlogGoneError(f"Blog {blog_id} has been removed (HTTP {resp.status})")
                 if resp.status != 200:
                     raise ValueError(f"Failed to fetch blog list: HTTP {resp.status}")
 

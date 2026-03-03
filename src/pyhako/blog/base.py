@@ -10,6 +10,12 @@ from datetime import datetime
 import aiohttp
 
 
+class BlogGoneError(Exception):
+    """Raised when a blog post has been permanently removed (HTTP 404/410)."""
+
+    pass
+
+
 @dataclass
 class MemberInfo:
     """Member information with thumbnail URL.

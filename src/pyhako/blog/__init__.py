@@ -21,7 +21,7 @@ import aiohttp
 
 from pyhako.client import Group
 
-from .base import BaseBlogScraper, BlogEntry, MemberInfo
+from .base import BaseBlogScraper, BlogEntry, BlogGoneError, MemberInfo
 from .config import (
     DOWNLOAD_CONCURRENCY_INCREMENTAL,
     DOWNLOAD_CONCURRENCY_INITIAL,
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BlogEntry",
+    "BlogGoneError",
     "BaseBlogScraper",
     "HinatazakaBlogScraper",
     "MemberInfo",

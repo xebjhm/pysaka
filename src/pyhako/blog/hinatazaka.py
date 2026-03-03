@@ -10,7 +10,7 @@ from datetime import datetime
 import structlog
 from bs4 import BeautifulSoup
 
-from .base import BaseBlogScraper, BlogEntry, MemberInfo
+from .base import BaseBlogScraper, BlogEntry, BlogGoneError, MemberInfo
 from .config import (
     DETAIL_DELAY,
     FULL_CONTENT_PAGE_DELAY,
@@ -431,6 +431,8 @@ class HinatazakaBlogScraper(BaseBlogScraper):
         params = {"ima": "0000", "cd": "member"}
 
         async with self.session.get(url, params=params) as resp:
+            if resp.status in (404, 410):
+                raise BlogGoneError(f"Blog {blog_id} has been removed (HTTP {resp.status})")
             if resp.status != 200:
                 raise ValueError(f"Failed to fetch blog {blog_id}: HTTP {resp.status}")
 
