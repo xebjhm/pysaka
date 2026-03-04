@@ -476,18 +476,18 @@ class SakurazakaBlogScraper(BaseBlogScraper):
             member_name=member_name,
         )
 
-    async def get_blog_thumbnail(self, blog_id: str) -> tuple[str | None, datetime | None]:
-        """Fetch thumbnail and precise datetime from a blog detail page.
+    async def get_blog_detail_metadata(self, blog_id: str) -> tuple[str | None, datetime | None, str | None]:
+        """Fetch authoritative metadata from a Sakurazaka blog detail page.
 
-        Sakurazaka list pages only show dates (no time), so all same-day blogs
-        get midnight timestamps. This method fetches the detail page to get
-        both the og:image thumbnail and the precise publication time.
+        Sakurazaka list pages have incomplete data: date-only (no time),
+        no thumbnails, and possibly truncated titles. The detail page is
+        the single source of truth for all blog metadata.
 
         Args:
             blog_id: The unique identifier of the blog post.
 
         Returns:
-            Tuple of (thumbnail_url, published_at). Either may be None.
+            Tuple of (thumbnail_url, published_at, title). Any may be None.
         """
         url = f"{self.base_url}/s/s46/diary/detail/{blog_id}"
         params = {"ima": "0000", "cd": "blog"}
@@ -495,10 +495,16 @@ class SakurazakaBlogScraper(BaseBlogScraper):
         try:
             async with self.session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    return None, None
+                    return None, None, None
 
                 html = await resp.text()
                 soup = BeautifulSoup(html, "html.parser")
+
+                # Extract title from og:title (most reliable, full text)
+                title = None
+                title_meta = soup.select_one('meta[property="og:title"]')
+                if title_meta:
+                    title = title_meta.get("content", "") or None
 
                 # Extract precise datetime — must use .blog-foot .date to get
                 # the footer date with time (e.g. "2026/02/28 21:05"),
@@ -525,7 +531,7 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                             if src:
                                 thumbnail = self.normalize_url(src)
 
-                return thumbnail, published_at
+                return thumbnail, published_at, title
         except Exception as e:
-            logger.warning("get_blog_thumbnail_failed", blog_id=blog_id, error=str(e))
-            return None, None
+            logger.warning("get_blog_detail_metadata_failed", blog_id=blog_id, error=str(e))
+            return None, None, None
