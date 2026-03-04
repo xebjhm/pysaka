@@ -421,8 +421,10 @@ class SakurazakaBlogScraper(BaseBlogScraper):
             title_elem = soup.select_one(".title, h1.title, h2.title")
             title = title_elem.get_text(strip=True) if title_elem else ""
 
-        # Extract date
-        date_elem = soup.select_one(".date")
+        # Extract date — must use .blog-foot .date to get the footer date
+        # with time (e.g. "2026/02/28 21:05"), NOT the calendar header .date
+        # which only contains the day number (e.g. "28")
+        date_elem = soup.select_one(".blog-foot .date")
         date_text = date_elem.get_text(strip=True) if date_elem else ""
         published_at = parse_jst_datetime(date_text)
 
@@ -474,18 +476,18 @@ class SakurazakaBlogScraper(BaseBlogScraper):
             member_name=member_name,
         )
 
-    async def get_blog_thumbnail(self, blog_id: str) -> str | None:
-        """Fetch just the thumbnail (og:image) for a blog post.
+    async def get_blog_thumbnail(self, blog_id: str) -> tuple[str | None, datetime | None]:
+        """Fetch thumbnail and precise datetime from a blog detail page.
 
-        This is a lightweight alternative to get_blog_detail() when only
-        the thumbnail is needed. Sakurazaka list pages don't show blog
-        thumbnails, so this fetches the og:image from the detail page.
+        Sakurazaka list pages only show dates (no time), so all same-day blogs
+        get midnight timestamps. This method fetches the detail page to get
+        both the og:image thumbnail and the precise publication time.
 
         Args:
             blog_id: The unique identifier of the blog post.
 
         Returns:
-            The og:image URL if found, None otherwise.
+            Tuple of (thumbnail_url, published_at). Either may be None.
         """
         url = f"{self.base_url}/s/s46/diary/detail/{blog_id}"
         params = {"ima": "0000", "cd": "blog"}
@@ -493,28 +495,37 @@ class SakurazakaBlogScraper(BaseBlogScraper):
         try:
             async with self.session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    return None
+                    return None, None
 
                 html = await resp.text()
                 soup = BeautifulSoup(html, "html.parser")
 
-                # Try og:image first (most reliable for thumbnails)
+                # Extract precise datetime — must use .blog-foot .date to get
+                # the footer date with time (e.g. "2026/02/28 21:05"),
+                # NOT the calendar header .date which only has the day number
+                date_elem = soup.select_one(".blog-foot .date")
+                date_text = date_elem.get_text(strip=True) if date_elem else ""
+                published_at = parse_jst_datetime(date_text) if date_text else None
+
+                # Extract thumbnail - try og:image first (most reliable)
+                thumbnail = None
                 og_image = soup.select_one('meta[property="og:image"]')
                 if og_image:
                     img_url = og_image.get("content", "")
                     if img_url:
-                        return self.normalize_url(img_url)
+                        thumbnail = self.normalize_url(img_url)
 
                 # Fallback: first image in content
-                content_elem = soup.select_one(".box-article, .blog-detail-txt, .article-body")
-                if content_elem:
-                    img = content_elem.select_one("img")
-                    if img:
-                        src = img.get("src", "")
-                        if src:
-                            return self.normalize_url(src)
+                if not thumbnail:
+                    content_elem = soup.select_one(".box-article, .blog-detail-txt, .article-body")
+                    if content_elem:
+                        img = content_elem.select_one("img")
+                        if img:
+                            src = img.get("src", "")
+                            if src:
+                                thumbnail = self.normalize_url(src)
 
-                return None
+                return thumbnail, published_at
         except Exception as e:
             logger.warning("get_blog_thumbnail_failed", blog_id=blog_id, error=str(e))
-            return None
+            return None, None

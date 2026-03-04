@@ -201,21 +201,23 @@ class BaseBlogScraper(ABC):
         """
         pass
 
-    async def get_blog_thumbnail(self, blog_id: str) -> str | None:
-        """Fetch just the thumbnail URL for a blog post.
+    async def get_blog_thumbnail(self, blog_id: str) -> tuple[str | None, datetime | None]:
+        """Fetch thumbnail URL and precise datetime from a blog detail page.
 
-        This is a lightweight alternative to get_blog_detail() when only
-        the thumbnail is needed. Default implementation fetches full detail
-        and extracts the first image. Subclasses can override for efficiency.
+        Some blog list pages only show dates without times (e.g. Sakurazaka).
+        This method fetches the detail page to get both the thumbnail and the
+        precise publication datetime. Default implementation fetches full detail.
+        Subclasses can override for efficiency.
 
         Args:
             blog_id: The unique identifier of the blog post.
 
         Returns:
-            The thumbnail URL if found, None otherwise.
+            Tuple of (thumbnail_url, published_at). Either may be None.
         """
         try:
             entry = await self.get_blog_detail(blog_id)
-            return entry.images[0] if entry.images else None
+            thumbnail = entry.images[0] if entry.images else None
+            return thumbnail, entry.published_at
         except Exception:
-            return None
+            return None, None
