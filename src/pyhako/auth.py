@@ -301,7 +301,6 @@ class BrowserAuth:
 
                             logger.debug(
                                 "Headless refresh captured token",
-                                token_prefix=token[:20],
                                 capture_url=str(response.request.url),
                             )
 
