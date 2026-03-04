@@ -412,10 +412,14 @@ class SakurazakaBlogScraper(BaseBlogScraper):
         soup = BeautifulSoup(html, "html.parser")
 
         # Try og:meta tags first (most reliable)
+        # og:title includes site suffix like "ブログ名 | 櫻坂46 メンバー名 公式ブログ"
+        # Strip everything from the last " | " to get just the blog title
         title_meta = soup.select_one('meta[property="og:title"]')
         title = ""
         if title_meta:
             title = title_meta.get("content", "")
+            if " | " in title:
+                title = title.rsplit(" | ", 1)[0]
         else:
             # Fallback to page title structure
             title_elem = soup.select_one(".title, h1.title, h2.title")
@@ -501,10 +505,15 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                 soup = BeautifulSoup(html, "html.parser")
 
                 # Extract title from og:title (most reliable, full text)
+                # og:title includes site suffix: "ブログ名 | 櫻坂46 メンバー名 公式ブログ"
                 title = None
                 title_meta = soup.select_one('meta[property="og:title"]')
                 if title_meta:
-                    title = title_meta.get("content", "") or None
+                    raw_title = title_meta.get("content", "")
+                    if raw_title and " | " in raw_title:
+                        title = raw_title.rsplit(" | ", 1)[0] or None
+                    else:
+                        title = raw_title or None
 
                 # Extract precise datetime — must use .blog-foot .date to get
                 # the footer date with time (e.g. "2026/02/28 21:05"),
