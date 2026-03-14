@@ -37,6 +37,9 @@ class HinatazakaBlogScraper(BaseBlogScraper):
 
     base_url = "https://www.hinatazaka46.com"
 
+    # Group/official account names to exclude from member lists.
+    _GROUP_ACCOUNT_NAMES = frozenset({"日向坂46"})
+
     async def get_members(self) -> dict[str, str]:
         """Fetch available blog members from the public website.
 
@@ -77,7 +80,7 @@ class HinatazakaBlogScraper(BaseBlogScraper):
                             name_elem = parent.select_one(".name, .p-blog-member__name")
                             if name_elem:
                                 name = name_elem.get_text(strip=True)
-                    if name and member_id not in members:
+                    if name and member_id not in members and name not in self._GROUP_ACCOUNT_NAMES:
                         members[member_id] = name
 
             return members
@@ -142,7 +145,7 @@ class HinatazakaBlogScraper(BaseBlogScraper):
                                     name = child
                                     break
 
-                    if name and thumbnail_url:
+                    if name and thumbnail_url and name not in self._GROUP_ACCOUNT_NAMES:
                         members.append(
                             MemberInfo(
                                 id=member_id,
@@ -195,7 +198,7 @@ class HinatazakaBlogScraper(BaseBlogScraper):
                     if not name:
                         name = link.get_text(strip=True)
 
-                    if name and thumbnail_url:
+                    if name and thumbnail_url and name not in self._GROUP_ACCOUNT_NAMES:
                         members.append(
                             MemberInfo(
                                 id=member_id,
