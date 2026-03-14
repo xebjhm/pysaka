@@ -33,6 +33,10 @@ class SakurazakaBlogScraper(BaseBlogScraper):
 
     base_url = "https://sakurazaka46.com"
 
+    # Group/official account names to exclude from member lists.
+    # The artist page includes a banner link for the group itself.
+    _GROUP_ACCOUNT_NAMES = frozenset({"櫻坂46"})
+
     async def get_members(self) -> dict[str, str]:
         """Fetch available blog members from the public website.
 
@@ -75,7 +79,7 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                         img = link.select_one("img")
                         if img:
                             name = str(img.get("alt", ""))
-                    if name and member_id not in members:
+                    if name and member_id not in members and name not in self._GROUP_ACCOUNT_NAMES:
                         members[member_id] = name
 
             return members
@@ -136,7 +140,7 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                     # Fallback: try img alt attribute
                     name = str(img.get("alt", ""))
 
-                if name and thumbnail_url:
+                if name and thumbnail_url and name not in self._GROUP_ACCOUNT_NAMES:
                     members.append(
                         MemberInfo(
                             id=member_id,
