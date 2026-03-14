@@ -290,12 +290,17 @@ class SyncManager:
         progress_callback: Optional[Any] = None
     ) -> dict[Path, dict[int, dict[str, Any]]]:
         """
-        Downloads files in the queue using a semaphore for concurrency.
+        Downloads files in the queue.
+
+        Concurrency is managed by the caller's session wrapper (PooledSession)
+        which acquires/releases pool slots per HTTP request. The ``concurrency``
+        parameter is kept for backward compatibility but is no longer used
+        internally.
 
         Args:
-            session: Active aiohttp session.
+            session: Active aiohttp session (or PooledSession wrapper).
             queue: List of media items to download.
-            concurrency: Max concurrent downloads.
+            concurrency: Deprecated — kept for backward compatibility.
             progress_callback: Optional callback.
 
         Returns:
@@ -305,7 +310,9 @@ class SyncManager:
         if not queue:
             return {}
 
-        sem = asyncio.Semaphore(concurrency)
+        # Concurrency is managed by the caller's PooledSession / AdaptivePool.
+        # No local semaphore needed — each HTTP request in download_file
+        # acquires a pool slot via the session wrapper.
         total = len(queue)
         completed = 0
         # Group metadata by member_dir for efficient batch updates
@@ -313,45 +320,44 @@ class SyncManager:
 
         async def worker(item: dict[str, Any]) -> None:
             nonlocal completed
-            async with sem:
-                res = await self.client.download_file(
-                    session,
-                    item['url'],
-                    item['path'],
-                    item['timestamp']
-                )
-                if res:
-                    media_type = item.get('media_type', '')
-                    member_dir = item.get('member_dir')
-                    if member_dir:
-                        metadata: dict[str, Any] = {}
+            res = await self.client.download_file(
+                session,
+                item['url'],
+                item['path'],
+                item['timestamp']
+            )
+            if res:
+                media_type = item.get('media_type', '')
+                member_dir = item.get('member_dir')
+                if member_dir:
+                    metadata: dict[str, Any] = {}
 
-                        # Extract dimensions for pictures and videos
-                        if media_type in ('picture', 'video'):
-                            width, height = get_media_dimensions(item['path'], media_type)
-                            if width and height:
-                                metadata['width'] = width
-                                metadata['height'] = height
+                    # Extract dimensions for pictures and videos
+                    if media_type in ('picture', 'video'):
+                        width, height = get_media_dimensions(item['path'], media_type)
+                        if width and height:
+                            metadata['width'] = width
+                            metadata['height'] = height
 
-                        # Extract audio metadata for videos and voice messages
-                        if media_type in ('video', 'voice'):
-                            audio_meta = get_audio_metadata(item['path'], media_type)
-                            if audio_meta.get('duration') is not None:
-                                metadata['media_duration'] = audio_meta['duration']
-                            if audio_meta.get('is_muted') is not None:
-                                metadata['is_muted'] = audio_meta['is_muted']
+                    # Extract audio metadata for videos and voice messages
+                    if media_type in ('video', 'voice'):
+                        audio_meta = get_audio_metadata(item['path'], media_type)
+                        if audio_meta.get('duration') is not None:
+                            metadata['media_duration'] = audio_meta['duration']
+                        if audio_meta.get('is_muted') is not None:
+                            metadata['is_muted'] = audio_meta['is_muted']
 
-                        if metadata:
-                            if member_dir not in metadata_by_dir:
-                                metadata_by_dir[member_dir] = {}
-                            metadata_by_dir[member_dir][item['message_id']] = metadata
+                    if metadata:
+                        if member_dir not in metadata_by_dir:
+                            metadata_by_dir[member_dir] = {}
+                        metadata_by_dir[member_dir][item['message_id']] = metadata
 
-                    completed += 1
-                    if progress_callback:
-                        if asyncio.iscoroutinefunction(progress_callback):
-                            await progress_callback(completed, total)
-                        else:
-                            progress_callback(completed, total)
+                completed += 1
+                if progress_callback:
+                    if asyncio.iscoroutinefunction(progress_callback):
+                        await progress_callback(completed, total)
+                    else:
+                        progress_callback(completed, total)
 
         await asyncio.gather(*[worker(item) for item in queue])
         return metadata_by_dir

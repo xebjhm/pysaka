@@ -8,8 +8,9 @@ to adjust sync behavior without modifying code.
 # Message Sync Configuration
 # =============================================================================
 
-# Concurrency for media downloads
-# Higher values = faster sync but more server load
+# Legacy concurrency constants — kept for backward compatibility.
+# When using AdaptivePool (HakoDesk 0.2.0+), these are ignored; the pool
+# manages concurrency dynamically based on network conditions.
 MEDIA_DOWNLOAD_CONCURRENCY_INITIAL = 20  # First sync: aggressive
 MEDIA_DOWNLOAD_CONCURRENCY_INCREMENTAL = 5  # Incremental: gentle on server
 
