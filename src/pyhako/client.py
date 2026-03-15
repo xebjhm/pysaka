@@ -190,7 +190,7 @@ class Client:
         url = f"{self.api_base}{endpoint}"
         logger.debug("API GET request", endpoint=endpoint, params=params)
         try:
-            async with session.get(url, headers=self.headers, params=params, ssl=False) as resp:
+            async with session.get(url, headers=self.headers, params=params) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     logger.debug("API GET success", endpoint=endpoint, status=200)
@@ -199,7 +199,7 @@ class Client:
                     logger.warning("API returned 401 Unauthorized", endpoint=endpoint, will_retry=True)
                     if await self.refresh_access_token(session):
                         # Retry the request with new token
-                        async with session.get(url, headers=self.headers, params=params, ssl=False) as resp_retry:
+                        async with session.get(url, headers=self.headers, params=params) as resp_retry:
                             if resp_retry.status == 200:
                                 return await resp_retry.json()
                             elif resp_retry.status == 401:
@@ -264,7 +264,7 @@ class Client:
         if self.refresh_token:
             logger.debug("Attempting refresh using refresh_token...")
             try:
-                async with session.post(url, headers=refresh_headers, json={"refresh_token": self.refresh_token}, ssl=False) as resp:
+                async with session.post(url, headers=refresh_headers, json={"refresh_token": self.refresh_token}) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         new_at = data.get('access_token')
@@ -286,7 +286,7 @@ class Client:
             )
             try:
                 # For web sessions, pass cookies with refresh_token:null (as browser does per HAR)
-                async with session.post(url, headers=refresh_headers, json={"refresh_token": None}, cookies=self.cookies, ssl=False) as resp:
+                async with session.post(url, headers=refresh_headers, json={"refresh_token": None}, cookies=self.cookies) as resp:
                     # Safe cookie key extraction (handles both real responses and mocks)
                     try:
                         response_cookie_keys = list(resp.cookies.keys()) if resp.cookies else []
@@ -655,7 +655,7 @@ class Client:
 
         try:
             filepath.parent.mkdir(parents=True, exist_ok=True)
-            async with session.get(url, ssl=False) as resp:
+            async with session.get(url) as resp:
                 if resp.status == 200:
                     async with aiofiles.open(filepath, 'wb') as f:
                         await f.write(await resp.read())
@@ -825,7 +825,7 @@ class Client:
         url = f"{self.api_base}{endpoint}"
         logger.debug("API POST request", endpoint=endpoint, data_keys=list(data.keys()) if data else None)
         try:
-            async with session.post(url, headers=self.headers, json=data, ssl=False) as resp:
+            async with session.post(url, headers=self.headers, json=data) as resp:
                 if resp.status == 200:
                     result = await resp.json()
                     logger.debug("API POST success", endpoint=endpoint, status=200)
@@ -833,7 +833,7 @@ class Client:
                 elif resp.status == 401:
                     logger.warning("API POST returned 401 Unauthorized", endpoint=endpoint, will_retry=True)
                     if await self.refresh_access_token(session):
-                        async with session.post(url, headers=self.headers, json=data, ssl=False) as resp_retry:
+                        async with session.post(url, headers=self.headers, json=data) as resp_retry:
                             if resp_retry.status == 200:
                                 return await resp_retry.json()
                     return None
@@ -865,12 +865,12 @@ class Client:
         """
         url = f"{self.api_base}{endpoint}"
         try:
-            async with session.delete(url, headers=self.headers, ssl=False) as resp:
+            async with session.delete(url, headers=self.headers) as resp:
                 if resp.status in (200, 204):
                     return True
                 elif resp.status == 401:
                     if await self.refresh_access_token(session):
-                        async with session.delete(url, headers=self.headers, ssl=False) as resp_retry:
+                        async with session.delete(url, headers=self.headers) as resp_retry:
                             return resp_retry.status in (200, 204)
                     return False
                 else:
