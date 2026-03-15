@@ -29,7 +29,6 @@ async def test_fetch_json_success(client, mock_session):
         "https://api.message.hinatazaka46.com/v2/test",
         headers=client.headers,
         params=None,
-        ssl=False
     )
 
 @pytest.mark.asyncio
