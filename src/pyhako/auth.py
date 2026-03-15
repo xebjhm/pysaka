@@ -98,7 +98,7 @@ class BrowserAuth:
 
             # Token capture container
             captured_data: dict[str, Any] = {}
-            token_future = asyncio.Future()
+            token_future: asyncio.Future[None] = asyncio.Future()
 
             async def handle_response(response):
                 if token_future.done(): return
@@ -122,17 +122,30 @@ class BrowserAuth:
             page.on("response", handle_response)
 
             try:
-                # CRITICAL: Force clear stale state before fresh login
-                # This prevents capturing mixed state (Valid Token + Old/Invalid Session Cookie)
-                # if the app tries to resume an expired session.
-                await context.clear_cookies()
+                # DESIGN DECISION: Trust the persistent browser context for OAuth session management.
+                #
+                # Previous implementation tried to selectively clear cookies, but this caused issues:
+                # - Google cookies may be set on regional domains (e.g., .google.com.tw)
+                # - Selective clearing can miss edge cases and break OAuth session persistence
+                # - OAuth providers (Google/Apple/LINE) manage their own session state
+                #
+                # Industry best practice: Don't interfere with OAuth provider cookies.
+                # The persistent context (user_data_dir) preserves all browser state including:
+                # - OAuth session cookies (Google SID, HSID, Apple auth, LINE session)
+                # - Account chooser state (allows "select account" instead of re-login)
+                #
+                # We only clear the SERVICE domain's localStorage/sessionStorage to ensure
+                # the web app starts fresh without stale application state.
+
                 try:
-                    await page.goto(target_url, wait_until="commit", timeout=5000) # Short wait to access origin
+                    await page.goto(target_url, wait_until="commit", timeout=5000)
                     await page.evaluate("window.localStorage.clear(); window.sessionStorage.clear();")
-                except:
-                    pass # Ignore errors clearing storage (e.g. if page load fails)
+                    logger.debug("Service domain localStorage/sessionStorage cleared")
+                except Exception as clear_err:
+                    logger.debug(f"Storage clear attempt (non-fatal): {clear_err}")
 
                 await page.goto(target_url, timeout=60000)
+                logger.debug(f"Navigated to auth URL: {target_url}")
             except Exception as e:
                 logger.warning(f"Navigation error (ignoring): {e}")
 
@@ -149,7 +162,7 @@ class BrowserAuth:
                 logger.debug("--- Capturing Cookies ---")
                 for c in cookies_list:
                     if c['name'] == 'session':
-                        logger.debug(f"Found session cookie: {c['value']} | Domain: {c.get('domain')} | Path: {c.get('path')}")
+                        logger.debug("Found session cookie", domain=c.get('domain'), path=c.get('path'))
 
                     if target_domain in c.get('domain', ''):
                         relevant_cookies[c['name']] = c['value']
@@ -181,7 +194,7 @@ class BrowserAuth:
                         await context.close()
                     else:
                         await browser.close()
-                except:
+                except Exception:
                     pass
 
             return None
@@ -194,7 +207,7 @@ class BrowserAuth:
     ) -> Optional[LoginCredentials]:
         """
         Refreshes access token via headless browser using persistent context.
-        
+
         Args:
             group: Target group for authentication.
             auth_dir: Path to persistent browser context directory.
@@ -210,8 +223,8 @@ class BrowserAuth:
         api_host = config["api_base"]
         auth_url = config["auth_url"]
 
-        captured_data = {}
-        token_future = asyncio.Future()
+        captured_data: dict[str, Any] = {}
+        token_future: asyncio.Future[None] = asyncio.Future()
 
         async with async_playwright() as p:
             try:
@@ -244,8 +257,8 @@ class BrowserAuth:
                         except SystemExit:
                             # Playwright CLI calls sys.exit(), which is expected
                             pass
-                        except Exception as e:
-                            logger.error(f"Failed to install Playwright browser: {e}")
+                        except Exception as inner_e:
+                            logger.error(f"Failed to install Playwright browser: {inner_e}")
                             return None
                         finally:
                             sys.argv = old_argv
@@ -267,6 +280,12 @@ class BrowserAuth:
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
 
+                # NOTE: Do NOT clear cookies or localStorage here!
+                # The headless refresh relies on the existing browser session state
+                # (service cookies + localStorage token) to load the web app.
+                # The web app will then make API calls with the token, which we capture.
+                # Clearing state would break the session and show login page instead.
+
                 async def handle_response(response):
                     if token_future.done(): return
 
@@ -279,6 +298,12 @@ class BrowserAuth:
                             captured_data['access_token'] = token
                             captured_data['x-talk-app-id'] = headers.get('x-talk-app-id') or headers.get('X-Talk-App-ID')
                             captured_data['user-agent'] = headers.get('user-agent') or headers.get('User-Agent')
+
+                            logger.debug(
+                                "Headless refresh captured token",
+                                capture_url=str(response.request.url),
+                            )
+
                             if not token_future.done():
                                 token_future.set_result(True)
 
@@ -315,5 +340,5 @@ class BrowserAuth:
             finally:
                 try:
                     await context.close()
-                except:
+                except Exception:
                     pass

@@ -1,14 +1,14 @@
 """Media utilities for dimension extraction."""
+from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import structlog
 
 logger = structlog.get_logger()
 
 
-def get_image_dimensions(filepath: Path) -> tuple[Optional[int], Optional[int]]:
+def get_image_dimensions(filepath: Path) -> tuple[int | None, int | None]:
     """
     Extract dimensions from an image file using Pillow.
 
@@ -27,7 +27,7 @@ def get_image_dimensions(filepath: Path) -> tuple[Optional[int], Optional[int]]:
         return None, None
 
 
-def get_video_dimensions(filepath: Path) -> tuple[Optional[int], Optional[int]]:
+def get_video_dimensions(filepath: Path) -> tuple[int | None, int | None]:
     """
     Extract dimensions from a video file using pymediainfo.
 
@@ -49,7 +49,7 @@ def get_video_dimensions(filepath: Path) -> tuple[Optional[int], Optional[int]]:
         return None, None
 
 
-def get_media_dimensions(filepath: Path, media_type: str) -> tuple[Optional[int], Optional[int]]:
+def get_media_dimensions(filepath: Path, media_type: str) -> tuple[int | None, int | None]:
     """
     Extract dimensions from a media file based on its type.
 
@@ -66,3 +66,45 @@ def get_media_dimensions(filepath: Path, media_type: str) -> tuple[Optional[int]
         return get_video_dimensions(filepath)
     else:
         return None, None
+
+
+def get_audio_metadata(filepath: Path, media_type: str) -> dict[str, float | bool | None]:
+    """
+    Extract audio metadata from a media file using pymediainfo.
+
+    Args:
+        filepath: Path to the media file.
+        media_type: Type of media ('video' or 'voice').
+
+    Returns:
+        Dict with 'duration' (seconds) and 'is_muted' (True if video has no audio track).
+    """
+    result: dict[str, float | bool | None] = {
+        'duration': None,
+        'is_muted': None,
+    }
+
+    if media_type not in ('video', 'voice'):
+        return result
+
+    try:
+        from pymediainfo import MediaInfo
+        media_info = MediaInfo.parse(str(filepath))
+
+        has_audio = False
+        for track in media_info.tracks:
+            if track.track_type == "General":
+                # Duration is in milliseconds
+                if track.duration:
+                    result['duration'] = float(track.duration) / 1000.0
+            elif track.track_type == "Audio":
+                has_audio = True
+
+        # is_muted only applies to videos
+        if media_type == 'video':
+            result['is_muted'] = not has_audio
+
+    except Exception as e:
+        logger.warning("Failed to get audio metadata", path=str(filepath), error=str(e))
+
+    return result

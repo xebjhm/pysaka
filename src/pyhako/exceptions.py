@@ -17,12 +17,25 @@ class ApiError(HakoError):
 
 class SessionExpiredError(AuthError):
     """
-    Raised when the session has been invalidated.
-    
+    Raised when the session has been invalidated server-side.
+
     This typically happens when:
     - The user logged in from another device/browser
-    - The session timed out on the server
-    
-    The user needs to re-authenticate to continue.
+    - The session was explicitly revoked on the server
+
+    User message: "Authentication session has expired. Please log in again to continue using the service."
+    """
+    pass
+
+
+class RefreshFailedError(AuthError):
+    """
+    Raised when all token refresh attempts have failed unexpectedly.
+
+    This indicates a potential bug or unexpected server behavior,
+    as opposed to SessionExpiredError which is an expected scenario.
+
+    User message: "Authentication failed unexpectedly. Please log in again to continue using the service."
+    Optional: Include "Report issue" action since this is unexpected.
     """
     pass
