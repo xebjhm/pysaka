@@ -1,7 +1,7 @@
 """Tests for blog scraping module."""
 
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest

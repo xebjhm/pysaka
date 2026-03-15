@@ -1,12 +1,10 @@
 """Extended tests for pyhako.client module to improve coverage."""
 
-import asyncio
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyhako import ApiError, Client, Group, SessionExpiredError
+from pyhako import Client, Group, SessionExpiredError
 
 
 class TestClientInitialization:

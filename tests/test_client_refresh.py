@@ -7,6 +7,7 @@ import pytest
 import time_machine
 
 from pyhako.client import Client, Group
+from pyhako.exceptions import RefreshFailedError
 
 
 @pytest.fixture
@@ -87,10 +88,11 @@ async def test_headless_refresh_updates_token(client_with_auth_dir, mock_session
 
 @pytest.mark.asyncio
 async def test_headless_refresh_skipped_without_auth_dir(client_without_auth_dir, mock_session):
-    """Test that headless refresh is skipped when no auth_dir configured."""
+    """Test that refresh returns False when no credentials configured at all."""
     with patch('pyhako.auth.BrowserAuth') as mock_auth:
         mock_auth.refresh_token_headless = AsyncMock()
 
+        # With no credentials at all, returns False (nothing to try)
         result = await client_without_auth_dir.refresh_access_token(mock_session)
 
         # Headless refresh should NOT be called when auth_dir is None
@@ -126,28 +128,25 @@ async def test_token_refresh_with_frozen_time(client_with_auth_dir, mock_session
 
 
 @pytest.mark.asyncio
-async def test_headless_refresh_failure_handled_gracefully(client_with_auth_dir, mock_session):
-    """Test that headless refresh failure is handled gracefully."""
+async def test_headless_refresh_failure_raises_error(client_with_auth_dir, mock_session):
+    """Test that headless refresh failure raises RefreshFailedError."""
     with patch('pyhako.auth.BrowserAuth') as mock_auth:
         # Simulate refresh failure (returns None)
         mock_auth.refresh_token_headless = AsyncMock(return_value=None)
 
-        result = await client_with_auth_dir.refresh_access_token(mock_session)
+        with pytest.raises(RefreshFailedError):
+            await client_with_auth_dir.refresh_access_token(mock_session)
 
-        # Should return False but not crash
-        assert result is False
         # Token should remain unchanged
         assert client_with_auth_dir.access_token == "expired_token"
 
 
 @pytest.mark.asyncio
-async def test_headless_refresh_exception_handled(client_with_auth_dir, mock_session):
-    """Test that exceptions during headless refresh are caught."""
+async def test_headless_refresh_exception_raises_refresh_failed(client_with_auth_dir, mock_session):
+    """Test that exceptions during headless refresh result in RefreshFailedError."""
     with patch('pyhako.auth.BrowserAuth') as mock_auth:
         # Simulate exception
         mock_auth.refresh_token_headless = AsyncMock(side_effect=Exception("Browser crash"))
 
-        result = await client_with_auth_dir.refresh_access_token(mock_session)
-
-        # Should return False and not propagate exception
-        assert result is False
+        with pytest.raises(RefreshFailedError):
+            await client_with_auth_dir.refresh_access_token(mock_session)

@@ -1,19 +1,17 @@
 """Extended tests for pyhako.credentials module to improve coverage."""
 
-import platform
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pyhako.credentials import (
+    KeyringStore,
+    TokenManager,
     _compress_data,
     _decompress_data,
     get_auth_dir,
     get_user_data_dir,
     is_windows,
-    KeyringStore,
-    TokenManager,
 )
 from pyhako.exceptions import HakoError
 
@@ -158,7 +156,7 @@ class TestKeyringStore:
              patch("keyring.set_keyring"):
             # This should attempt fallback - may fail but we're testing the path
             try:
-                store = KeyringStore()
+                KeyringStore()
             except Exception:
                 # The fallback may not work without the actual module,
                 # but we've tested the fallback attempt path

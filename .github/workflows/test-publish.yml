@@ -1,0 +1,146 @@
+name: Test Publish to TestPyPI
+
+on:
+  # Manual trigger for dry-run testing
+  workflow_dispatch:
+    inputs:
+      version_suffix:
+        description: 'Version suffix (e.g., dev1, rc1). Leave empty for timestamp-based suffix.'
+        required: false
+        default: ''
+  # Automatically run on PRs to main for validation
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pyproject.toml'
+      - 'src/**'
+      - '.github/workflows/publish.yml'
+      - '.github/workflows/test-publish.yml'
+
+permissions:
+  id-token: write  # Required for trusted publishing
+
+jobs:
+  test-build:
+    name: Build and Test Publish
+    runs-on: ubuntu-latest
+    outputs:
+      test_version: ${{ steps.test_version.outputs.test_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Get base version
+        id: version
+        run: |
+          BASE_VERSION=$(grep -Po '(?<=^version = ")[^"]*' pyproject.toml)
+          echo "base_version=$BASE_VERSION" >> $GITHUB_OUTPUT
+          echo "Base version: $BASE_VERSION"
+
+      - name: Generate test version
+        id: test_version
+        env:
+          INPUT_SUFFIX: ${{ github.event.inputs.version_suffix }}
+        run: |
+          BASE="${{ steps.version.outputs.base_version }}"
+
+          # Use provided suffix or generate timestamp-based one
+          if [ -n "$INPUT_SUFFIX" ]; then
+            SUFFIX="$INPUT_SUFFIX"
+          else
+            # Use timestamp for unique version
+            TIMESTAMP=$(date +%Y%m%d%H%M%S)
+            SUFFIX="dev${TIMESTAMP}"
+          fi
+
+          TEST_VERSION="${BASE}.${SUFFIX}"
+          echo "test_version=$TEST_VERSION" >> $GITHUB_OUTPUT
+          echo "Test version: $TEST_VERSION"
+
+      - name: Update version for TestPyPI
+        env:
+          TEST_VERSION: ${{ steps.test_version.outputs.test_version }}
+        run: |
+          # Create a temporary version for TestPyPI
+          sed -i "s/^version = \".*\"/version = \"$TEST_VERSION\"/" pyproject.toml
+          echo "Updated pyproject.toml version:"
+          grep '^version' pyproject.toml
+
+      - name: Build package
+        run: uv build
+
+      - name: List built artifacts
+        run: ls -la dist/
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-python-package-distributions
+          path: dist/
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: test-build
+    runs-on: ubuntu-latest
+    # Only publish on manual trigger, not on PR (to save TestPyPI quota)
+    if: github.event_name == 'workflow_dispatch'
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/pyhako
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: test-python-package-distributions
+          path: dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # Uses trusted publishing via OIDC - no API token needed
+          # Requires TestPyPI trusted publisher to be configured
+
+  verify-install:
+    name: Verify Installation from TestPyPI
+    needs: [test-build, publish-testpypi]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Wait for TestPyPI index to update
+        run: sleep 30
+
+      - name: Install from TestPyPI
+        env:
+          TEST_VERSION: ${{ needs.test-build.outputs.test_version }}
+        run: |
+          # Install from TestPyPI, falling back to PyPI for dependencies
+          uv pip install --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
+            "pyhako==$TEST_VERSION"
+
+      - name: Verify import
+        run: |
+          uv run python -c "import pyhako; print(f'pyhako version: {pyhako.__version__}')"
+
+      - name: Run basic smoke test
+        run: |
+          uv run python -c "
+          from pyhako import Group
+          print('Available groups:', [g.value for g in Group])
+          print('Smoke test passed!')
+          "

@@ -8,8 +8,8 @@ import aiofiles
 import aiohttp
 import structlog
 
-from .client import GROUP_CONFIG, Client
-from .media import get_media_dimensions
+from .client import Client
+from .media import get_audio_metadata, get_media_dimensions
 from .utils import get_media_extension, normalize_message, sanitize_name
 
 logger = structlog.get_logger()
@@ -17,7 +17,7 @@ logger = structlog.get_logger()
 class SyncManager:
     """
     Manages synchronization of messages and media for a specific client.
-    
+
     Handles state tracking, message fetching, deduplication, and media downloading.
     """
 
@@ -114,8 +114,21 @@ class SyncManager:
         gname = sanitize_name(group['name'])
         mname = sanitize_name(member['name'])
 
-        service_name = GROUP_CONFIG[self.client.group].get("display_name", self.client.group.value)
-        group_dir = self.output_dir / service_name / "messages" / f"{gid} {gname}"
+        # output_dir is already service-specific (e.g., output/日向坂46/)
+        # so we only need to add messages/ and the group directory
+        messages_dir = self.output_dir / "messages"
+        group_dir = messages_dir / f"{gid} {gname}"
+
+        # If group was renamed on server (e.g., "12th Single" → "16th Single"),
+        # rename the existing directory instead of creating a duplicate.
+        if not group_dir.exists() and messages_dir.exists():
+            for existing in messages_dir.iterdir():
+                if existing.is_dir() and existing.name.startswith(f"{gid} "):
+                    logger.info("Group renamed on server, renaming directory",
+                                old=existing.name, new=group_dir.name)
+                    existing.rename(group_dir)
+                    break
+
         member_dir = group_dir / f"{mid} {mname}"
         member_dir.mkdir(parents=True, exist_ok=True)
         for t in ['picture', 'video', 'voice']:
@@ -177,7 +190,6 @@ class SyncManager:
                     "thumbnail": member.get('thumbnail'),
                     "phone_image": member.get('phone_image'),
                     "group_thumbnail": group.get('thumbnail'),
-                    "is_active": group.get('subscription', {}).get('state') == 'active'
                 },
                 "total_messages": len(merged),
                 "message_type_counts": type_counts,
@@ -189,8 +201,7 @@ class SyncManager:
 
             # Update State
             max_id = max(x['id'] for x in merged) if merged else (last_id or 0)
-            if max_id is not None:
-                self.update_sync_state(gid, mid, max_id, len(merged))
+            self.update_sync_state(gid, mid, max_id, len(merged))
 
             return len(processed)
 
@@ -258,6 +269,12 @@ class SyncManager:
                             p_msg['width'] = width
                             p_msg['height'] = height
 
+                # Skip empty text messages (no content and no media)
+                # These are often system/metadata entries from subscription
+                if msg_type == 'text' and not p_msg.get('content') and not media_url:
+                    logger.debug("Skipping empty text message", message_id=msg.get('id'))
+                    continue
+
                 processed.append(p_msg)
             except Exception as e:
                 mid = msg.get('id')
@@ -270,71 +287,94 @@ class SyncManager:
         queue: list[dict[str, Any]],
         concurrency: int = 5,
         progress_callback: Optional[Any] = None
-    ) -> dict[Path, dict[int, tuple[Optional[int], Optional[int]]]]:
+    ) -> dict[Path, dict[int, dict[str, Any]]]:
         """
-        Downloads files in the queue using a semaphore for concurrency.
+        Downloads files in the queue.
+
+        Concurrency is managed by the caller's session wrapper (PooledSession)
+        which acquires/releases pool slots per HTTP request. The ``concurrency``
+        parameter is kept for backward compatibility but is no longer used
+        internally.
 
         Args:
-            session: Active aiohttp session.
+            session: Active aiohttp session (or PooledSession wrapper).
             queue: List of media items to download.
-            concurrency: Max concurrent downloads.
+            concurrency: Deprecated — kept for backward compatibility.
             progress_callback: Optional callback.
 
         Returns:
-            Dict mapping member_dir to {message_id: (width, height)} for downloaded media.
+            Dict mapping member_dir to {message_id: metadata_dict} for downloaded media.
+            metadata_dict contains: width, height, media_duration, is_muted (as applicable).
         """
         if not queue:
             return {}
 
-        sem = asyncio.Semaphore(concurrency)
+        # Concurrency is managed by the caller's PooledSession / AdaptivePool.
+        # No local semaphore needed — each HTTP request in download_file
+        # acquires a pool slot via the session wrapper.
         total = len(queue)
         completed = 0
-        # Group dimensions by member_dir for efficient batch updates
-        dimensions_by_dir: dict[Path, dict[int, tuple[Optional[int], Optional[int]]]] = {}
+        # Group metadata by member_dir for efficient batch updates
+        metadata_by_dir: dict[Path, dict[int, dict[str, Any]]] = {}
 
         async def worker(item: dict[str, Any]) -> None:
             nonlocal completed
-            async with sem:
-                res = await self.client.download_file(
-                    session,
-                    item['url'],
-                    item['path'],
-                    item['timestamp']
-                )
-                if res:
-                    # Extract dimensions after successful download
-                    media_type = item.get('media_type', '')
-                    member_dir = item.get('member_dir')
-                    if media_type in ('picture', 'video') and member_dir:
+            res = await self.client.download_file(
+                session,
+                item['url'],
+                item['path'],
+                item['timestamp']
+            )
+            if res:
+                media_type = item.get('media_type', '')
+                member_dir = item.get('member_dir')
+                if member_dir:
+                    metadata: dict[str, Any] = {}
+
+                    # Extract dimensions for pictures and videos
+                    if media_type in ('picture', 'video'):
                         width, height = get_media_dimensions(item['path'], media_type)
                         if width and height:
-                            if member_dir not in dimensions_by_dir:
-                                dimensions_by_dir[member_dir] = {}
-                            dimensions_by_dir[member_dir][item['message_id']] = (width, height)
+                            metadata['width'] = width
+                            metadata['height'] = height
 
-                    completed += 1
-                    if progress_callback:
-                        if asyncio.iscoroutinefunction(progress_callback):
-                            await progress_callback(completed, total)
-                        else:
-                            progress_callback(completed, total)
+                    # Extract audio metadata for videos and voice messages
+                    if media_type in ('video', 'voice'):
+                        audio_meta = get_audio_metadata(item['path'], media_type)
+                        if audio_meta.get('duration') is not None:
+                            metadata['media_duration'] = audio_meta['duration']
+                        if audio_meta.get('is_muted') is not None:
+                            metadata['is_muted'] = audio_meta['is_muted']
+
+                    if metadata:
+                        if member_dir not in metadata_by_dir:
+                            metadata_by_dir[member_dir] = {}
+                        metadata_by_dir[member_dir][item['message_id']] = metadata
+
+                completed += 1
+                if progress_callback:
+                    if asyncio.iscoroutinefunction(progress_callback):
+                        await progress_callback(completed, total)
+                    else:
+                        progress_callback(completed, total)
 
         await asyncio.gather(*[worker(item) for item in queue])
-        return dimensions_by_dir
+        return metadata_by_dir
 
-    async def update_message_dimensions(
+    async def update_message_metadata(
         self,
         messages_file: Path,
-        dimensions: dict[int, tuple[Optional[int], Optional[int]]]
+        metadata: dict[int, dict[str, Any]]
     ) -> None:
         """
-        Update messages.json with extracted media dimensions.
+        Update messages.json with extracted media metadata.
 
         Args:
             messages_file: Path to messages.json file.
-            dimensions: Dict mapping message_id to (width, height).
+            metadata: Dict mapping message_id to metadata dict
+                      (may contain: width, height, media_duration, is_muted).
         """
-        if not dimensions or not messages_file.exists():
+        if not metadata or not messages_file.exists():
             return
 
         try:
@@ -344,16 +384,16 @@ class SyncManager:
             updated = False
             for msg in data.get('messages', []):
                 msg_id = msg.get('id')
-                if msg_id in dimensions:
-                    width, height = dimensions[msg_id]
-                    if width and height:
-                        msg['width'] = width
-                        msg['height'] = height
-                        updated = True
+                if msg_id in metadata:
+                    msg_metadata = metadata[msg_id]
+                    for key, value in msg_metadata.items():
+                        if value is not None:
+                            msg[key] = value
+                            updated = True
 
             if updated:
                 async with aiofiles.open(messages_file, 'w', encoding='utf-8') as f:
                     await f.write(json.dumps(data, ensure_ascii=False, indent=2))
 
         except Exception as e:
-            logger.error("Failed to update message dimensions", file=str(messages_file), error=str(e))
+            logger.error("Failed to update message metadata", file=str(messages_file), error=str(e))
