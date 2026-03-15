@@ -162,7 +162,7 @@ class BrowserAuth:
                 logger.debug("--- Capturing Cookies ---")
                 for c in cookies_list:
                     if c['name'] == 'session':
-                        logger.debug(f"Found session cookie: {c['value']} | Domain: {c.get('domain')} | Path: {c.get('path')}")
+                        logger.debug("Found session cookie", domain=c.get('domain'), path=c.get('path'))
 
                     if target_domain in c.get('domain', ''):
                         relevant_cookies[c['name']] = c['value']
