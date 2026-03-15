@@ -6,14 +6,15 @@ from pyhako import Client, Group
 
 
 @pytest.fixture
-def mock_token_manager_cls():
-    with patch("pyhako.client.TokenManager") as mock:
-        yield mock
+def mock_token_manager():
+    mock_tm = patch("pyhako.client.get_token_manager")
+    with mock_tm as mock_fn:
+        yield mock_fn
 
 @pytest.mark.asyncio
-async def test_client_init_auto_load(mock_token_manager_cls):
+async def test_client_init_auto_load(mock_token_manager):
     # Setup mock manager instance
-    manager_instance = mock_token_manager_cls.return_value
+    manager_instance = mock_token_manager.return_value
     manager_instance.load_session.return_value = {
         "access_token": "stored_token",
         "refresh_token": "stored_refresh",
@@ -24,7 +25,7 @@ async def test_client_init_auto_load(mock_token_manager_cls):
     client = Client(group=Group.HINATAZAKA46, use_token_storage=True)
 
     # Verify it tried to load
-    mock_token_manager_cls.assert_called_with()
+    mock_token_manager.assert_called_with()
     manager_instance.load_session.assert_called_with(Group.HINATAZAKA46.value)
 
     # Verify properties set
@@ -34,12 +35,12 @@ async def test_client_init_auto_load(mock_token_manager_cls):
     assert client.headers["Authorization"] == "Bearer stored_token"
 
 @pytest.mark.asyncio
-async def test_client_update_token_auto_save(mock_token_manager_cls):
+async def test_client_update_token_auto_save(mock_token_manager):
     # Configure mock to return None to avoid auto-loading junk mocks
-    mock_token_manager_cls.return_value.load_session.return_value = None
+    mock_token_manager.return_value.load_session.return_value = None
 
     client = Client(group=Group.HINATAZAKA46, use_token_storage=True)
-    manager_instance = mock_token_manager_cls.return_value
+    manager_instance = mock_token_manager.return_value
 
     # Call update_token
     await client.update_token("new_token_123")
@@ -53,13 +54,13 @@ async def test_client_update_token_auto_save(mock_token_manager_cls):
     )
 
 @pytest.mark.asyncio
-async def test_client_manual_save(mock_token_manager_cls):
+async def test_client_manual_save(mock_token_manager):
     client = Client(
         group=Group.HINATAZAKA46,
         access_token="manual_token",
         use_token_storage=True
     )
-    manager_instance = mock_token_manager_cls.return_value
+    manager_instance = mock_token_manager.return_value
 
     client.save_session()
 
