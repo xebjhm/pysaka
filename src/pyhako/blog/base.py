@@ -136,7 +136,7 @@ class BaseBlogScraper(ABC):
         pass
 
     @abstractmethod
-    async def get_blogs_metadata(
+    def get_blogs_metadata(
         self,
         member_id: str,
         since_date: datetime | None = None,
@@ -161,7 +161,7 @@ class BaseBlogScraper(ABC):
         pass
 
     @abstractmethod
-    async def get_blogs(
+    def get_blogs(
         self,
         member_id: str,
         since_date: datetime | None = None,
