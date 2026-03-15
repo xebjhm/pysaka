@@ -201,8 +201,7 @@ class SyncManager:
 
             # Update State
             max_id = max(x['id'] for x in merged) if merged else (last_id or 0)
-            if max_id is not None:
-                self.update_sync_state(gid, mid, max_id, len(merged))
+            self.update_sync_state(gid, mid, max_id, len(merged))
 
             return len(processed)
 
