@@ -7,7 +7,7 @@ import aiofiles
 import aiohttp
 import structlog
 
-from .credentials import TokenManager
+from .credentials import get_token_manager
 from .exceptions import ApiError, RefreshFailedError, SessionExpiredError
 from .utils import get_jwt_remaining_seconds, get_media_extension
 
@@ -103,7 +103,7 @@ class Client:
         self.token_manager = None
         if use_token_storage:
             try:
-                self.token_manager = TokenManager()
+                self.token_manager = get_token_manager()
                 # Attempt to auto-load if explicit tokens not provided
                 if not access_token:
                     saved = self.token_manager.load_session(self.group.value)
