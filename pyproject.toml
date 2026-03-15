@@ -37,6 +37,9 @@ dependencies = [
     "pymediainfo>=6.0.0",
 ]
 
+[project.optional-dependencies]
+headless = ["keyrings.alt>=4.0"]
+
 [project.urls]
 Homepage = "https://github.com/xebjhm/PyHako"
 Repository = "https://github.com/xebjhm/PyHako"
