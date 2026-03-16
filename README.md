@@ -3,7 +3,7 @@
 [![PyPI version](https://badge.fury.io/py/pyhako.svg)](https://badge.fury.io/py/pyhako)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-[![Build Status](https://github.com/xebjhm/PyHako/actions/workflows/ci.yml/badge.svg)](https://github.com/xebjhm/PyHako/actions)
+[![Build Status](https://github.com/xebjhm/PyHako/actions/workflows/test.yml/badge.svg)](https://github.com/xebjhm/PyHako/actions)
 
 ## Disclaimer & Warnings
 
@@ -29,15 +29,15 @@ Users must agree to the official Terms of Service of the respective platforms. T
 > (17) 自動化された手段（クローラおよび類似の技術を含む）を用いて本サービスにアクセスし、またはアクセスを試みる行為
 
 
-**Async Python client for Sakamichi Groups (Nogizaka46, Sakurazaka46, Hinatazaka46) Message API.**
+**Async Python client for Sakamichi Groups (Nogizaka46, Sakurazaka46, Hinatazaka46, Yodel) Message API.**
 
-PyHako provides a robust, type-hinted, and async interface to interact with the official Message apps for all three Sakamichi groups. It handles authentication (via browser), token management, and data retrieval.
+PyHako provides a robust, type-hinted, and async interface to interact with the official Message apps for all supported groups. It handles authentication (via browser), token management, and data retrieval.
 
 ## Features
 - 🔐 **Browser Authentication**: Seamless interactive login via Playwright (compatible with MFA/SSO).
 - 🍪 **Auto-Refresh**: Automatically refreshes access tokens using captured cookies.
 - 🚀 **Async/Await**: Built on `aiohttp` for high-performance concurrent requests.
-- 📦 **Multi-Group**: Supports Nogizaka46, Sakurazaka46, and Hinatazaka46 out of the box.
+- 📦 **Multi-Group**: Supports Nogizaka46, Sakurazaka46, Hinatazaka46, and Yodel out of the box.
 - 📝 **Blog Scraper**: Backup official blogs (HTML + images) for all three groups.
 - 🛠️ **Type Hinted**: 100% type coverage for better IDE support.
 
@@ -50,11 +50,9 @@ PyHako uses `structlog` for observability. You can control the logging output vi
 
 ## Installation
 
-Recommended install via `uv` (standard) or `pip`:
+Recommended install via `uv`:
 ```bash
 uv add pyhako
-# or
-pip install pyhako
 ```
 
 For development:
@@ -144,6 +142,24 @@ The main entry point.
 - `get_fc_contents(session)`: Fetch Fan Club content.
 - `get_organizations(session)`: Fetch organizations.
 - `get_products(session, product_type)`: Fetch products (subscriptions).
+- `post_json(session, endpoint, data)`: Perform JSON POST requests.
+- `delete_json(session, endpoint)`: Perform DELETE requests.
+- `download_file(session, url, filepath)`: Download a file to local filesystem.
+- `get_member(session, member_id)`: Fetch individual member details.
+- `get_account(session)`: Fetch user account information.
+- `get_letters(session, group_id)`: Fetch user's sent letters/cards.
+- `get_past_messages(session, group_id)`: Fetch historical messages.
+- `get_subscription_streak(session, group_id)`: Fetch consecutive subscription days.
+- `add_favorite(session, message_id)`: Add a message to favorites.
+- `remove_favorite(session, message_id)`: Remove a message from favorites.
+- `refresh_if_needed(session)`: Lazy token refresh if expiring soon.
+
+### Credential Management
+
+- `get_token_manager()`: Get the singleton `TokenManager` instance for secure credential storage.
+- `TokenManager.save_session(group, access_token, ...)`: Save session credentials to system keyring.
+- `TokenManager.load_session(group)`: Load stored session credentials.
+- `TokenManager.delete_session(group)`: Remove stored credentials.
 
 ### `BrowserAuth`
 Helper for OAuth2 flow.
@@ -160,7 +176,16 @@ Public blog scrapers (no authentication required).
 Each scraper provides:
 - `get_members()`: Get dict of member_id -> member_name.
 - `get_blogs(member_id, since_date=None)`: AsyncIterator of BlogEntry objects.
-- `get_blog_detail(blog_id)`: Fetch single blog by ID.
+- `get_blog_detail(blog_id, member_id=None)`: Fetch single blog by ID.
+
+### Exceptions
+
+- `HakoError`: Base exception for all PyHako errors.
+- `AuthError`: Authentication related errors.
+- `ApiError`: API request errors (includes `status_code` attribute).
+- `SessionExpiredError`: Session invalidated server-side (e.g., logged in from another device).
+- `RefreshFailedError`: All token refresh attempts failed unexpectedly.
+- `BlogGoneError`: Blog post has been permanently removed (HTTP 404/410).
 
 ## Contributing
 Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details.

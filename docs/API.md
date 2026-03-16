@@ -42,12 +42,94 @@ Main API client supporting all Sakamichi groups.
 - **timestamp**: (Optional) Timestamp metadata.
 - **Returns**: `True` if success/exists.
 
+#### `get_profile(session) -> Optional[dict]`
+- **Returns**: Dict containing profile info (nickname, etc.) or `None` if failed.
+
+#### `get_news(session, count: int = 20) -> List[dict]`
+- **count**: Number of items to fetch (default 20).
+- **Returns**: List of news/announcement items.
+
+#### `get_tags(session) -> List[dict]`
+- **Returns**: List of tags.
+
+#### `get_fc_contents(session, organization_id: int = 1) -> List[dict]`
+- **organization_id**: Organization ID (default 1).
+- **Returns**: List of Fan Club content items.
+
+#### `get_organizations(session) -> List[dict]`
+- **Returns**: List of organizations.
+
+#### `get_products(session, product_type: str = None) -> List[dict]`
+- **product_type**: Optional filter (e.g. `'subscription'`, `'fc_subscription'`).
+- **Returns**: List of products.
+
+#### `get_member(session, member_id: int) -> Optional[dict]`
+- **member_id**: The ID of the member.
+- **Returns**: Member details dict or `None` if failed.
+
+#### `get_account(session) -> Optional[dict]`
+- **Returns**: Account info dict or `None` if failed.
+
+#### `get_letters(session, group_id: int, updated_from: str = None, count: int = 200) -> List[dict]`
+- **group_id**: Target group ID.
+- **updated_from**: ISO timestamp to fetch letters updated after.
+- **count**: Number of letters to fetch (default 200).
+- **Returns**: List of letter objects.
+
+#### `get_past_messages(session, group_id: int) -> List[dict]`
+- **group_id**: Target group ID.
+- **Returns**: List of historical message objects (before subscription start date).
+
+#### `get_subscription_streak(session, group_id: int) -> Optional[dict]`
+- **group_id**: Target group ID.
+- **Returns**: Dict with streak information or `None` if failed.
+
+#### `post_json(session, endpoint: str, data: dict = None) -> Optional[dict]`
+- **endpoint**: API endpoint path (e.g. `"/messages/123/favorite"`).
+- **data**: Request body as dict (can be `None` for empty body).
+- **Returns**: JSON response as dict or `None` if failed.
+
+#### `delete_json(session, endpoint: str) -> bool`
+- **endpoint**: API endpoint path.
+- **Returns**: `True` if successful (2xx), `False` otherwise.
+
+#### `add_favorite(session, message_id: int) -> bool`
+- **message_id**: The ID of the message to favorite.
+- **Returns**: `True` if successful, `False` otherwise.
+
+#### `remove_favorite(session, message_id: int) -> bool`
+- **message_id**: The ID of the message to unfavorite.
+- **Returns**: `True` if successful, `False` otherwise.
+
 #### `refresh_access_token(session) -> bool`
 - **session**: Active aiohttp session.
 - **Returns**: `True` if refresh succeeded, `False` if no credentials configured.
 - **Raises**:
   - `SessionExpiredError` if session is invalid server-side (e.g., logged in elsewhere).
   - `RefreshFailedError` if all refresh attempts failed unexpectedly.
+
+#### `refresh_if_needed(session, min_seconds_remaining: int = 300) -> bool`
+- **session**: Active aiohttp session.
+- **min_seconds_remaining**: Threshold in seconds. Refresh if token expires within this time. Default: 300 (5 minutes).
+- **Returns**: `True` if refresh happened, `False` if skipped (token still valid).
+
+#### `get_token_expiry_seconds() -> Optional[int]`
+- **Returns**: Seconds remaining until token expiry (can be negative if expired), or `None` if no token is set.
+
+#### `save_session() -> None`
+Manually save current session to storage if configured.
+
+## Credentials
+
+### `get_token_manager() -> TokenManager`
+Get the singleton `TokenManager` instance. Avoids repeated keyring probe operations when accessed from multiple modules.
+
+```python
+from pyhako.credentials import get_token_manager
+
+tm = get_token_manager()
+tm.save_session("hinatazaka46", access_token, refresh_token, cookies)
+```
 
 ## Sync Manager
 
@@ -149,8 +231,9 @@ All scrapers implement:
 - **since_date**: (Optional) Stop when reaching blogs before this date.
 - **Yields**: `BlogEntry` objects for each blog post.
 
-##### `get_blog_detail(blog_id: str) -> BlogEntry`
+##### `get_blog_detail(blog_id: str, member_id: str = None) -> BlogEntry`
 - **blog_id**: The unique identifier of the blog post.
+- **member_id**: (Optional) The member's identifier, used by some scrapers for URL construction.
 - **Returns**: A `BlogEntry` with full content.
 
 ### `BlogEntry`
@@ -178,7 +261,51 @@ async with aiohttp.ClientSession() as session:
     members = await scraper.get_members()
 ```
 
+### `MemberInfo`
+Dataclass representing a member with profile image.
+
+#### Attributes
+- **id**: `str` - Member ID (ct parameter for blogs).
+- **name**: `str` - Member name in Japanese.
+- **thumbnail_url**: `str` - URL to member's profile image on CDN.
+
+```python
+from pyhako.blog import MemberInfo
+```
+
 ## Exceptions
+
+### `HakoError`
+Base exception for all PyHako errors.
+
+### `AuthError`
+Authentication related errors. Subclass of `HakoError`.
+
+### `ApiError`
+API request errors. Subclass of `HakoError`.
+
+- **status_code**: `Optional[int]` - HTTP status code that caused the error.
+
+```python
+from pyhako import ApiError
+
+try:
+    data = await client.fetch_json(session, "/endpoint")
+except ApiError as e:
+    print(f"API error (status {e.status_code}): {e}")
+```
+
+### `BlogGoneError`
+Raised when a blog post has been permanently removed (HTTP 404/410).
+
+```python
+from pyhako.blog import BlogGoneError
+
+try:
+    entry = await scraper.get_blog_detail(blog_id)
+except BlogGoneError:
+    print("Blog post has been removed")
+```
 
 ### `SessionExpiredError`
 Raised when the session has been invalidated server-side (e.g., user logged in from another device).
@@ -212,6 +339,7 @@ except RefreshFailedError:
 - `Group.NOGIZAKA46`
 - `Group.SAKURAZAKA46`
 - `Group.HINATAZAKA46`
+- `Group.YODEL`
 
 ## Configuration
 
