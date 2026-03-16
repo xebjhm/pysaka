@@ -135,7 +135,7 @@ jobs:
 
       - name: Verify import
         run: |
-          uv run python -c "import pyhako; print(f'pyhako version: {pyhako.__version__}')"
+          uv run python -c "from importlib.metadata import version; print(f'pyhako version: {version(\"pyhako\")}')"
 
       - name: Run basic smoke test
         run: |
