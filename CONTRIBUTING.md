@@ -155,8 +155,8 @@ Common scopes for PyHako:
 - `auth` - Authentication
 - `sync` - Synchronization
 - `client` - API client
-- `db` - Database operations
 - `media` - Media handling
+- `blog` - Blog scraping
 
 ### Examples
 
@@ -184,16 +184,23 @@ Integration tests require stored credentials. They test real browser refresh and
 
 **Prerequisites**:
 
-1. Run the login script to store credentials:
-   ```bash
-   uv run python scripts/login.py
-   # Or specify a group:
-   uv run python scripts/login.py --group sakurazaka46
+1. Use `BrowserAuth` to log in and store credentials:
+   ```python
+   import asyncio
+   from pyhako import BrowserAuth, Group
+   from pyhako.credentials import get_token_manager
+
+   async def login():
+       creds = await BrowserAuth.login(Group.HINATAZAKA46)
+       tm = get_token_manager()
+       tm.save_session("hinatazaka46", creds["access_token"], cookies=creds.get("cookies"))
+
+   asyncio.run(login())
    ```
 
-2. A browser window will open - complete the login process
+2. A browser window will open -- complete the login process
 
-3. Credentials are automatically stored in your system keyring
+3. Credentials are stored in your system keyring
 
 **Run integration tests**:
 ```bash
