@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from pyhako.client import Client, Group
-from pyhako.manager import SyncManager
+from pyzaka.client import Client, Group
+from pyzaka.manager import SyncManager
 
 
 @pytest.fixture
@@ -105,3 +105,92 @@ async def test_process_media_queue(sync_manager):
 
     assert sync_manager.client.download_file.call_count == 2
     assert callback.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_member_prefetched_skips_api(sync_manager):
+    """When prefetched_messages is provided, no API call is made."""
+    session = AsyncMock()
+    group = {'id': 1, 'name': 'Grp'}
+    member = {'id': 10, 'name': 'Mem', 'portrait': 'url'}
+    media_queue = []
+
+    prefetched = [
+        {'id': 201, 'type': 'text', 'text': 'Hi', 'member_id': 10, 'published_at': '2023-06-01T10:00:00Z'},
+        {'id': 202, 'type': 'text', 'text': 'Bye', 'member_id': 20, 'published_at': '2023-06-01T11:00:00Z'},
+    ]
+
+    count = await sync_manager.sync_member(
+        session, group, member, media_queue, prefetched_messages=prefetched
+    )
+
+    assert count == 1  # Only member_id=10
+    sync_manager.client.get_messages.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sync_member_prefetched_respects_last_id(sync_manager):
+    """Prefetched path filters by this member's own last_id."""
+    session = AsyncMock()
+    group = {'id': 1, 'name': 'Grp'}
+    member = {'id': 10, 'name': 'Mem'}
+    media_queue = []
+
+    # Set last_id for this member to 300 — messages ≤ 300 should be skipped
+    sync_manager.update_sync_state(1, 10, 300, 5)
+
+    prefetched = [
+        {'id': 299, 'type': 'text', 'text': 'Old', 'member_id': 10, 'published_at': '2023-01-01T01:00:00Z'},
+        {'id': 300, 'type': 'text', 'text': 'Boundary', 'member_id': 10, 'published_at': '2023-01-01T02:00:00Z'},
+        {'id': 301, 'type': 'text', 'text': 'New', 'member_id': 10, 'published_at': '2023-01-01T03:00:00Z'},
+        {'id': 302, 'type': 'text', 'text': 'Also new', 'member_id': 10, 'published_at': '2023-01-01T04:00:00Z'},
+    ]
+
+    count = await sync_manager.sync_member(
+        session, group, member, media_queue, prefetched_messages=prefetched
+    )
+
+    assert count == 2  # Only id=301 and id=302
+    sync_manager.client.get_messages.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sync_member_prefetched_no_last_id_takes_all(sync_manager):
+    """When last_id is None (first sync), all prefetched messages for the member are used."""
+    session = AsyncMock()
+    group = {'id': 1, 'name': 'Grp'}
+    member = {'id': 10, 'name': 'Mem'}
+    media_queue = []
+
+    prefetched = [
+        {'id': 1, 'type': 'text', 'text': 'First', 'member_id': 10, 'published_at': '2023-01-01T01:00:00Z'},
+        {'id': 2, 'type': 'text', 'text': 'Second', 'member_id': 10, 'published_at': '2023-01-01T02:00:00Z'},
+        {'id': 3, 'type': 'text', 'text': 'Other', 'member_id': 99, 'published_at': '2023-01-01T03:00:00Z'},
+    ]
+
+    count = await sync_manager.sync_member(
+        session, group, member, media_queue, prefetched_messages=prefetched
+    )
+
+    assert count == 2  # member_id=10 only, but all of them
+    sync_manager.client.get_messages.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sync_member_prefetched_empty_returns_zero(sync_manager):
+    """Prefetched with no matching messages returns 0."""
+    session = AsyncMock()
+    group = {'id': 1, 'name': 'Grp'}
+    member = {'id': 10, 'name': 'Mem'}
+    media_queue = []
+
+    prefetched = [
+        {'id': 100, 'type': 'text', 'text': 'Other member', 'member_id': 20, 'published_at': '2023-01-01T01:00:00Z'},
+    ]
+
+    count = await sync_manager.sync_member(
+        session, group, member, media_queue, prefetched_messages=prefetched
+    )
+
+    assert count == 0
+    sync_manager.client.get_messages.assert_not_called()
