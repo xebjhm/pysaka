@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -46,10 +47,12 @@ class SyncManager:
                 self.sync_state = {}
 
     def save_sync_state(self) -> None:
-        """Save synchronization state to JSON file."""
+        """Save synchronization state to JSON file (atomic write)."""
         try:
-            with open(self.state_file, 'w', encoding='utf-8') as f:
+            tmp = self.state_file.with_suffix(".json.tmp")
+            with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(self.sync_state, f, indent=2)
+            os.replace(tmp, self.state_file)
         except Exception as e:
             logger.error("Failed to save sync state", error=str(e))
 
@@ -176,7 +179,30 @@ class SyncManager:
                         data = json.loads(await f.read())
                         existing_msgs = data.get('messages', [])
                 except Exception:
-                    pass
+                    # Corrupt file (e.g. force-close during write).
+                    # Reset this member's last_id so the next sync
+                    # re-fetches from the beginning to recover.
+                    logger.warning(
+                        "corrupt_messages_file",
+                        member=mname, member_id=mid, group_id=gid,
+                    )
+                    self.sync_state.pop(f"{gid}_{mid}", None)
+                    self.save_sync_state()
+
+            # Integrity check: detect if messages.json was truncated by a
+            # past force-close (file parses OK but is missing most messages).
+            state_key = f"{gid}_{mid}"
+            expected = (self.sync_state.get(state_key) or {}).get("total_messages", 0)
+            if expected > 0 and len(existing_msgs) < expected * 0.5:
+                logger.warning(
+                    "truncated_messages_detected",
+                    member=mname, member_id=mid, group_id=gid,
+                    expected=expected, actual=len(existing_msgs),
+                )
+                # Reset last_id — this sync may not recover everything,
+                # but the NEXT sync will do a full re-fetch for this member.
+                self.sync_state.pop(state_key, None)
+                self.save_sync_state()
 
             # Dedupe (Upsert: Prefer new data)
             merged_dict = {x['id']: x for x in existing_msgs}
@@ -210,8 +236,10 @@ class SyncManager:
                 "messages": merged
             }
 
-            async with aiofiles.open(existing_file, 'w', encoding='utf-8') as f:
+            tmp_file = existing_file.with_suffix(".json.tmp")
+            async with aiofiles.open(tmp_file, 'w', encoding='utf-8') as f:
                 await f.write(json.dumps(export_data, ensure_ascii=False, indent=2))
+            os.replace(tmp_file, existing_file)
 
             # Update State
             max_id = max(x['id'] for x in merged) if merged else (last_id or 0)
