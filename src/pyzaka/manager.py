@@ -189,18 +189,18 @@ class SyncManager:
                     self.sync_state.pop(f"{gid}_{mid}", None)
                     self.save_sync_state()
 
-            # Integrity check: detect if messages.json was truncated by a
-            # past force-close (file parses OK but is missing most messages).
+            # Integrity check: if the file has fewer messages than sync_state
+            # recorded, data was lost (e.g. past force-close overwrote the
+            # file with only new messages).  Reset last_id so the next sync
+            # does a full re-fetch to recover.
             state_key = f"{gid}_{mid}"
             expected = (self.sync_state.get(state_key) or {}).get("total_messages", 0)
-            if expected > 0 and len(existing_msgs) < expected * 0.5:
+            if expected > 0 and len(existing_msgs) < expected:
                 logger.warning(
-                    "truncated_messages_detected",
+                    "message_count_mismatch",
                     member=mname, member_id=mid, group_id=gid,
                     expected=expected, actual=len(existing_msgs),
                 )
-                # Reset last_id — this sync may not recover everything,
-                # but the NEXT sync will do a full re-fetch for this member.
                 self.sync_state.pop(state_key, None)
                 self.save_sync_state()
 
