@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -47,14 +49,33 @@ class SyncManager:
                 self.sync_state = {}
 
     def save_sync_state(self) -> None:
-        """Save synchronization state to JSON file (atomic write)."""
+        """Save synchronization state to JSON file (atomic write).
+
+        Uses a unique temp filename and retries os.replace to handle
+        Windows file locking (antivirus, search indexer).
+        """
+        tmp = self.state_file.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
         try:
-            tmp = self.state_file.with_suffix(".json.tmp")
             with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(self.sync_state, f, indent=2)
-            os.replace(tmp, self.state_file)
+
+            last_err: Exception | None = None
+            for attempt in range(5):
+                try:
+                    os.replace(tmp, self.state_file)
+                    return
+                except OSError as e:
+                    last_err = e
+                    time.sleep(0.05 * (attempt + 1))
+
+            logger.error("Failed to save sync state after retries", error=str(last_err))
         except Exception as e:
             logger.error("Failed to save sync state", error=str(e))
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def update_sync_state(self, group_id: int, member_id: int, last_msg_id: int, count: int,
                           last_ts: Optional[str] = None) -> None:
