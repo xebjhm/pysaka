@@ -527,33 +527,34 @@ class Client:
         session: aiohttp.ClientSession,
         group_id: int,
         since_id: Optional[int] = None,
+        since_ts: Optional[str] = None,
         max_id: Optional[int] = None,
         progress_callback=None
     ) -> list[dict[str, Any]]:
         """
         Fetch all new messages from a group's timeline.
-        Automatically handles pagination to retrieve all messages newer than `since_id`.
 
         Args:
             session: Active aiohttp ClientSession.
             group_id: The ID of the group/artist.
-            since_id: The message ID to start fetching from (exclusive).
-            max_id: Ignored by API, kept for compatibility/filtering.
-            progress_callback: Optional async function(date_str, count) to call on each page.
+            since_id: (Deprecated) Message ID cursor. Ignored when since_ts is set.
+            since_ts: ISO timestamp cursor. Fetch messages published after this time.
+            max_id: Ignored by API, kept for compatibility.
+            progress_callback: Optional async function(date_str, count).
 
         Returns:
-            List of message objects sorted by ID ascending.
-
-        Note:
-            Messages are returned by API sorted by published_at DESC, NOT id DESC.
-            Message IDs don't correlate strictly with timestamps - a message can have
-            a lower ID but later timestamp. We collect all messages and filter by ID
-            at the end, using timestamp-based pagination stopping.
+            List of message dicts, sorted by ID ascending.
         """
         all_messages: dict[int, dict[str, Any]] = {}
         page = 0
         current_continuation = None
-        since_timestamp: Optional[str] = None
+
+        # Resolve the effective timestamp cursor.
+        # When since_ts is given, use it directly.
+        # When only since_id is given (legacy), we must discover the timestamp
+        # by finding the since_id message in the stream (old behaviour).
+        effective_ts: Optional[str] = since_ts
+        need_discover_ts = since_id is not None and since_ts is None
 
         while True:
             params: dict[str, Any] = {
@@ -569,7 +570,6 @@ class Client:
             data = await self.fetch_json(session, f"/groups/{group_id}/timeline", params)
             if not data:
                 if page == 0 and await self.refresh_access_token(session):
-                    # Retry once if token was refreshed on first page
                     continue
                 break
 
@@ -577,17 +577,13 @@ class Client:
             if not messages:
                 break
 
-            # Collect ALL messages first, filter by since_id later
-            # This is necessary because messages are ordered by published_at, not id
-            found_since_id = False
             for m in messages:
-                msg_id = m['id']
-                all_messages[msg_id] = m
+                all_messages[m['id']] = m
 
-                # Track the timestamp of since_id message when we find it
-                if since_id and msg_id == since_id:
-                    since_timestamp = m.get('published_at')
-                    found_since_id = True
+                # Legacy path: discover timestamp of since_id message
+                if need_discover_ts and m['id'] == since_id:
+                    effective_ts = m.get('published_at')
+                    need_discover_ts = False
 
             if progress_callback and messages:
                 oldest_in_batch = messages[-1].get('published_at')
@@ -596,17 +592,10 @@ class Client:
                 else:
                     progress_callback(oldest_in_batch, len(all_messages))
 
-            # Stop conditions:
-            # 1. We found the since_id message in this batch
-            # 2. OR the oldest message in this batch has timestamp <= since_timestamp
-            #    (meaning we've gone past the point where new messages could exist)
-            if found_since_id:
-                break
-
-            # If we have a since_timestamp and oldest message is older, we can stop
-            if since_timestamp and messages:
+            # Stop condition: oldest message in this batch is older than cursor
+            if effective_ts and messages:
                 oldest_timestamp = messages[-1].get('published_at', '')
-                if oldest_timestamp and oldest_timestamp <= since_timestamp:
+                if oldest_timestamp and oldest_timestamp <= effective_ts:
                     break
 
             current_continuation = data.get('continuation')
@@ -616,8 +605,14 @@ class Client:
             page += 1
             await asyncio.sleep(0.5)
 
-        # Filter to only messages with id > since_id
-        if since_id:
+        # Filter: keep only messages newer than the cursor
+        if effective_ts:
+            all_messages = {
+                k: v for k, v in all_messages.items()
+                if (v.get('published_at') or '') > effective_ts
+            }
+        elif since_id:
+            # Pure legacy fallback (no timestamp available at all)
             all_messages = {k: v for k, v in all_messages.items() if k > since_id}
 
         return sorted(all_messages.values(), key=lambda x: x['id'])
