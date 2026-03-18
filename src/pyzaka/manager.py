@@ -157,7 +157,7 @@ class SyncManager:
                 messages = [
                     x for x in prefetched_messages
                     if x.get('member_id') == mid
-                    and (last_ts is None or (x.get('published_at') or '') > last_ts)
+                    and (last_ts is None or (x.get('published_at') or '') >= last_ts)
                 ]
                 logger.info("Filtered prefetched messages for member",
                             count=len(messages), member=mname)
