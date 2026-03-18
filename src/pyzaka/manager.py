@@ -56,35 +56,42 @@ class SyncManager:
         except Exception as e:
             logger.error("Failed to save sync state", error=str(e))
 
-    def update_sync_state(self, group_id: int, member_id: int, last_msg_id: int, count: int) -> None:
+    def update_sync_state(self, group_id: int, member_id: int, last_msg_id: int, count: int,
+                          last_ts: Optional[str] = None) -> None:
         """
         Update state for a specific member after sync.
 
         Args:
             group_id: ID of the group/artist.
             member_id: ID of the member.
-            last_msg_id: The highest message ID synced.
-            count: Number of messages synced in this batch.
+            last_msg_id: The highest message ID synced (diagnostic only).
+            count: Total message count after merge.
+            last_ts: The newest message's published_at timestamp (primary cursor).
         """
         key = f"{group_id}_{member_id}"
         self.sync_state[key] = {
             "last_message_id": last_msg_id,
+            "last_sync_ts": last_ts,
             "total_messages": count,
             "last_sync": datetime.now(timezone.utc).isoformat() + "Z"
         }
         self.save_sync_state()
 
-    def get_last_id(self, group_id: int, member_id: int) -> Optional[int]:
+    def get_last_ts(self, group_id: int, member_id: int) -> Optional[str]:
         """
-        Get the last synced message ID for a member.
-
-        Args:
-            group_id: ID of the group/artist.
-            member_id: ID of the member.
+        Get the last synced timestamp cursor for a member.
 
         Returns:
-            The message ID or None if never synced.
+            ISO timestamp string or None if never synced.
         """
+        key = f"{group_id}_{member_id}"
+        state = self.sync_state.get(key)
+        if state:
+            return state.get('last_sync_ts')
+        return None
+
+    def get_last_id(self, group_id: int, member_id: int) -> Optional[int]:
+        """Get the last synced message ID (legacy, kept for diagnostics)."""
         key = f"{group_id}_{member_id}"
         state = self.sync_state.get(key)
         if state:
@@ -141,22 +148,22 @@ class SyncManager:
         for t in ['picture', 'video', 'voice']:
             (member_dir / t).mkdir(exist_ok=True)
 
-        last_id = self.get_last_id(gid, mid)
-        logger.info("Syncing member", member=mname, member_id=mid, last_id=last_id)
+        last_ts = self.get_last_ts(gid, mid)
+        logger.info("Syncing member", member=mname, member_id=mid, last_ts=last_ts)
 
         try:
             if prefetched_messages is not None:
-                # Pre-fetched: filter by member_id AND this member's own last_id
+                # Pre-fetched: filter by member_id AND this member's timestamp cursor
                 messages = [
                     x for x in prefetched_messages
                     if x.get('member_id') == mid
-                    and (last_id is None or x['id'] > last_id)
+                    and (last_ts is None or (x.get('published_at') or '') > last_ts)
                 ]
                 logger.info("Filtered prefetched messages for member",
                             count=len(messages), member=mname)
             else:
                 messages = await self.client.get_messages(
-                    session, gid, since_id=last_id, progress_callback=progress_callback
+                    session, gid, since_ts=last_ts, progress_callback=progress_callback
                 )
                 logger.info("Fetched messages", count=len(messages), group_id=gid)
 
@@ -242,8 +249,9 @@ class SyncManager:
             os.replace(tmp_file, existing_file)
 
             # Update State
-            max_id = max(x['id'] for x in merged) if merged else (last_id or 0)
-            self.update_sync_state(gid, mid, max_id, len(merged))
+            max_id = max(x['id'] for x in merged) if merged else 0
+            newest_ts = max((x.get('timestamp') or '' for x in merged), default=None)
+            self.update_sync_state(gid, mid, max_id, len(merged), last_ts=newest_ts)
 
             return len(processed)
 
