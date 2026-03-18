@@ -609,7 +609,7 @@ class Client:
         if effective_ts:
             all_messages = {
                 k: v for k, v in all_messages.items()
-                if (v.get('published_at') or '') > effective_ts
+                if (v.get('published_at') or '') >= effective_ts
             }
         elif since_id:
             # Pure legacy fallback (no timestamp available at all)
