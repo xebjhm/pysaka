@@ -43,6 +43,9 @@ def configure_logging(
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
+        structlog.processors.CallsiteParameterAdder(
+            [structlog.processors.CallsiteParameter.THREAD_NAME],
+        ),
         structlog.stdlib.PositionalArgumentsFormatter(),
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
