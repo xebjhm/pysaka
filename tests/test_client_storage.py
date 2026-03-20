@@ -2,12 +2,12 @@ from unittest.mock import patch
 
 import pytest
 
-from pyhako import Client, Group
+from pysaka import Client, Group
 
 
 @pytest.fixture
 def mock_token_manager():
-    mock_tm = patch("pyhako.client.get_token_manager")
+    mock_tm = patch("pysaka.client.get_token_manager")
     with mock_tm as mock_fn:
         yield mock_fn
 

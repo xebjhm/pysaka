@@ -1,5 +1,5 @@
 """
-Local Integration Tests for PyHako.
+Local Integration Tests for pysaka.
 
 These tests require:
 1. Prior login (auth_data directory exists)
@@ -13,9 +13,9 @@ Skip in CI by default.
 
 import pytest
 
-from pyhako import Client, Group, get_auth_dir
-from pyhako.auth import BrowserAuth
-from pyhako.credentials import TokenManager, get_user_data_dir
+from pysaka import Client, Group, get_auth_dir
+from pysaka.auth import BrowserAuth
+from pysaka.credentials import TokenManager, get_user_data_dir
 
 # Skip all tests in this module if no auth data
 pytestmark = [

@@ -4,8 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyhako.credentials import TokenManager
-from pyhako.exceptions import HakoError
+from pysaka.credentials import TokenManager
+from pysaka.exceptions import SakaError
 
 
 @pytest.fixture
@@ -15,15 +15,15 @@ def mock_keyring():
         yield mock
 
 def test_token_manager_init_keyring():
-    with patch("pyhako.credentials.KeyringStore") as mock_store_cls:
+    with patch("pysaka.credentials.KeyringStore") as mock_store_cls:
         tm = TokenManager()
         mock_store_cls.assert_called_once()
         assert tm.store == mock_store_cls.return_value
 
 def test_token_manager_init_fail():
     # Force KeyringStore to raise Exception (mimicking ImportError or other init fail)
-    with patch("pyhako.credentials.KeyringStore", side_effect=ImportError("fail")):
-        with pytest.raises(HakoError) as e:
+    with patch("pysaka.credentials.KeyringStore", side_effect=ImportError("fail")):
+        with pytest.raises(SakaError) as e:
             TokenManager()
         assert "Secure storage (keyring) is required" in str(e.value)
 
@@ -59,4 +59,4 @@ def test_keyring_save_load(mock_keyring):
 
     # Test delete
     tm.delete_session("group1")
-    mock_keyring.delete_password.assert_called_with("pyhako", "group1")
+    mock_keyring.delete_password.assert_called_with("pysaka", "group1")

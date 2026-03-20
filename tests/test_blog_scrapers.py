@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from pyhako.blog import (
+from pysaka.blog import (
     HinatazakaBlogScraper,
     NogizakaBlogScraper,
     SakurazakaBlogScraper,

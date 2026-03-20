@@ -2,7 +2,7 @@ import base64
 import json
 import time
 
-from pyhako.utils import (
+from pysaka.utils import (
     get_jwt_remaining_seconds,
     get_media_extension,
     is_jwt_expired,
