@@ -2,10 +2,10 @@ import asyncio
 
 import aiohttp
 
-import pyhako
-from pyhako import BrowserAuth, Client, Group
+import pysaka
+from pysaka import BrowserAuth, Client, Group
 
-pyhako.configure_logging()
+pysaka.configure_logging()
 
 async def main():
     # 1. Login (or provide tokens manually)
