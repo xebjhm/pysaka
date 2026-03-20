@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/pyhako
+      url: https://pypi.org/p/pysaka
     steps:
       - name: Download distribution artifacts
         uses: actions/download-artifact@v4

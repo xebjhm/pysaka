@@ -10,7 +10,7 @@ venv/
 .venv/
 pip-log.txt
 
-# PyHako local state
+# pysaka local state
 sync_state.json
 tokens.json
 *_data/
