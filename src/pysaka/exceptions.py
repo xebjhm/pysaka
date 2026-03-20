@@ -1,15 +1,15 @@
 from typing import Optional
 
 
-class HakoError(Exception):
-    """Base exception for PyHako library."""
+class SakaError(Exception):
+    """Base exception for pysaka library."""
     pass
 
-class AuthError(HakoError):
+class AuthError(SakaError):
     """Authentication related errors."""
     pass
 
-class ApiError(HakoError):
+class ApiError(SakaError):
     """API request related errors."""
     def __init__(self, message: str, status_code: Optional[int] = None):
         super().__init__(message)

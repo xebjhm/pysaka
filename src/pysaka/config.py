@@ -1,4 +1,4 @@
-"""Configuration constants for pyzaka sync operations.
+"""Configuration constants for pysaka sync operations.
 
 Centralized location for tunable parameters to make it easy
 to adjust sync behavior without modifying code.
@@ -19,5 +19,5 @@ MEDIA_DOWNLOAD_CONCURRENCY_INCREMENTAL = 5  # Incremental: gentle on server
 # Blog Sync Configuration (re-exported from blog.config for convenience)
 # =============================================================================
 
-# Blog config is in pyzaka.blog.config - import from there for blog-specific settings
+# Blog config is in pysaka.blog.config - import from there for blog-specific settings
 # This file focuses on message/media sync settings
