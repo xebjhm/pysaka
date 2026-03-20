@@ -1,10 +1,10 @@
-"""Extended tests for pyhako.client module to improve coverage."""
+"""Extended tests for pysaka.client module to improve coverage."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyhako import Client, Group, SessionExpiredError
+from pysaka import Client, Group, SessionExpiredError
 
 
 class TestClientInitialization:
@@ -62,7 +62,7 @@ class TestClientTokenStorage:
             "cookies": {"s": "v"}
         }
 
-        with patch("pyhako.client.get_token_manager", return_value=mock_tm):
+        with patch("pysaka.client.get_token_manager", return_value=mock_tm):
             client = Client(group=Group.NOGIZAKA46, use_token_storage=True)
 
             assert client.access_token == "stored_token"
@@ -75,7 +75,7 @@ class TestClientTokenStorage:
         mock_tm = MagicMock()
         mock_tm.load_session.return_value = {"access_token": "stored"}
 
-        with patch("pyhako.client.get_token_manager", return_value=mock_tm):
+        with patch("pysaka.client.get_token_manager", return_value=mock_tm):
             client = Client(
                 group=Group.NOGIZAKA46,
                 access_token="explicit_token",
@@ -87,7 +87,7 @@ class TestClientTokenStorage:
 
     def test_client_token_storage_failure_is_handled(self):
         """Test that token storage failures are handled gracefully."""
-        with patch("pyhako.client.get_token_manager", side_effect=Exception("Storage failed")):
+        with patch("pysaka.client.get_token_manager", side_effect=Exception("Storage failed")):
             # Should not raise, just log warning
             client = Client(group=Group.NOGIZAKA46, use_token_storage=True)
             assert client.token_manager is None
@@ -120,7 +120,7 @@ class TestClientUpdateToken:
         mock_tm = MagicMock()
         mock_tm.load_session.return_value = None
 
-        with patch("pyhako.client.get_token_manager", return_value=mock_tm):
+        with patch("pysaka.client.get_token_manager", return_value=mock_tm):
             client = Client(group=Group.NOGIZAKA46, use_token_storage=True)
             client.access_token = "initial"
 
@@ -137,7 +137,7 @@ class TestClientSaveSession:
         mock_tm = MagicMock()
         mock_tm.load_session.return_value = None
 
-        with patch("pyhako.client.get_token_manager", return_value=mock_tm):
+        with patch("pysaka.client.get_token_manager", return_value=mock_tm):
             client = Client(
                 group=Group.NOGIZAKA46,
                 access_token="token",
@@ -273,8 +273,8 @@ class TestClientRefreshToken:
         client.refresh_token = None
         client.auth_dir = tmp_path  # Exists
 
-        # Import path for BrowserAuth is pyhako.auth, not pyhako.client
-        with patch("pyhako.auth.BrowserAuth.refresh_token_headless") as mock_refresh:
+        # Import path for BrowserAuth is pysaka.auth, not pysaka.client
+        with patch("pysaka.auth.BrowserAuth.refresh_token_headless") as mock_refresh:
             mock_refresh.return_value = {
                 "access_token": "headless_token",
                 "cookies": {"s": "v"}

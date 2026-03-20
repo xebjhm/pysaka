@@ -1,12 +1,12 @@
-"""Extended tests for pyhako.auth module to improve coverage."""
+"""Extended tests for pysaka.auth module to improve coverage."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyhako import Group
-from pyhako.auth import BrowserAuth
+from pysaka import Group
+from pysaka.auth import BrowserAuth
 
 
 class TestBrowserAuthLogin:
@@ -15,7 +15,7 @@ class TestBrowserAuthLogin:
     @pytest.mark.asyncio
     async def test_login_with_string_group(self):
         """Test that string group is converted to Group enum."""
-        with patch("pyhako.auth.async_playwright") as mock_pw:
+        with patch("pysaka.auth.async_playwright") as mock_pw:
             mock_ctx = AsyncMock()
             mock_pw.return_value = mock_ctx
 
@@ -45,7 +45,7 @@ class TestBrowserAuthLogin:
     @pytest.mark.asyncio
     async def test_login_with_persistent_context(self):
         """Test login with user_data_dir for persistent context."""
-        with patch("pyhako.auth.async_playwright") as mock_pw:
+        with patch("pysaka.auth.async_playwright") as mock_pw:
             mock_ctx = AsyncMock()
             mock_pw.return_value = mock_ctx
 
@@ -77,7 +77,7 @@ class TestBrowserAuthLogin:
     @pytest.mark.asyncio
     async def test_login_captures_token_from_response(self):
         """Test that token is captured from API response."""
-        with patch("pyhako.auth.async_playwright") as mock_pw:
+        with patch("pysaka.auth.async_playwright") as mock_pw:
             mock_ctx = AsyncMock()
             mock_pw.return_value = mock_ctx
 
@@ -162,7 +162,7 @@ class TestBrowserAuthRefreshHeadless:
         auth_dir = tmp_path / "auth"
         auth_dir.mkdir()
 
-        with patch("pyhako.auth.async_playwright") as mock_pw:
+        with patch("pysaka.auth.async_playwright") as mock_pw:
             mock_ctx = AsyncMock()
             mock_pw.return_value = mock_ctx
 
@@ -192,7 +192,7 @@ class TestBrowserAuthRefreshHeadless:
         auth_dir = tmp_path / "auth"
         auth_dir.mkdir()
 
-        with patch("pyhako.auth.async_playwright") as mock_pw:
+        with patch("pysaka.auth.async_playwright") as mock_pw:
             mock_ctx = AsyncMock()
             mock_pw.return_value = mock_ctx
 
@@ -217,7 +217,7 @@ class TestBrowserAuthRefreshHeadless:
         auth_dir = tmp_path / "auth"
         auth_dir.mkdir()
 
-        with patch("pyhako.auth.async_playwright") as mock_pw:
+        with patch("pysaka.auth.async_playwright") as mock_pw:
             mock_ctx = AsyncMock()
             mock_pw.return_value = mock_ctx
 

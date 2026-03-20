@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from pyhako import ApiError, Client, Group
+from pysaka import ApiError, Client, Group
 
 
 @pytest.mark.asyncio

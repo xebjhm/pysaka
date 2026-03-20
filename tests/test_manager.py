@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from pyzaka.client import Client, Group
-from pyzaka.manager import SyncManager
+from pysaka.client import Client, Group
+from pysaka.manager import SyncManager
 
 
 @pytest.fixture

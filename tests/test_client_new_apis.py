@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from pyhako import ApiError, Client, Group
+from pysaka import ApiError, Client, Group
 
 
 class TestPostJson:
