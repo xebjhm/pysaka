@@ -136,8 +136,8 @@ async def test_sync_member_prefetched_respects_last_id(sync_manager):
     member = {'id': 10, 'name': 'Mem'}
     media_queue = []
 
-    # Set last_id for this member to 300 — messages ≤ 300 should be skipped
-    sync_manager.update_sync_state(1, 10, 300, 5)
+    # Set last_ts cursor — messages with published_at < last_ts should be skipped
+    sync_manager.update_sync_state(1, 10, 300, 5, last_ts='2023-01-01T03:00:00Z')
 
     prefetched = [
         {'id': 299, 'type': 'text', 'text': 'Old', 'member_id': 10, 'published_at': '2023-01-01T01:00:00Z'},
@@ -150,7 +150,7 @@ async def test_sync_member_prefetched_respects_last_id(sync_manager):
         session, group, member, media_queue, prefetched_messages=prefetched
     )
 
-    assert count == 2  # Only id=301 and id=302
+    assert count == 2  # Only id=301 (>= last_ts) and id=302
     sync_manager.client.get_messages.assert_not_called()
 
 
