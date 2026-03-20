@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import logging.handlers
 import os
 import sys
 from pathlib import Path
@@ -16,10 +17,18 @@ def configure_logging(
     file_level: int = logging.DEBUG,
 ) -> None:
     """
-    Configure structured logging for PyHako.
+    Configure structured logging for pysaka.
+
+    Logging strategy (industry best practice for desktop apps):
+    - **Console**: INFO level, human-readable (dev) or JSON (prod).
+    - **debug.log**: DEBUG level, rotating 10 MB x 5 backups (≈60 MB cap).
+      Contains everything — the primary troubleshooting resource.
+    - **error.log**: WARNING+ only, rotating 2 MB x 3 backups.
+      Small, fast-to-scan file for triage — never buried in noise.
 
     Args:
-        log_file: Optional path to log file. If provided, adds FileHandler.
+        log_file: Path to the debug log file. If provided, an error log is
+            also created alongside it (same directory, ``error.log``).
         log_level: Root logger level (default: INFO)
         console_level: Console handler level (default: INFO)
         file_level: File handler level (default: DEBUG)
@@ -34,6 +43,9 @@ def configure_logging(
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
+        structlog.processors.CallsiteParameterAdder(
+            [structlog.processors.CallsiteParameter.THREAD_NAME],
+        ),
         structlog.stdlib.PositionalArgumentsFormatter(),
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
@@ -71,7 +83,7 @@ def configure_logging(
     for h in root_logger.handlers[:]:
         root_logger.removeHandler(h)
 
-    # Console Handler (stdout)
+    # --- Console Handler (stdout) ---
     console_formatter = structlog.stdlib.ProcessorFormatter(
         foreign_pre_chain=shared_processors,
         processors=[
@@ -84,7 +96,7 @@ def configure_logging(
     console_handler.setLevel(console_level)
     root_logger.addHandler(console_handler)
 
-    # File Handler (optional)
+    # --- File Handlers (optional) ---
     if log_file:
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -96,10 +108,30 @@ def configure_logging(
                 file_renderer,
             ],
         )
-        file_handler = logging.FileHandler(log_path, encoding="utf-8")
-        file_handler.setFormatter(file_formatter)
-        file_handler.setLevel(file_level)
-        root_logger.addHandler(file_handler)
+
+        # Debug log: everything (10 MB x 5 backups ≈ 60 MB cap)
+        debug_handler = logging.handlers.RotatingFileHandler(
+            log_path,
+            encoding="utf-8",
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+        )
+        debug_handler.setFormatter(file_formatter)
+        debug_handler.setLevel(file_level)
+        root_logger.addHandler(debug_handler)
+
+        # Error log: WARNING+ only (2 MB x 3 backups)
+        # Sits alongside the debug log for quick triage
+        error_path = log_path.parent / "error.log"
+        error_handler = logging.handlers.RotatingFileHandler(
+            error_path,
+            encoding="utf-8",
+            maxBytes=2 * 1024 * 1024,
+            backupCount=3,
+        )
+        error_handler.setFormatter(file_formatter)
+        error_handler.setLevel(logging.WARNING)
+        root_logger.addHandler(error_handler)
 
     # Silence noisy libraries - these are very verbose at DEBUG level
     noisy_loggers = [
