@@ -1,10 +1,10 @@
-# Release Guide for PyHako
+# Release Guide for pysaka
 
-This guide describes the automated release process for publishing `PyHako` to PyPI.
+This guide describes the automated release process for publishing `pysaka` to PyPI.
 
 ## Overview
 
-PyHako uses **tag-triggered CI** with **OIDC trusted publishing** -- no API tokens or manual uploads required.
+pysaka uses **tag-triggered CI** with **OIDC trusted publishing** -- no API tokens or manual uploads required.
 
 ### Workflow Files
 
@@ -33,7 +33,7 @@ Trigger the test publish workflow manually via GitHub Actions to validate the bu
 gh workflow run test-publish.yml
 ```
 
-This builds the package with a dev suffix and publishes to [TestPyPI](https://test.pypi.org/p/pyhako). The workflow also verifies installation on Python 3.9 and 3.12.
+This builds the package with a dev suffix and publishes to [TestPyPI](https://test.pypi.org/p/pysaka). The workflow also verifies installation on Python 3.9 and 3.12.
 
 ### 3. Create and Push a Version Tag
 
@@ -52,10 +52,10 @@ Alternatively, create a **GitHub Release** from the tag, which also triggers the
 
 ### 4. Verify
 
-Visit [https://pypi.org/project/pyhako/](https://pypi.org/project/pyhako/) to confirm the release is live.
+Visit [https://pypi.org/project/pysaka/](https://pypi.org/project/pysaka/) to confirm the release is live.
 
 ```bash
-uv add pyhako==0.2.0
+uv add pysaka==0.2.0
 ```
 
 ## Prerequisites

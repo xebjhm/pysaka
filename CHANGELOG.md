@@ -70,7 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2026-01-11
 
 ### Added
-- Initial PyHako core library release
+- Initial pysaka core library release
 - Multi-group support: Hinatazaka46, Nogizaka46, Sakurazaka46
 - OAuth browser authentication flow
 - Message synchronization with incremental updates
@@ -85,7 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Secure credential storage via system keyring
 - Token refresh without storing plaintext credentials
 
-[Unreleased]: https://github.com/xebjhm/PyHako/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/xebjhm/PyHako/compare/v0.1.1...v0.2.0
-[0.1.1]: https://github.com/xebjhm/PyHako/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/xebjhm/PyHako/releases/tag/v0.1.0
+[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/xebjhm/pysaka/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/xebjhm/pysaka/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/xebjhm/pysaka/releases/tag/v0.1.0
