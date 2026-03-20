@@ -1,6 +1,6 @@
-# Contributing to PyHako
+# Contributing to pysaka
 
-Thank you for your interest in contributing to PyHako! This document outlines our development workflow, branching strategy, and contribution guidelines.
+Thank you for your interest in contributing to pysaka! This document outlines our development workflow, branching strategy, and contribution guidelines.
 
 ## Table of Contents
 
@@ -72,8 +72,8 @@ hotfix/auth-crash
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/xebjhm/PyHako.git
-   cd PyHako
+   git clone https://github.com/xebjhm/pysaka.git
+   cd pysaka
    ```
 
 2. **Install dependencies** using `uv`:
@@ -151,7 +151,7 @@ We follow the [Conventional Commits](https://www.conventionalcommits.org/) speci
 
 ### Scope (Optional)
 
-Common scopes for PyHako:
+Common scopes for pysaka:
 - `auth` - Authentication
 - `sync` - Synchronization
 - `client` - API client
@@ -187,8 +187,8 @@ Integration tests require stored credentials. They test real browser refresh and
 1. Use `BrowserAuth` to log in and store credentials:
    ```python
    import asyncio
-   from pyhako import BrowserAuth, Group
-   from pyhako.credentials import get_token_manager
+   from pysaka import BrowserAuth, Group
+   from pysaka.credentials import get_token_manager
 
    async def login():
        creds = await BrowserAuth.login(Group.HINATAZAKA46)
