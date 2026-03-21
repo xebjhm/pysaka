@@ -9,11 +9,11 @@ from typing import Any, Optional
 
 import structlog
 
-from .exceptions import HakoError
+from .exceptions import SakaError
 
 logger = structlog.get_logger()
 
-SERVICE_NAME = "pyhako"
+SERVICE_NAME = "pysaka"
 
 def _compress_data(data: str) -> str:
     """Compress and base64-encode data for storage in size-limited backends."""
@@ -35,12 +35,12 @@ def is_windows() -> bool:
 
 def get_user_data_dir() -> Path:
     """
-    Get the platform-specific user data directory for pyhako.
+    Get the platform-specific user data directory for pysaka.
 
     Returns:
-        - Windows: %APPDATA%/pyhako
-        - macOS: ~/Library/Application Support/pyhako
-        - Linux: ~/.local/share/pyhako
+        - Windows: %APPDATA%/pysaka
+        - macOS: ~/Library/Application Support/pysaka
+        - Linux: ~/.local/share/pysaka
     """
     system = platform.system()
 
@@ -59,7 +59,7 @@ def get_auth_dir() -> Path:
     Get the browser auth data directory for session persistence.
 
     Returns:
-        Path to `{user_data_dir}/auth_data` (e.g. ~/.local/share/pyhako/auth_data)
+        Path to `{user_data_dir}/auth_data` (e.g. ~/.local/share/pysaka/auth_data)
     """
     auth_dir = get_user_data_dir() / "auth_data"
     auth_dir.mkdir(parents=True, exist_ok=True)
@@ -87,8 +87,8 @@ class KeyringStore(CredentialStore):
             # We attempt to verify the backend works. If not, we try keyrings.alt.
             try:
                 # Probe the backend with a write operation
-                keyring.set_password("pyhako_probe", "probe", "ok")
-                keyring.delete_password("pyhako_probe", "probe")
+                keyring.set_password("pysaka_probe", "probe", "ok")
+                keyring.delete_password("pysaka_probe", "probe")
             except Exception as e:
                 logger.warning(f"Default keyring backend seems broken (headless?): {e}")
 
@@ -99,8 +99,8 @@ class KeyringStore(CredentialStore):
                     logger.warning("Switched to PlaintextKeyring (keyrings.alt) as fallback.")
 
                     # Verify fallback
-                    keyring.set_password("pyhako_probe", "probe", "ok")
-                    keyring.delete_password("pyhako_probe", "probe")
+                    keyring.set_password("pysaka_probe", "probe", "ok")
+                    keyring.delete_password("pysaka_probe", "probe")
                 except ImportError:
                     logger.error("keyrings.alt not found. Cannot provide fallback.")
                     raise e from None
@@ -110,7 +110,7 @@ class KeyringStore(CredentialStore):
 
             self._keyring = keyring
         except ImportError:
-            raise HakoError("keyring package is not installed.") from None
+            raise SakaError("keyring package is not installed.") from None
 
     def save(self, group: str, token_data: dict[str, Any]) -> None:
         # Keyring stores strings - compress JSON to fit Windows Credential Manager limits
@@ -119,7 +119,7 @@ class KeyringStore(CredentialStore):
             compressed = _compress_data(json_data)
             self._keyring.set_password(SERVICE_NAME, group, compressed)
         except Exception as e:
-             raise HakoError(f"Failed to save credentials to keyring: {e}") from e
+             raise SakaError(f"Failed to save credentials to keyring: {e}") from e
 
     def load(self, group: str) -> Optional[dict[str, Any]]:
         try:
@@ -168,7 +168,7 @@ class TokenManager:
             logger.debug("Using KeyringStore")
         except Exception as e:
             logger.error(f"Keyring initialization failed: {e}")
-            raise HakoError(f"Secure storage (keyring) is required but failed to initialize: {e}") from e
+            raise SakaError(f"Secure storage (keyring) is required but failed to initialize: {e}") from e
 
     def save_session(self, group: str, access_token: str, refresh_token: Optional[str] = None, cookies: Optional[dict[Any, Any]] = None) -> None:
         data = {

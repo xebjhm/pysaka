@@ -1,10 +1,10 @@
-"""Tests for pyhako.logging module."""
+"""Tests for pysaka.logging module."""
 
 import logging
 import os
 from unittest.mock import patch
 
-from pyhako.logging import _redact_secrets, configure_logging
+from pysaka.logging import _redact_secrets, configure_logging
 
 
 class TestConfigureLogging:

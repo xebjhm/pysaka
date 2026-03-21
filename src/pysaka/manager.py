@@ -1,5 +1,8 @@
 import asyncio
 import json
+import os
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -46,42 +49,70 @@ class SyncManager:
                 self.sync_state = {}
 
     def save_sync_state(self) -> None:
-        """Save synchronization state to JSON file."""
+        """Save synchronization state to JSON file (atomic write).
+
+        Uses a unique temp filename and retries os.replace to handle
+        Windows file locking (antivirus, search indexer).
+        """
+        tmp = self.state_file.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
         try:
-            with open(self.state_file, 'w', encoding='utf-8') as f:
+            with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(self.sync_state, f, indent=2)
+
+            last_err: Exception | None = None
+            for attempt in range(5):
+                try:
+                    os.replace(tmp, self.state_file)
+                    return
+                except OSError as e:
+                    last_err = e
+                    time.sleep(0.05 * (attempt + 1))
+
+            logger.error("Failed to save sync state after retries", error=str(last_err))
         except Exception as e:
             logger.error("Failed to save sync state", error=str(e))
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
-    def update_sync_state(self, group_id: int, member_id: int, last_msg_id: int, count: int) -> None:
+    def update_sync_state(self, group_id: int, member_id: int, last_msg_id: int, count: int,
+                          last_ts: Optional[str] = None) -> None:
         """
         Update state for a specific member after sync.
 
         Args:
             group_id: ID of the group/artist.
             member_id: ID of the member.
-            last_msg_id: The highest message ID synced.
-            count: Number of messages synced in this batch.
+            last_msg_id: The highest message ID synced (diagnostic only).
+            count: Total message count after merge.
+            last_ts: The newest message's published_at timestamp (primary cursor).
         """
         key = f"{group_id}_{member_id}"
         self.sync_state[key] = {
             "last_message_id": last_msg_id,
+            "last_sync_ts": last_ts,
             "total_messages": count,
             "last_sync": datetime.now(timezone.utc).isoformat() + "Z"
         }
         self.save_sync_state()
 
-    def get_last_id(self, group_id: int, member_id: int) -> Optional[int]:
+    def get_last_ts(self, group_id: int, member_id: int) -> Optional[str]:
         """
-        Get the last synced message ID for a member.
-
-        Args:
-            group_id: ID of the group/artist.
-            member_id: ID of the member.
+        Get the last synced timestamp cursor for a member.
 
         Returns:
-            The message ID or None if never synced.
+            ISO timestamp string or None if never synced.
         """
+        key = f"{group_id}_{member_id}"
+        state = self.sync_state.get(key)
+        if state:
+            return state.get('last_sync_ts')
+        return None
+
+    def get_last_id(self, group_id: int, member_id: int) -> Optional[int]:
+        """Get the last synced message ID (legacy, kept for diagnostics)."""
         key = f"{group_id}_{member_id}"
         state = self.sync_state.get(key)
         if state:
@@ -94,7 +125,8 @@ class SyncManager:
         group: dict[str, Any],
         member: dict[str, Any],
         media_queue: list[dict[str, Any]],
-        progress_callback: Optional[Any] = None
+        progress_callback: Optional[Any] = None,
+        prefetched_messages: Optional[list[dict[str, Any]]] = None
     ) -> int:
         """
         Syncs messages for a member and prepares media queue.
@@ -105,6 +137,9 @@ class SyncManager:
             member: Member object dict.
             media_queue: List to append media download tasks to.
             progress_callback: Optional callback for progress updates.
+            prefetched_messages: Pre-fetched group timeline messages. When
+                provided, the API call is skipped and messages are filtered
+                from this list instead (using this member's own last_id).
 
         Returns:
             Number of new messages processed.
@@ -134,18 +169,28 @@ class SyncManager:
         for t in ['picture', 'video', 'voice']:
             (member_dir / t).mkdir(exist_ok=True)
 
-        last_id = self.get_last_id(gid, mid)
-        logger.info("Syncing member", member=mname, member_id=mid, last_id=last_id)
+        last_ts = self.get_last_ts(gid, mid)
+        logger.info("Syncing member", member=mname, member_id=mid, last_ts=last_ts)
 
         try:
-            messages = await self.client.get_messages(
-                session, gid, since_id=last_id, progress_callback=progress_callback
-            )
-            logger.info("Fetched messages", count=len(messages), group_id=gid)
+            if prefetched_messages is not None:
+                # Pre-fetched: filter by member_id AND this member's timestamp cursor
+                messages = [
+                    x for x in prefetched_messages
+                    if x.get('member_id') == mid
+                    and (last_ts is None or (x.get('published_at') or '') >= last_ts)
+                ]
+                logger.info("Filtered prefetched messages for member",
+                            count=len(messages), member=mname)
+            else:
+                messages = await self.client.get_messages(
+                    session, gid, since_ts=last_ts, progress_callback=progress_callback
+                )
+                logger.info("Fetched messages", count=len(messages), group_id=gid)
 
-            # Filter for member
-            messages = [x for x in messages if x.get('member_id') == mid]
-            logger.info("Filtered messages for member", count=len(messages), member=mname)
+                # Filter for member
+                messages = [x for x in messages if x.get('member_id') == mid]
+                logger.info("Filtered messages for member", count=len(messages), member=mname)
 
             if not messages:
                 return 0
@@ -162,7 +207,30 @@ class SyncManager:
                         data = json.loads(await f.read())
                         existing_msgs = data.get('messages', [])
                 except Exception:
-                    pass
+                    # Corrupt file (e.g. force-close during write).
+                    # Reset this member's last_id so the next sync
+                    # re-fetches from the beginning to recover.
+                    logger.warning(
+                        "corrupt_messages_file",
+                        member=mname, member_id=mid, group_id=gid,
+                    )
+                    self.sync_state.pop(f"{gid}_{mid}", None)
+                    self.save_sync_state()
+
+            # Integrity check: if the file has fewer messages than sync_state
+            # recorded, data was lost (e.g. past force-close overwrote the
+            # file with only new messages).  Reset last_id so the next sync
+            # does a full re-fetch to recover.
+            state_key = f"{gid}_{mid}"
+            expected = (self.sync_state.get(state_key) or {}).get("total_messages", 0)
+            if expected > 0 and len(existing_msgs) < expected:
+                logger.warning(
+                    "message_count_mismatch",
+                    member=mname, member_id=mid, group_id=gid,
+                    expected=expected, actual=len(existing_msgs),
+                )
+                self.sync_state.pop(state_key, None)
+                self.save_sync_state()
 
             # Dedupe (Upsert: Prefer new data)
             merged_dict = {x['id']: x for x in existing_msgs}
@@ -196,12 +264,15 @@ class SyncManager:
                 "messages": merged
             }
 
-            async with aiofiles.open(existing_file, 'w', encoding='utf-8') as f:
+            tmp_file = existing_file.with_suffix(".json.tmp")
+            async with aiofiles.open(tmp_file, 'w', encoding='utf-8') as f:
                 await f.write(json.dumps(export_data, ensure_ascii=False, indent=2))
+            os.replace(tmp_file, existing_file)
 
             # Update State
-            max_id = max(x['id'] for x in merged) if merged else (last_id or 0)
-            self.update_sync_state(gid, mid, max_id, len(merged))
+            max_id = max(x['id'] for x in merged) if merged else 0
+            newest_ts = max((x.get('timestamp') or '' for x in merged), default=None)
+            self.update_sync_state(gid, mid, max_id, len(merged), last_ts=newest_ts)
 
             return len(processed)
 

@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pyhako"
-version = "0.2.0"
+name = "pysaka"
+version = "0.3.0"
 description = "Async Python client for Sakamichi Group Message API (Nogizaka46, Sakurazaka46, Hinatazaka46)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -41,12 +41,12 @@ dependencies = [
 headless = ["keyrings.alt>=4.0"]
 
 [project.urls]
-Homepage = "https://github.com/xebjhm/PyHako"
-Repository = "https://github.com/xebjhm/PyHako"
-Issues = "https://github.com/xebjhm/PyHako/issues"
+Homepage = "https://github.com/xebjhm/pysaka"
+Repository = "https://github.com/xebjhm/pysaka"
+Issues = "https://github.com/xebjhm/pysaka/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/pyhako"]
+packages = ["src/pysaka"]
 
 [dependency-groups]
 dev = [
@@ -85,11 +85,11 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["pyhako"]
+known-first-party = ["pysaka"]
 
 [tool.pytest.ini_options]
 minversion = "6.0"
-addopts = "-ra -q --cov=pyhako --cov-report=term-missing -m 'not integration'"
+addopts = "-ra -q --cov=pysaka --cov-report=term-missing -m 'not integration'"
 testpaths = [
     "tests",
 ]
@@ -116,9 +116,9 @@ ignore_missing_imports = true
 # TODO: progressively fix and remove these overrides
 [[tool.mypy.overrides]]
 module = [
-    "pyhako.blog.*",
-    "pyhako.logging",
-    "pyhako.client",
-    "pyhako.auth",
+    "pysaka.blog.*",
+    "pysaka.logging",
+    "pysaka.client",
+    "pysaka.auth",
 ]
 ignore_errors = true

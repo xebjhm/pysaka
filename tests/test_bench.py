@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from pyhako.utils import normalize_message
+from pysaka.utils import normalize_message
 
 
 @pytest.mark.benchmark(group="utils")

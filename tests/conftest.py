@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from pyhako import Client, Group
+from pysaka import Client, Group
 
 
 @pytest.fixture

@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiohttp import ClientError
 
-from pyhako import ApiError, Group
-from pyhako.auth import BrowserAuth
-from pyhako.credentials import KeyringStore, TokenManager
+from pysaka import ApiError, Group
+from pysaka.auth import BrowserAuth
+from pysaka.credentials import KeyringStore, TokenManager
 
 # --- Client Coverage Boost ---
 
@@ -45,7 +45,7 @@ async def test_client_download_message_media(client, mock_session):
 
     client.download_file = AsyncMock(return_value=True)
 
-    with patch("pyhako.client.get_media_extension", return_value="jpg"), \
+    with patch("pysaka.client.get_media_extension", return_value="jpg"), \
          patch("pathlib.Path.mkdir"):
 
         path = await client.download_message_media(mock_session, msg, output)
@@ -77,7 +77,7 @@ def test_token_manager_save_load_integration():
 @pytest.mark.asyncio
 async def test_login_timeout():
     """Test login timeout scenario."""
-    with patch("pyhako.auth.async_playwright") as mock_pw:
+    with patch("pysaka.auth.async_playwright") as mock_pw:
         mock_ctx_mgr = AsyncMock()
         mock_pw.return_value = mock_ctx_mgr
 
@@ -152,7 +152,7 @@ def test_token_manager_keyring_fallback():
 @pytest.mark.asyncio
 async def test_login_successful_flow_with_handler():
     """Test a successful login interception via Playwright mock with response handler."""
-    with patch("pyhako.auth.async_playwright") as mock_pw:
+    with patch("pysaka.auth.async_playwright") as mock_pw:
         # 1. Setup Mock Hierarchy with AsyncMocks
         mock_ctx_mgr = AsyncMock()
         mock_pw.return_value = mock_ctx_mgr

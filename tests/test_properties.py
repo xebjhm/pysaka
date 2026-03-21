@@ -2,7 +2,7 @@
 from hypothesis import given
 from hypothesis import strategies as st
 
-from pyhako.utils import get_media_extension, normalize_message, sanitize_name
+from pysaka.utils import get_media_extension, normalize_message, sanitize_name
 
 
 @given(st.text())

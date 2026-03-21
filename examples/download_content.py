@@ -3,10 +3,10 @@ from pathlib import Path
 
 import aiohttp
 
-import pyhako
-from pyhako import Client, Group
+import pysaka
+from pysaka import Client, Group
 
-pyhako.configure_logging()
+pysaka.configure_logging()
 
 async def main():
     # Example token (replace with real one)

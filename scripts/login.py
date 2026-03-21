@@ -11,8 +11,8 @@ Usage:
 import argparse
 import asyncio
 
-from pyhako import BrowserAuth, Group
-from pyhako.credentials import TokenManager
+from pysaka import BrowserAuth, Group
+from pysaka.credentials import TokenManager
 
 
 async def main() -> None:

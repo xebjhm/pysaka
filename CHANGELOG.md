@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-03-21
+
+### Changed
+- **Breaking:** Package renamed from `pyhako`/`pyzaka` to `pysaka`
+- Incremental sync now uses timestamp-based cursor instead of message ID
+- `get_messages()` accepts `since_ts` parameter for cursor-based fetching
+- `sync_member()` accepts `prefetched_messages` for group-level batching
+- Integrity check resets on any message count drop (stricter)
+
+### Added
+- Log rotation with separate `error.log` file
+- Thread name included in structlog output
+
+### Fixed
+- Message loss prevented during force-close with atomic temp file writes
+- Overly aggressive low-ID message warning removed
+
 ## [0.2.0] - 2026-03-15
 
 ### Added
@@ -70,7 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2026-01-11
 
 ### Added
-- Initial PyHako core library release
+- Initial pysaka core library release
 - Multi-group support: Hinatazaka46, Nogizaka46, Sakurazaka46
 - OAuth browser authentication flow
 - Message synchronization with incremental updates
@@ -85,7 +102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Secure credential storage via system keyring
 - Token refresh without storing plaintext credentials
 
-[Unreleased]: https://github.com/xebjhm/PyHako/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/xebjhm/PyHako/compare/v0.1.1...v0.2.0
-[0.1.1]: https://github.com/xebjhm/PyHako/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/xebjhm/PyHako/releases/tag/v0.1.0
+[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/xebjhm/pysaka/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/xebjhm/pysaka/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/xebjhm/pysaka/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/xebjhm/pysaka/releases/tag/v0.1.0

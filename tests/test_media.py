@@ -3,7 +3,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from pyhako.media import get_image_dimensions, get_media_dimensions, get_video_dimensions
+from pysaka.media import get_image_dimensions, get_media_dimensions, get_video_dimensions
 
 
 class TestGetImageDimensions:
@@ -86,10 +86,10 @@ class TestGetVideoDimensions:
             # Re-import to pick up the mock
             import importlib
 
-            import pyhako.media
-            importlib.reload(pyhako.media)
+            import pysaka.media
+            importlib.reload(pysaka.media)
 
-            width, height = pyhako.media.get_video_dimensions(Path("/fake/video.mp4"))
+            width, height = pysaka.media.get_video_dimensions(Path("/fake/video.mp4"))
 
             assert width == 1920
             assert height == 1080
@@ -108,10 +108,10 @@ class TestGetVideoDimensions:
         with patch.dict("sys.modules", {"pymediainfo": MagicMock(MediaInfo=mock_mediainfo_class)}):
             import importlib
 
-            import pyhako.media
-            importlib.reload(pyhako.media)
+            import pysaka.media
+            importlib.reload(pysaka.media)
 
-            width, height = pyhako.media.get_video_dimensions(Path("/fake/audio.mp3"))
+            width, height = pysaka.media.get_video_dimensions(Path("/fake/audio.mp3"))
 
             assert width is None
             assert height is None
@@ -124,10 +124,10 @@ class TestGetVideoDimensions:
         with patch.dict("sys.modules", {"pymediainfo": MagicMock(MediaInfo=mock_mediainfo_class)}):
             import importlib
 
-            import pyhako.media
-            importlib.reload(pyhako.media)
+            import pysaka.media
+            importlib.reload(pysaka.media)
 
-            width, height = pyhako.media.get_video_dimensions(Path("/fake/bad.mp4"))
+            width, height = pysaka.media.get_video_dimensions(Path("/fake/bad.mp4"))
 
             assert width is None
             assert height is None
@@ -174,10 +174,10 @@ class TestGetMediaDimensions:
         with patch.dict("sys.modules", {"pymediainfo": MagicMock(MediaInfo=mock_mediainfo_class)}):
             import importlib
 
-            import pyhako.media
-            importlib.reload(pyhako.media)
+            import pysaka.media
+            importlib.reload(pysaka.media)
 
-            width, height = pyhako.media.get_media_dimensions(Path("/fake/clip.mp4"), "video")
+            width, height = pysaka.media.get_media_dimensions(Path("/fake/clip.mp4"), "video")
 
             assert width == 1280
             assert height == 720

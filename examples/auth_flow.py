@@ -1,10 +1,10 @@
 import asyncio
 
-import pyhako
-from pyhako import BrowserAuth, Group
+import pysaka
+from pysaka import BrowserAuth, Group
 
 # Configure logging
-pyhako.configure_logging()
+pysaka.configure_logging()
 
 async def main():
     # Login to Hinatazaka46
