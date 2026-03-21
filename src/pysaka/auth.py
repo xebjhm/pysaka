@@ -9,12 +9,18 @@ from .client import GROUP_CONFIG, Group
 
 logger = structlog.get_logger()
 
+_DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+
 class LoginCredentials(TypedDict):
     access_token: str
     refresh_token: Optional[str]
     cookies: dict[str, str]
     app_id: str
     user_agent: str
+
 
 class BrowserAuth:
     """Handles browser-based authentication for Sakamichi Groups Message."""
@@ -24,7 +30,7 @@ class BrowserAuth:
         group: Union[Group, str],
         headless: bool = False,
         user_data_dir: Optional[str] = None,
-        channel: Optional[str] = None
+        channel: Optional[str] = None,
     ) -> Optional[LoginCredentials]:
         """
         Launches browser for login and captures tokens.
@@ -45,9 +51,7 @@ class BrowserAuth:
             try:
                 group = Group(group.lower())
             except ValueError as err:
-                raise ValueError(
-                    f"Invalid group: {group}. Must be one of {[g.value for g in Group]}"
-                ) from err
+                raise ValueError(f"Invalid group: {group}. Must be one of {[g.value for g in Group]}") from err
 
         config = GROUP_CONFIG[group]
         target_url = config["auth_url"]
@@ -65,16 +69,16 @@ class BrowserAuth:
                     headless=headless,
                     channel=channel,
                     args=[
-                        '--disable-blink-features=AutomationControlled',
-                        '--no-sandbox',
-                        '--disable-setuid-sandbox',
-                        '--disable-infobars',
-                        '--disable-gpu',
-                        '--disable-dev-shm-usage',
-                        '--disable-software-rasterizer',
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-infobars",
+                        "--disable-gpu",
+                        "--disable-dev-shm-usage",
+                        "--disable-software-rasterizer",
                     ],
-                    viewport={'width': 1280, 'height': 800},
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    viewport={"width": 1280, "height": 800},
+                    user_agent=_DEFAULT_USER_AGENT,
                 )
                 page = context.pages[0] if context.pages else await context.new_page()
             else:
@@ -82,14 +86,14 @@ class BrowserAuth:
                     headless=headless,
                     channel=channel,
                     args=[
-                        '--disable-blink-features=AutomationControlled',
-                        '--no-sandbox',
-                        '--disable-infobars',
-                    ]
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-infobars",
+                    ],
                 )
                 context = await browser.new_context(
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    viewport={'width': 1280, 'height': 800}
+                    user_agent=_DEFAULT_USER_AGENT,
+                    viewport={"width": 1280, "height": 800},
                 )
                 page = await context.new_page()
 
@@ -101,20 +105,22 @@ class BrowserAuth:
             token_future: asyncio.Future[None] = asyncio.Future()
 
             async def handle_response(response):
-                if token_future.done(): return
+                if token_future.done():
+                    return
 
                 request = response.request
                 if api_host in request.url and response.status == 200:
                     headers = request.headers
-                    auth = headers.get('authorization') or headers.get('Authorization')
+                    auth = headers.get("authorization") or headers.get("Authorization")
 
-                    if auth and 'Bearer' in auth:
-                        token = auth.split('Bearer ')[1]
+                    if auth and "Bearer" in auth:
+                        token = auth.split("Bearer ")[1]
                         if token:
-                            captured_data['access_token'] = token
-                            captured_data['x-talk-app-id'] = headers.get('x-talk-app-id') or headers.get('X-Talk-App-ID')
-                            captured_data['user-agent'] = headers.get('user-agent') or headers.get('User-Agent')
-
+                            captured_data["access_token"] = token
+                            captured_data["x-talk-app-id"] = headers.get("x-talk-app-id") or headers.get(
+                                "X-Talk-App-ID"
+                            )
+                            captured_data["user-agent"] = headers.get("user-agent") or headers.get("User-Agent")
 
                             if not token_future.done():
                                 token_future.set_result(True)
@@ -161,13 +167,13 @@ class BrowserAuth:
 
                 logger.debug("--- Capturing Cookies ---")
                 for c in cookies_list:
-                    if c['name'] == 'session':
-                        logger.debug("Found session cookie", domain=c.get('domain'), path=c.get('path'))
+                    if c["name"] == "session":
+                        logger.debug("Found session cookie", domain=c.get("domain"), path=c.get("path"))
 
-                    if target_domain in c.get('domain', ''):
-                        relevant_cookies[c['name']] = c['value']
+                    if target_domain in c.get("domain", ""):
+                        relevant_cookies[c["name"]] = c["value"]
 
-                captured_data['cookies'] = relevant_cookies
+                captured_data["cookies"] = relevant_cookies
                 logger.debug(f"Captured {len(relevant_cookies)} session cookies.")
 
                 logger.info("Closing browser...")
@@ -177,11 +183,11 @@ class BrowserAuth:
                     await browser.close()
 
                 return {
-                    "access_token": captured_data['access_token'],
+                    "access_token": captured_data["access_token"],
                     "refresh_token": None,
-                    "cookies": captured_data['cookies'],
-                    "app_id": captured_data.get('x-talk-app-id', ''),
-                    "user_agent": captured_data.get('user-agent', '')
+                    "cookies": captured_data["cookies"],
+                    "app_id": captured_data.get("x-talk-app-id", ""),
+                    "user_agent": captured_data.get("user-agent", ""),
                 }
 
             except asyncio.TimeoutError:
@@ -201,9 +207,7 @@ class BrowserAuth:
 
     @staticmethod
     async def refresh_token_headless(
-        group: Group,
-        auth_dir: Union[str, Path],
-        auto_install: bool = True
+        group: Group, auth_dir: Union[str, Path], auto_install: bool = True
     ) -> Optional[LoginCredentials]:
         """
         Refreshes access token via headless browser using persistent context.
@@ -230,9 +234,7 @@ class BrowserAuth:
             try:
                 # Launch persistent context
                 context = await p.chromium.launch_persistent_context(
-                    user_data_dir=str(auth_dir),
-                    headless=True,
-                    args=["--disable-blink-features=AutomationControlled"]
+                    user_data_dir=str(auth_dir), headless=True, args=["--disable-blink-features=AutomationControlled"]
                 )
             except Exception as e:
                 if "Executable doesn't exist" in str(e) and auto_install:
@@ -240,6 +242,7 @@ class BrowserAuth:
                     logger.info("Downloading headless browser for auto-refresh (One-time setup)...")
                     # Force Playwright to look in global cache, not frozen bundle
                     import os
+
                     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
 
                     try:
@@ -268,7 +271,7 @@ class BrowserAuth:
                         context = await p.chromium.launch_persistent_context(
                             user_data_dir=str(auth_dir),
                             headless=True,
-                            args=["--disable-blink-features=AutomationControlled"]
+                            args=["--disable-blink-features=AutomationControlled"],
                         )
                     except Exception as install_error:
                         logger.error(f"Failed to auto-install Playwright browser: {install_error}")
@@ -287,17 +290,23 @@ class BrowserAuth:
                 # Clearing state would break the session and show login page instead.
 
                 async def handle_response(response):
-                    if token_future.done(): return
+                    if token_future.done():
+                        return
 
                     # Match API host (robust check)
-                    if api_host.replace("https://", "").split("/")[0] in response.request.url and response.status == 200:
+                    if (
+                        api_host.replace("https://", "").split("/")[0] in response.request.url
+                        and response.status == 200
+                    ):
                         headers = response.request.headers
-                        auth = headers.get('authorization') or headers.get('Authorization')
-                        if auth and 'Bearer' in auth:
-                            token = auth.split('Bearer ')[1]
-                            captured_data['access_token'] = token
-                            captured_data['x-talk-app-id'] = headers.get('x-talk-app-id') or headers.get('X-Talk-App-ID')
-                            captured_data['user-agent'] = headers.get('user-agent') or headers.get('User-Agent')
+                        auth = headers.get("authorization") or headers.get("Authorization")
+                        if auth and "Bearer" in auth:
+                            token = auth.split("Bearer ")[1]
+                            captured_data["access_token"] = token
+                            captured_data["x-talk-app-id"] = headers.get("x-talk-app-id") or headers.get(
+                                "X-Talk-App-ID"
+                            )
+                            captured_data["user-agent"] = headers.get("user-agent") or headers.get("User-Agent")
 
                             logger.debug(
                                 "Headless refresh captured token",
@@ -323,15 +332,15 @@ class BrowserAuth:
                 target_domain = group.value
                 relevant_cookies = {}
                 for c in cookies_list:
-                   if target_domain in c.get('domain', ''):
-                        relevant_cookies[c['name']] = c['value']
+                    if target_domain in c.get("domain", ""):
+                        relevant_cookies[c["name"]] = c["value"]
 
                 return {
-                    "access_token": captured_data['access_token'],
+                    "access_token": captured_data["access_token"],
                     "refresh_token": None,
                     "cookies": relevant_cookies,
-                    "app_id": captured_data.get('x-talk-app-id', ''),
-                    "user_agent": captured_data.get('user-agent', '')
+                    "app_id": captured_data.get("x-talk-app-id", ""),
+                    "user_agent": captured_data.get("user-agent", ""),
                 }
 
             except Exception as e:

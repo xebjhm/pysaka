@@ -1,4 +1,3 @@
-
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,10 +12,12 @@ async def test_auth_initialization():
     """Verify static method structure."""
     assert hasattr(BrowserAuth, "login")
 
+
 @pytest.mark.asyncio
 async def test_invalid_group():
     with pytest.raises(ValueError):
         await BrowserAuth.login("invalid_group")
+
 
 @pytest.fixture
 def mock_playwright_env():
@@ -55,6 +56,7 @@ def mock_playwright_env():
 
         yield mock_p, mock_browser, mock_context, mock_page
 
+
 @pytest.mark.asyncio
 async def test_login_timeout(mock_playwright_env):
     """Test login timeout behavior."""
@@ -66,12 +68,13 @@ async def test_login_timeout(mock_playwright_env):
 
         assert result is None
         # Verify cleanup occurred
-        mock_page.close.assert_not_called() # Logic: In timeout, it goes to finally
+        mock_page.close.assert_not_called()  # Logic: In timeout, it goes to finally
         # Actually in the code:
         # except asyncio.TimeoutError: logger.error...
         # finally: ... await browser.close()
 
         # We can't easily check logging without capturing logs, but we can check return None
+
 
 @pytest.mark.asyncio
 async def test_login_generic_error(mock_playwright_env):

@@ -8,6 +8,7 @@ from pysaka import Client, Group
 
 pysaka.configure_logging()
 
+
 async def main():
     # Example token (replace with real one)
     token = "YOUR_ACCESS_TOKEN"
@@ -20,7 +21,7 @@ async def main():
             "id": 12345,
             "type": "picture",
             "file": "https://example.com/image.jpg",
-            "published_at": "2023-01-01T12:00:00Z"
+            "published_at": "2023-01-01T12:00:00Z",
         }
 
         output_dir = Path("./downloads")
@@ -30,6 +31,7 @@ async def main():
             print(f"Downloaded to: {path}")
         else:
             print("Download failed or no media.")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

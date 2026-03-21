@@ -68,10 +68,7 @@ class TestBrowserAuthLogin:
             mock_page.evaluate = AsyncMock()
 
             with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
-                result = await BrowserAuth.login(
-                    Group.NOGIZAKA46,
-                    user_data_dir="/tmp/test_auth"
-                )
+                result = await BrowserAuth.login(Group.NOGIZAKA46, user_data_dir="/tmp/test_auth")
                 assert result is None
 
     @pytest.mark.asyncio
@@ -90,9 +87,9 @@ class TestBrowserAuthLogin:
             mock_context = AsyncMock()
             mock_browser.new_context = AsyncMock(return_value=mock_context)
             mock_context.add_init_script = AsyncMock()
-            mock_context.cookies = AsyncMock(return_value=[
-                {"name": "session", "value": "sess123", "domain": "message.hinatazaka46.com"}
-            ])
+            mock_context.cookies = AsyncMock(
+                return_value=[{"name": "session", "value": "sess123", "domain": "message.hinatazaka46.com"}]
+            )
             mock_context.close = AsyncMock()
 
             mock_page = AsyncMock()
@@ -112,9 +109,7 @@ class TestBrowserAuthLogin:
             mock_page.on = capture_on
 
             # Start login as a task
-            login_task = asyncio.create_task(
-                BrowserAuth.login(Group.HINATAZAKA46, headless=True)
-            )
+            login_task = asyncio.create_task(BrowserAuth.login(Group.HINATAZAKA46, headless=True))
 
             # Let the task start
             await asyncio.sleep(0.05)
@@ -126,7 +121,7 @@ class TestBrowserAuthLogin:
                 mock_request.headers = {
                     "Authorization": "Bearer test_token_123",
                     "x-talk-app-id": "test_app_id",
-                    "user-agent": "test_ua"
+                    "user-agent": "test_ua",
                 }
 
                 mock_response = MagicMock()
@@ -150,10 +145,7 @@ class TestBrowserAuthRefreshHeadless:
     async def test_refresh_headless_auth_dir_not_exists(self, tmp_path):
         """Test that refresh fails if auth_dir doesn't exist."""
         non_existent_path = tmp_path / "non_existent"
-        result = await BrowserAuth.refresh_token_headless(
-            Group.NOGIZAKA46,
-            non_existent_path
-        )
+        result = await BrowserAuth.refresh_token_headless(Group.NOGIZAKA46, non_existent_path)
         assert result is None
 
     @pytest.mark.asyncio
@@ -180,10 +172,7 @@ class TestBrowserAuthRefreshHeadless:
             mock_page.goto = AsyncMock()
 
             with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
-                result = await BrowserAuth.refresh_token_headless(
-                    Group.NOGIZAKA46,
-                    auth_dir
-                )
+                result = await BrowserAuth.refresh_token_headless(Group.NOGIZAKA46, auth_dir)
                 assert result is None
 
     @pytest.mark.asyncio
@@ -200,15 +189,10 @@ class TestBrowserAuthRefreshHeadless:
             mock_ctx.__aenter__.return_value = mock_p
 
             # Simulate browser not installed error
-            mock_p.chromium.launch_persistent_context = AsyncMock(
-                side_effect=Exception("Executable doesn't exist")
-            )
+            mock_p.chromium.launch_persistent_context = AsyncMock(side_effect=Exception("Executable doesn't exist"))
 
             # Browser error should result in None
-            result = await BrowserAuth.refresh_token_headless(
-                Group.NOGIZAKA46,
-                auth_dir
-            )
+            result = await BrowserAuth.refresh_token_headless(Group.NOGIZAKA46, auth_dir)
             assert result is None
 
     @pytest.mark.asyncio
@@ -227,9 +211,9 @@ class TestBrowserAuthRefreshHeadless:
             mock_context = AsyncMock()
             mock_p.chromium.launch_persistent_context = AsyncMock(return_value=mock_context)
             mock_context.pages = []
-            mock_context.cookies = AsyncMock(return_value=[
-                {"name": "session", "value": "refreshed_sess", "domain": "message.sakurazaka46.com"}
-            ])
+            mock_context.cookies = AsyncMock(
+                return_value=[{"name": "session", "value": "refreshed_sess", "domain": "message.sakurazaka46.com"}]
+            )
             mock_context.close = AsyncMock()
 
             mock_page = AsyncMock()
@@ -247,9 +231,7 @@ class TestBrowserAuthRefreshHeadless:
             mock_page.on = capture_on
 
             # Start refresh as task
-            refresh_task = asyncio.create_task(
-                BrowserAuth.refresh_token_headless(Group.SAKURAZAKA46, auth_dir)
-            )
+            refresh_task = asyncio.create_task(BrowserAuth.refresh_token_headless(Group.SAKURAZAKA46, auth_dir))
 
             await asyncio.sleep(0.05)
 
@@ -260,7 +242,7 @@ class TestBrowserAuthRefreshHeadless:
                 mock_request.headers = {
                     "Authorization": "Bearer refreshed_token",
                     "x-talk-app-id": "app123",
-                    "user-agent": "ua123"
+                    "user-agent": "ua123",
                 }
 
                 mock_response = MagicMock()

@@ -1,4 +1,3 @@
-
 import base64
 import json
 import platform
@@ -15,23 +14,27 @@ logger = structlog.get_logger()
 
 SERVICE_NAME = "pysaka"
 
+
 def _compress_data(data: str) -> str:
     """Compress and base64-encode data for storage in size-limited backends."""
-    compressed = zlib.compress(data.encode('utf-8'), level=9)
-    return base64.b64encode(compressed).decode('ascii')
+    compressed = zlib.compress(data.encode("utf-8"), level=9)
+    return base64.b64encode(compressed).decode("ascii")
+
 
 def _decompress_data(data: str) -> str:
     """Decompress base64-encoded data."""
     try:
-        compressed = base64.b64decode(data.encode('ascii'))
-        return zlib.decompress(compressed).decode('utf-8')
+        compressed = base64.b64decode(data.encode("ascii"))
+        return zlib.decompress(compressed).decode("utf-8")
     except Exception as e:
         # Fallback: data might not be compressed (legacy)
         logger.debug("Data not compressed (legacy format), using raw", error=str(e))
         return data
 
+
 def is_windows() -> bool:
     return platform.system() == "Windows"
+
 
 def get_user_data_dir() -> Path:
     """
@@ -54,6 +57,7 @@ def get_user_data_dir() -> Path:
     appdata.mkdir(parents=True, exist_ok=True)
     return appdata
 
+
 def get_auth_dir() -> Path:
     """
     Get the browser auth data directory for session persistence.
@@ -64,6 +68,7 @@ def get_auth_dir() -> Path:
     auth_dir = get_user_data_dir() / "auth_data"
     auth_dir.mkdir(parents=True, exist_ok=True)
     return auth_dir
+
 
 class CredentialStore(ABC):
     @abstractmethod
@@ -77,6 +82,7 @@ class CredentialStore(ABC):
     @abstractmethod
     def delete(self, group: str) -> None:
         pass
+
 
 class KeyringStore(CredentialStore):
     def __init__(self):
@@ -95,6 +101,7 @@ class KeyringStore(CredentialStore):
                 # Try fallback
                 try:
                     from keyrings.alt.file import PlaintextKeyring
+
                     keyring.set_keyring(PlaintextKeyring())
                     logger.warning("Switched to PlaintextKeyring (keyrings.alt) as fallback.")
 
@@ -119,7 +126,7 @@ class KeyringStore(CredentialStore):
             compressed = _compress_data(json_data)
             self._keyring.set_password(SERVICE_NAME, group, compressed)
         except Exception as e:
-             raise SakaError(f"Failed to save credentials to keyring: {e}") from e
+            raise SakaError(f"Failed to save credentials to keyring: {e}") from e
 
     def load(self, group: str) -> Optional[dict[str, Any]]:
         try:
@@ -144,6 +151,7 @@ class KeyringStore(CredentialStore):
         # This handles cases where user switched between Headless/GUI environments
         try:
             import keyrings.alt.file
+
             alt_kr = keyrings.alt.file.PlaintextKeyring()
             try:
                 alt_kr.delete_password(SERVICE_NAME, group)
@@ -157,11 +165,13 @@ class KeyringStore(CredentialStore):
         # Usually checking current backend (Step 1) covers WCM on Windows,
         # as WCM is the priority backend.
 
+
 class TokenManager:
     """
     Manages token storage using Keyring.
     Strictly requires a working keyring backend.
     """
+
     def __init__(self):
         try:
             self.store = KeyringStore()
@@ -170,19 +180,26 @@ class TokenManager:
             logger.error(f"Keyring initialization failed: {e}")
             raise SakaError(f"Secure storage (keyring) is required but failed to initialize: {e}") from e
 
-    def save_session(self, group: str, access_token: str, refresh_token: Optional[str] = None, cookies: Optional[dict[Any, Any]] = None) -> None:
-        data = {
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "cookies": cookies
-        }
+    def save_session(
+        self,
+        group: str,
+        access_token: str,
+        refresh_token: Optional[str] = None,
+        cookies: Optional[dict[Any, Any]] = None,
+    ) -> None:
+        data = {"access_token": access_token, "refresh_token": refresh_token, "cookies": cookies}
         self.store.save(group, data)
         logger.info(f"Session saved for {group}")
 
     def load_session(self, group: str) -> Optional[dict[str, Any]]:
         data = self.store.load(group)
         if data:
-            logger.debug("Session loaded", group=group, has_token=bool(data.get('access_token')), has_refresh=bool(data.get('refresh_token')))
+            logger.debug(
+                "Session loaded",
+                group=group,
+                has_token=bool(data.get("access_token")),
+                has_refresh=bool(data.get("refresh_token")),
+            )
         else:
             logger.debug("No session found", group=group)
         return data

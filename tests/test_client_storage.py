@@ -11,6 +11,7 @@ def mock_token_manager():
     with mock_tm as mock_fn:
         yield mock_fn
 
+
 @pytest.mark.asyncio
 async def test_client_init_auto_load(mock_token_manager):
     # Setup mock manager instance
@@ -18,7 +19,7 @@ async def test_client_init_auto_load(mock_token_manager):
     manager_instance.load_session.return_value = {
         "access_token": "stored_token",
         "refresh_token": "stored_refresh",
-        "cookies": {"s": "1"}
+        "cookies": {"s": "1"},
     }
 
     # Init client with storage
@@ -33,6 +34,7 @@ async def test_client_init_auto_load(mock_token_manager):
     assert client.refresh_token == "stored_refresh"
     assert client.cookies == {"s": "1"}
     assert client.headers["Authorization"] == "Bearer stored_token"
+
 
 @pytest.mark.asyncio
 async def test_client_update_token_auto_save(mock_token_manager):
@@ -49,24 +51,16 @@ async def test_client_update_token_auto_save(mock_token_manager):
     manager_instance.save_session.assert_called_with(
         Group.HINATAZAKA46.value,
         "new_token_123",
-        None, # Refresh token wasn't set locally
-        None  # Cookies weren't set locally
+        None,  # Refresh token wasn't set locally
+        None,  # Cookies weren't set locally
     )
+
 
 @pytest.mark.asyncio
 async def test_client_manual_save(mock_token_manager):
-    client = Client(
-        group=Group.HINATAZAKA46,
-        access_token="manual_token",
-        use_token_storage=True
-    )
+    client = Client(group=Group.HINATAZAKA46, access_token="manual_token", use_token_storage=True)
     manager_instance = mock_token_manager.return_value
 
     client.save_session()
 
-    manager_instance.save_session.assert_called_with(
-        Group.HINATAZAKA46.value,
-        "manual_token",
-        None,
-        None
-    )
+    manager_instance.save_session.assert_called_with(Group.HINATAZAKA46.value, "manual_token", None, None)

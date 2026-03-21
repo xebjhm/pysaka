@@ -17,6 +17,7 @@ from .utils import get_media_extension, normalize_message, sanitize_name
 
 logger = structlog.get_logger()
 
+
 class SyncManager:
     """
     Manages synchronization of messages and media for a specific client.
@@ -42,7 +43,7 @@ class SyncManager:
         """Load synchronization state from JSON file."""
         if self.state_file.exists():
             try:
-                with open(self.state_file, encoding='utf-8') as f:
+                with open(self.state_file, encoding="utf-8") as f:
                     self.sync_state = json.load(f)
             except Exception as e:
                 logger.error("Failed to load sync state", error=str(e))
@@ -56,10 +57,10 @@ class SyncManager:
         """
         tmp = self.state_file.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
         try:
-            with open(tmp, 'w', encoding='utf-8') as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.sync_state, f, indent=2)
 
-            last_err: Exception | None = None
+            last_err: Optional[Exception] = None
             for attempt in range(5):
                 try:
                     os.replace(tmp, self.state_file)
@@ -77,8 +78,9 @@ class SyncManager:
             except OSError:
                 pass
 
-    def update_sync_state(self, group_id: int, member_id: int, last_msg_id: int, count: int,
-                          last_ts: Optional[str] = None) -> None:
+    def update_sync_state(
+        self, group_id: int, member_id: int, last_msg_id: int, count: int, last_ts: Optional[str] = None
+    ) -> None:
         """
         Update state for a specific member after sync.
 
@@ -94,7 +96,7 @@ class SyncManager:
             "last_message_id": last_msg_id,
             "last_sync_ts": last_ts,
             "total_messages": count,
-            "last_sync": datetime.now(timezone.utc).isoformat() + "Z"
+            "last_sync": datetime.now(timezone.utc).isoformat() + "Z",
         }
         self.save_sync_state()
 
@@ -108,7 +110,7 @@ class SyncManager:
         key = f"{group_id}_{member_id}"
         state = self.sync_state.get(key)
         if state:
-            return state.get('last_sync_ts')
+            return state.get("last_sync_ts")
         return None
 
     def get_last_id(self, group_id: int, member_id: int) -> Optional[int]:
@@ -116,7 +118,7 @@ class SyncManager:
         key = f"{group_id}_{member_id}"
         state = self.sync_state.get(key)
         if state:
-            return state.get('last_message_id')
+            return state.get("last_message_id")
         return None
 
     async def sync_member(
@@ -126,7 +128,7 @@ class SyncManager:
         member: dict[str, Any],
         media_queue: list[dict[str, Any]],
         progress_callback: Optional[Any] = None,
-        prefetched_messages: Optional[list[dict[str, Any]]] = None
+        prefetched_messages: Optional[list[dict[str, Any]]] = None,
     ) -> int:
         """
         Syncs messages for a member and prepares media queue.
@@ -144,10 +146,10 @@ class SyncManager:
         Returns:
             Number of new messages processed.
         """
-        gid = group['id']
-        mid = member['id']
-        gname = sanitize_name(group['name'])
-        mname = sanitize_name(member['name'])
+        gid = group["id"]
+        mid = member["id"]
+        gname = sanitize_name(group["name"])
+        mname = sanitize_name(member["name"])
 
         # output_dir is already service-specific (e.g., output/日向坂46/)
         # so we only need to add messages/ and the group directory
@@ -159,14 +161,13 @@ class SyncManager:
         if not group_dir.exists() and messages_dir.exists():
             for existing in messages_dir.iterdir():
                 if existing.is_dir() and existing.name.startswith(f"{gid} "):
-                    logger.info("Group renamed on server, renaming directory",
-                                old=existing.name, new=group_dir.name)
+                    logger.info("Group renamed on server, renaming directory", old=existing.name, new=group_dir.name)
                     existing.rename(group_dir)
                     break
 
         member_dir = group_dir / f"{mid} {mname}"
         member_dir.mkdir(parents=True, exist_ok=True)
-        for t in ['picture', 'video', 'voice']:
+        for t in ["picture", "video", "voice"]:
             (member_dir / t).mkdir(exist_ok=True)
 
         last_ts = self.get_last_ts(gid, mid)
@@ -176,12 +177,11 @@ class SyncManager:
             if prefetched_messages is not None:
                 # Pre-fetched: filter by member_id AND this member's timestamp cursor
                 messages = [
-                    x for x in prefetched_messages
-                    if x.get('member_id') == mid
-                    and (last_ts is None or (x.get('published_at') or '') >= last_ts)
+                    x
+                    for x in prefetched_messages
+                    if x.get("member_id") == mid and (last_ts is None or (x.get("published_at") or "") >= last_ts)
                 ]
-                logger.info("Filtered prefetched messages for member",
-                            count=len(messages), member=mname)
+                logger.info("Filtered prefetched messages for member", count=len(messages), member=mname)
             else:
                 messages = await self.client.get_messages(
                     session, gid, since_ts=last_ts, progress_callback=progress_callback
@@ -189,7 +189,7 @@ class SyncManager:
                 logger.info("Fetched messages", count=len(messages), group_id=gid)
 
                 # Filter for member
-                messages = [x for x in messages if x.get('member_id') == mid]
+                messages = [x for x in messages if x.get("member_id") == mid]
                 logger.info("Filtered messages for member", count=len(messages), member=mname)
 
             if not messages:
@@ -203,16 +203,18 @@ class SyncManager:
             existing_msgs: list[dict[str, Any]] = []
             if existing_file.exists():
                 try:
-                    async with aiofiles.open(existing_file, encoding='utf-8') as f:
+                    async with aiofiles.open(existing_file, encoding="utf-8") as f:
                         data = json.loads(await f.read())
-                        existing_msgs = data.get('messages', [])
+                        existing_msgs = data.get("messages", [])
                 except Exception:
                     # Corrupt file (e.g. force-close during write).
                     # Reset this member's last_id so the next sync
                     # re-fetches from the beginning to recover.
                     logger.warning(
                         "corrupt_messages_file",
-                        member=mname, member_id=mid, group_id=gid,
+                        member=mname,
+                        member_id=mid,
+                        group_id=gid,
                     )
                     self.sync_state.pop(f"{gid}_{mid}", None)
                     self.save_sync_state()
@@ -226,24 +228,27 @@ class SyncManager:
             if expected > 0 and len(existing_msgs) < expected:
                 logger.warning(
                     "message_count_mismatch",
-                    member=mname, member_id=mid, group_id=gid,
-                    expected=expected, actual=len(existing_msgs),
+                    member=mname,
+                    member_id=mid,
+                    group_id=gid,
+                    expected=expected,
+                    actual=len(existing_msgs),
                 )
                 self.sync_state.pop(state_key, None)
                 self.save_sync_state()
 
             # Dedupe (Upsert: Prefer new data)
-            merged_dict = {x['id']: x for x in existing_msgs}
+            merged_dict = {x["id"]: x for x in existing_msgs}
             for pm in processed:
-                merged_dict[pm['id']] = pm
+                merged_dict[pm["id"]] = pm
 
             merged = list(merged_dict.values())
-            merged.sort(key=lambda x: x.get('timestamp') or '')
+            merged.sort(key=lambda x: x.get("timestamp") or "")
 
             # Stats
             type_counts = {"text": 0, "video": 0, "picture": 0, "voice": 0}
             for msg in merged:
-                mtype = msg.get('type', 'text')
+                mtype = msg.get("type", "text")
                 if mtype in type_counts:
                     type_counts[mtype] += 1
 
@@ -254,24 +259,24 @@ class SyncManager:
                     "id": mid,
                     "name": mname,
                     "group_id": gid,
-                    "portrait": member.get('portrait'),
-                    "thumbnail": member.get('thumbnail'),
-                    "phone_image": member.get('phone_image'),
-                    "group_thumbnail": group.get('thumbnail'),
+                    "portrait": member.get("portrait"),
+                    "thumbnail": member.get("thumbnail"),
+                    "phone_image": member.get("phone_image"),
+                    "group_thumbnail": group.get("thumbnail"),
                 },
                 "total_messages": len(merged),
                 "message_type_counts": type_counts,
-                "messages": merged
+                "messages": merged,
             }
 
             tmp_file = existing_file.with_suffix(".json.tmp")
-            async with aiofiles.open(tmp_file, 'w', encoding='utf-8') as f:
+            async with aiofiles.open(tmp_file, "w", encoding="utf-8") as f:
                 await f.write(json.dumps(export_data, ensure_ascii=False, indent=2))
             os.replace(tmp_file, existing_file)
 
             # Update State
-            max_id = max(x['id'] for x in merged) if merged else 0
-            newest_ts = max((x.get('timestamp') or '' for x in merged), default=None)
+            max_id = max(x["id"] for x in merged) if merged else 0
+            newest_ts = max((x.get("timestamp") or "" for x in merged), default=None)
             self.update_sync_state(gid, mid, max_id, len(merged), last_ts=newest_ts)
 
             return len(processed)
@@ -281,10 +286,7 @@ class SyncManager:
             return 0
 
     def prepare_messages(
-        self,
-        messages: list[dict[str, Any]],
-        member_dir: Path,
-        queue: list[dict[str, Any]]
+        self, messages: list[dict[str, Any]], member_dir: Path, queue: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         """
         Normalize messages and queue media downloads.
@@ -302,53 +304,55 @@ class SyncManager:
             try:
                 # Normalize core fields
                 p_msg = normalize_message(msg)
-                msg_type = p_msg['type']
-                raw_type = p_msg.pop('_raw_type', 'text') # Remove internal helper field
+                msg_type = p_msg["type"]
+                raw_type = p_msg.pop("_raw_type", "text")  # Remove internal helper field
 
                 # Media
-                media_url = msg.get('file') or msg.get('thumbnail')
+                media_url = msg.get("file") or msg.get("thumbnail")
                 if media_url:
                     ext = get_media_extension(media_url, raw_type)
 
-                    subdir = 'other'
-                    if msg_type == 'picture':
-                        subdir = 'picture'
-                    elif msg_type == 'video':
-                        subdir = 'video'
-                    elif msg_type == 'voice':
-                        subdir = 'voice'
+                    subdir = "other"
+                    if msg_type == "picture":
+                        subdir = "picture"
+                    elif msg_type == "video":
+                        subdir = "video"
+                    elif msg_type == "voice":
+                        subdir = "voice"
 
                     filepath = member_dir / subdir / f"{msg['id']}.{ext}"
 
                     # Logic: If file doesn't exist, queue it.
                     if not filepath.exists():
-                        queue.append({
-                            'url': media_url,
-                            'path': filepath,
-                            'timestamp': msg.get('published_at'),
-                            'message_id': msg['id'],
-                            'media_type': msg_type,
-                            'member_dir': member_dir,
-                        })
+                        queue.append(
+                            {
+                                "url": media_url,
+                                "path": filepath,
+                                "timestamp": msg.get("published_at"),
+                                "message_id": msg["id"],
+                                "media_type": msg_type,
+                                "member_dir": member_dir,
+                            }
+                        )
 
-                    p_msg['media_file'] = str(filepath.relative_to(self.output_dir))
+                    p_msg["media_file"] = str(filepath.relative_to(self.output_dir))
 
                     # Extract dimensions if file exists (already downloaded or will be processed)
                     if filepath.exists():
                         width, height = get_media_dimensions(filepath, msg_type)
                         if width and height:
-                            p_msg['width'] = width
-                            p_msg['height'] = height
+                            p_msg["width"] = width
+                            p_msg["height"] = height
 
                 # Skip empty text messages (no content and no media)
                 # These are often system/metadata entries from subscription
-                if msg_type == 'text' and not p_msg.get('content') and not media_url:
-                    logger.debug("Skipping empty text message", message_id=msg.get('id'))
+                if msg_type == "text" and not p_msg.get("content") and not media_url:
+                    logger.debug("Skipping empty text message", message_id=msg.get("id"))
                     continue
 
                 processed.append(p_msg)
             except Exception as e:
-                mid = msg.get('id')
+                mid = msg.get("id")
                 logger.error("Prepare error", message_id=mid, error=str(e))
         return processed
 
@@ -357,7 +361,7 @@ class SyncManager:
         session: aiohttp.ClientSession,
         queue: list[dict[str, Any]],
         concurrency: int = 5,
-        progress_callback: Optional[Any] = None
+        progress_callback: Optional[Any] = None,
     ) -> dict[Path, dict[int, dict[str, Any]]]:
         """
         Downloads files in the queue.
@@ -390,37 +394,32 @@ class SyncManager:
 
         async def worker(item: dict[str, Any]) -> None:
             nonlocal completed
-            res = await self.client.download_file(
-                session,
-                item['url'],
-                item['path'],
-                item['timestamp']
-            )
+            res = await self.client.download_file(session, item["url"], item["path"], item["timestamp"])
             if res:
-                media_type = item.get('media_type', '')
-                member_dir = item.get('member_dir')
+                media_type = item.get("media_type", "")
+                member_dir = item.get("member_dir")
                 if member_dir:
                     metadata: dict[str, Any] = {}
 
                     # Extract dimensions for pictures and videos
-                    if media_type in ('picture', 'video'):
-                        width, height = get_media_dimensions(item['path'], media_type)
+                    if media_type in ("picture", "video"):
+                        width, height = get_media_dimensions(item["path"], media_type)
                         if width and height:
-                            metadata['width'] = width
-                            metadata['height'] = height
+                            metadata["width"] = width
+                            metadata["height"] = height
 
                     # Extract audio metadata for videos and voice messages
-                    if media_type in ('video', 'voice'):
-                        audio_meta = get_audio_metadata(item['path'], media_type)
-                        if audio_meta.get('duration') is not None:
-                            metadata['media_duration'] = audio_meta['duration']
-                        if audio_meta.get('is_muted') is not None:
-                            metadata['is_muted'] = audio_meta['is_muted']
+                    if media_type in ("video", "voice"):
+                        audio_meta = get_audio_metadata(item["path"], media_type)
+                        if audio_meta.get("duration") is not None:
+                            metadata["media_duration"] = audio_meta["duration"]
+                        if audio_meta.get("is_muted") is not None:
+                            metadata["is_muted"] = audio_meta["is_muted"]
 
                     if metadata:
                         if member_dir not in metadata_by_dir:
                             metadata_by_dir[member_dir] = {}
-                        metadata_by_dir[member_dir][item['message_id']] = metadata
+                        metadata_by_dir[member_dir][item["message_id"]] = metadata
 
                 completed += 1
                 if progress_callback:
@@ -432,11 +431,7 @@ class SyncManager:
         await asyncio.gather(*[worker(item) for item in queue])
         return metadata_by_dir
 
-    async def update_message_metadata(
-        self,
-        messages_file: Path,
-        metadata: dict[int, dict[str, Any]]
-    ) -> None:
+    async def update_message_metadata(self, messages_file: Path, metadata: dict[int, dict[str, Any]]) -> None:
         """
         Update messages.json with extracted media metadata.
 
@@ -449,12 +444,12 @@ class SyncManager:
             return
 
         try:
-            async with aiofiles.open(messages_file, encoding='utf-8') as f:
+            async with aiofiles.open(messages_file, encoding="utf-8") as f:
                 data = json.loads(await f.read())
 
             updated = False
-            for msg in data.get('messages', []):
-                msg_id = msg.get('id')
+            for msg in data.get("messages", []):
+                msg_id = msg.get("id")
                 if msg_id in metadata:
                     msg_metadata = metadata[msg_id]
                     for key, value in msg_metadata.items():
@@ -463,7 +458,7 @@ class SyncManager:
                             updated = True
 
             if updated:
-                async with aiofiles.open(messages_file, 'w', encoding='utf-8') as f:
+                async with aiofiles.open(messages_file, "w", encoding="utf-8") as f:
                     await f.write(json.dumps(data, ensure_ascii=False, indent=2))
 
         except Exception as e:

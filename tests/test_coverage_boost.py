@@ -11,6 +11,7 @@ from pysaka.credentials import KeyringStore, TokenManager
 
 # --- Client Coverage Boost ---
 
+
 @pytest.mark.asyncio
 async def test_client_download_file_success(client, mock_session):
     """Test file download with aiofiles mocking."""
@@ -21,10 +22,11 @@ async def test_client_download_file_success(client, mock_session):
     # Needs a Path object
     dest = Path("/tmp/file.jpg")
 
-    with patch("aiofiles.open", new_callable=MagicMock) as mock_file_open_ctx, \
-         patch("pathlib.Path.exists", return_value=False), \
-         patch("pathlib.Path.mkdir"): # Mock mkdir to avoid file ops
-
+    with (
+        patch("aiofiles.open", new_callable=MagicMock) as mock_file_open_ctx,
+        patch("pathlib.Path.exists", return_value=False),
+        patch("pathlib.Path.mkdir"),
+    ):  # Mock mkdir to avoid file ops
         # aiofiles.open returns an AsyncContextManager
         # So calling it returns a context manager whose __aenter__ returns the file handle
         mock_file_handle = AsyncMock()
@@ -37,6 +39,7 @@ async def test_client_download_file_success(client, mock_session):
         mock_file_open_ctx.assert_called_with(dest, "wb")
         mock_file_handle.write.assert_called_with(b"file_content")
 
+
 @pytest.mark.asyncio
 async def test_client_download_message_media(client, mock_session):
     """Test downloading media logic."""
@@ -45,9 +48,7 @@ async def test_client_download_message_media(client, mock_session):
 
     client.download_file = AsyncMock(return_value=True)
 
-    with patch("pysaka.client.get_media_extension", return_value="jpg"), \
-         patch("pathlib.Path.mkdir"):
-
+    with patch("pysaka.client.get_media_extension", return_value="jpg"), patch("pathlib.Path.mkdir"):
         path = await client.download_message_media(mock_session, msg, output)
         assert path == output / "picture" / "100.jpg"
         client.download_file.assert_called()
@@ -55,13 +56,14 @@ async def test_client_download_message_media(client, mock_session):
 
 # ... (existing tests)
 
+
 def test_token_manager_save_load_integration():
     """Test high level save/load logic flows."""
     with patch("keyring.set_password"), patch("keyring.delete_password"):
         tm = TokenManager()
         # Mock internal store
         tm.store = MagicMock()
-        tm.store.load.return_value = {'access_token': 'at'}
+        tm.store.load.return_value = {"access_token": "at"}
 
         data = tm.load_session("nogizaka46")
         assert data["access_token"] == "at"
@@ -69,9 +71,8 @@ def test_token_manager_save_load_integration():
         tm.save_session("nogizaka46", "at", "rt", {})
         tm.store.save.assert_called()
 
+
 # --- Auth Coverage Boost ---
-
-
 
 
 @pytest.mark.asyncio
@@ -102,6 +103,7 @@ async def test_login_timeout():
             result = await BrowserAuth.login(Group.NOGIZAKA46)
             assert result is None  # Should return None on timeout
 
+
 @pytest.mark.asyncio
 async def test_client_download_file_error(client, mock_session):
     """Test file download 404 error."""
@@ -109,13 +111,12 @@ async def test_client_download_file_error(client, mock_session):
     mock_resp.status = 404
     dest = Path("/tmp/file.jpg")
 
-    with patch("aiofiles.open") as mock_file_open, \
-         patch("pathlib.Path.exists", return_value=False):
-
+    with patch("aiofiles.open") as mock_file_open, patch("pathlib.Path.exists", return_value=False):
         await client.download_file(mock_session, "http://example.com/file.jpg", dest)
 
         # Should not open file if status is bad
         mock_file_open.assert_not_called()
+
 
 @pytest.mark.asyncio
 async def test_fetch_json_network_error(client, mock_session):
@@ -128,22 +129,18 @@ async def test_fetch_json_network_error(client, mock_session):
 
     assert "Network error" in str(exc.value)
 
+
 # --- Credentials Coverage Boost ---
-
-
 
 
 def test_token_manager_keyring_fallback():
     """Test that it tries to initialize KeyringStore."""
-    with patch("keyring.set_password") as mock_set, \
-         patch("keyring.delete_password"):
-
+    with patch("keyring.set_password") as mock_set, patch("keyring.delete_password"):
         # Simulate working backend
         tm = TokenManager()
         # Should default to KeyringStore
         assert isinstance(tm.store, KeyringStore)
         mock_set.assert_called()
-
 
 
 # --- Auth Coverage Boost ---
@@ -169,10 +166,12 @@ async def test_login_successful_flow_with_handler():
         # add_init_script must be awaitable
         mock_context.add_init_script = AsyncMock()
         # Mock cookies with a 'session' cookie for the target domain
-        mock_context.cookies = AsyncMock(return_value=[
-            {'name': 'session', 'value': 'sess_val', 'domain': 'message.nogizaka46.com'},
-            {'name': 'tracking', 'value': 'ignored', 'domain': 'google.com'}
-        ])
+        mock_context.cookies = AsyncMock(
+            return_value=[
+                {"name": "session", "value": "sess_val", "domain": "message.nogizaka46.com"},
+                {"name": "tracking", "value": "ignored", "domain": "google.com"},
+            ]
+        )
         mock_context.close = AsyncMock()
 
         mock_page = AsyncMock()
@@ -196,11 +195,7 @@ async def test_login_successful_flow_with_handler():
         # 5. Create a Mock Response ensuring matching host
         mock_request = MagicMock()
         mock_request.url = "https://api.message.nogizaka46.com/v2/foo"
-        mock_request.headers = {
-            "Authorization": "Bearer valid_at",
-            "x-talk-app-id": "app_id",
-            "user-agent": "ua"
-        }
+        mock_request.headers = {"Authorization": "Bearer valid_at", "x-talk-app-id": "app_id", "user-agent": "ua"}
 
         mock_response = AsyncMock()
         mock_response.status = 200
@@ -217,9 +212,8 @@ async def test_login_successful_flow_with_handler():
         expected = {
             "access_token": "valid_at",
             "refresh_token": None,
-            "cookies": {'session': 'sess_val'},
+            "cookies": {"session": "sess_val"},
             "app_id": "app_id",
-            "user_agent": "ua"
+            "user_agent": "ua",
         }
         assert result == expected
-
