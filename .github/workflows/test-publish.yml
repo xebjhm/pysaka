@@ -91,7 +91,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     environment:
       name: testpypi
-      url: https://test.pypi.org/p/pyhako
+      url: https://test.pypi.org/p/pysaka
     steps:
       - name: Download distribution artifacts
         uses: actions/download-artifact@v4
@@ -131,16 +131,16 @@ jobs:
           # Install from TestPyPI, falling back to PyPI for dependencies
           uv pip install --index-url https://test.pypi.org/simple/ \
             --extra-index-url https://pypi.org/simple/ \
-            "pyhako==$TEST_VERSION"
+            "pysaka==$TEST_VERSION"
 
       - name: Verify import
         run: |
-          uv run python -c "from importlib.metadata import version; print(f'pyhako version: {version(\"pyhako\")}')"
+          uv run python -c "from importlib.metadata import version; print(f'pysaka version: {version(\"pysaka\")}')"
 
       - name: Run basic smoke test
         run: |
           uv run python -c "
-          from pyhako import Group
+          from pysaka import Group
           print('Available groups:', [g.value for g in Group])
           print('Smoke test passed!')
           "

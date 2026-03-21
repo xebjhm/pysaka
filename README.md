@@ -1,9 +1,9 @@
-# PyHako
+# pysaka
 
-[![PyPI version](https://badge.fury.io/py/pyhako.svg)](https://badge.fury.io/py/pyhako)
+[![PyPI version](https://badge.fury.io/py/pysaka.svg)](https://badge.fury.io/py/pysaka)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-[![Build Status](https://github.com/xebjhm/PyHako/actions/workflows/test.yml/badge.svg)](https://github.com/xebjhm/PyHako/actions)
+[![Build Status](https://github.com/xebjhm/pysaka/actions/workflows/test.yml/badge.svg)](https://github.com/xebjhm/pysaka/actions)
 
 ## Disclaimer & Warnings
 
@@ -31,7 +31,7 @@ Users must agree to the official Terms of Service of the respective platforms. T
 
 **Async Python client for Sakamichi Groups (Nogizaka46, Sakurazaka46, Hinatazaka46, Yodel) Message API.**
 
-PyHako provides a robust, type-hinted, and async interface to interact with the official Message apps for all supported groups. It handles authentication (via browser), token management, and data retrieval.
+pysaka provides a robust, type-hinted, and async interface to interact with the official Message apps for all supported groups. It handles authentication (via browser), token management, and data retrieval.
 
 ## Features
 - 🔐 **Browser Authentication**: Seamless interactive login via Playwright (compatible with MFA/SSO).
@@ -43,7 +43,7 @@ PyHako provides a robust, type-hinted, and async interface to interact with the 
 
 ## Configuration
 
-PyHako uses `structlog` for observability. You can control the logging output via environment variables:
+pysaka uses `structlog` for observability. You can control the logging output via environment variables:
 
 - `HAKO_ENV=development` (default): Pretty-printed, colored console logs.
 - `HAKO_ENV=production`: Structured JSON logs with automatic secret redaction.
@@ -52,13 +52,13 @@ PyHako uses `structlog` for observability. You can control the logging output vi
 
 Recommended install via `uv`:
 ```bash
-uv add pyhako
+uv add pysaka
 ```
 
 For development:
 ```bash
-git clone https://github.com/xebjhm/PyHako.git
-cd PyHako
+git clone https://github.com/xebjhm/pysaka.git
+cd pysaka
 uv sync
 ```
 
@@ -69,7 +69,7 @@ Use `BrowserAuth` to log in interactively. This launches a browser window for yo
 
 ```python
 import asyncio
-from pyhako import BrowserAuth, Group
+from pysaka import BrowserAuth, Group
 
 async def login():
     creds = await BrowserAuth.login(Group.NOGIZAKA46)
@@ -84,7 +84,7 @@ Initialize the `Client` with your credentials.
 ```python
 import asyncio
 import aiohttp
-from pyhako import Client, Group
+from pysaka import Client, Group
 
 async def main():
     # ... assume creds obtained via BrowserAuth ...
@@ -111,7 +111,7 @@ Scrape official blogs for any group without authentication.
 ```python
 import asyncio
 import aiohttp
-from pyhako.blog import NogizakaBlogScraper, HinatazakaBlogScraper, SakurazakaBlogScraper
+from pysaka.blog import NogizakaBlogScraper, HinatazakaBlogScraper, SakurazakaBlogScraper
 
 async def scrape_blogs():
     async with aiohttp.ClientSession() as session:
@@ -180,7 +180,7 @@ Each scraper provides:
 
 ### Exceptions
 
-- `HakoError`: Base exception for all PyHako errors.
+- `SakaError`: Base exception for all pysaka errors.
 - `AuthError`: Authentication related errors.
 - `ApiError`: API request errors (includes `status_code` attribute).
 - `SessionExpiredError`: Session invalidated server-side (e.g., logged in from another device).

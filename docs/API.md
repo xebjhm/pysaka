@@ -1,4 +1,4 @@
-# PyHako API Reference
+# pysaka API Reference
 
 ## Authentication
 
@@ -125,7 +125,7 @@ Manually save current session to storage if configured.
 Get the singleton `TokenManager` instance. Avoids repeated keyring probe operations when accessed from multiple modules.
 
 ```python
-from pyhako.credentials import get_token_manager
+from pysaka.credentials import get_token_manager
 
 tm = get_token_manager()
 tm.save_session("hinatazaka46", access_token, refresh_token, cookies)
@@ -183,7 +183,7 @@ Extract dimensions from a media file.
 
 ```python
 from pathlib import Path
-from pyhako.media import get_media_dimensions
+from pysaka.media import get_media_dimensions
 
 # Image
 width, height = get_media_dimensions(Path("photo.jpg"), "picture")
@@ -253,8 +253,8 @@ Dataclass representing a blog post.
 Factory function to get the appropriate scraper for a group.
 
 ```python
-from pyhako.blog import get_scraper
-from pyhako import Group
+from pysaka.blog import get_scraper
+from pysaka import Group
 
 async with aiohttp.ClientSession() as session:
     scraper = get_scraper(Group.HINATAZAKA46, session)
@@ -270,24 +270,24 @@ Dataclass representing a member with profile image.
 - **thumbnail_url**: `str` - URL to member's profile image on CDN.
 
 ```python
-from pyhako.blog import MemberInfo
+from pysaka.blog import MemberInfo
 ```
 
 ## Exceptions
 
-### `HakoError`
-Base exception for all PyHako errors.
+### `SakaError`
+Base exception for all pysaka errors.
 
 ### `AuthError`
-Authentication related errors. Subclass of `HakoError`.
+Authentication related errors. Subclass of `SakaError`.
 
 ### `ApiError`
-API request errors. Subclass of `HakoError`.
+API request errors. Subclass of `SakaError`.
 
 - **status_code**: `Optional[int]` - HTTP status code that caused the error.
 
 ```python
-from pyhako import ApiError
+from pysaka import ApiError
 
 try:
     data = await client.fetch_json(session, "/endpoint")
@@ -299,7 +299,7 @@ except ApiError as e:
 Raised when a blog post has been permanently removed (HTTP 404/410).
 
 ```python
-from pyhako.blog import BlogGoneError
+from pysaka.blog import BlogGoneError
 
 try:
     entry = await scraper.get_blog_detail(blog_id)
@@ -311,7 +311,7 @@ except BlogGoneError:
 Raised when the session has been invalidated server-side (e.g., user logged in from another device).
 
 ```python
-from pyhako import Client, SessionExpiredError
+from pysaka import Client, SessionExpiredError
 
 try:
     await client.refresh_access_token(session)
@@ -324,7 +324,7 @@ except SessionExpiredError:
 Raised when all token refresh attempts fail unexpectedly. This indicates a potential bug or unexpected server behavior.
 
 ```python
-from pyhako import Client, RefreshFailedError
+from pysaka import Client, RefreshFailedError
 
 try:
     await client.refresh_access_token(session)
@@ -347,7 +347,7 @@ except RefreshFailedError:
 Dictionary containing group-specific configuration including `display_name` for localized folder names.
 
 ```python
-from pyhako.client import GROUP_CONFIG, Group
+from pysaka.client import GROUP_CONFIG, Group
 
 config = GROUP_CONFIG[Group.HINATAZAKA46]
 print(config["display_name"])  # "日向坂46"

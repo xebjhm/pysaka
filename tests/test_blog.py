@@ -6,14 +6,14 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from pyhako.blog import (
+from pysaka.blog import (
     BlogEntry,
     HinatazakaBlogScraper,
     NogizakaBlogScraper,
     SakurazakaBlogScraper,
     get_scraper,
 )
-from pyhako.client import Group
+from pysaka.client import Group
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -127,7 +127,7 @@ class TestNogizakaBlogScraper:
 
     def test_parse_jsonp(self):
         """Test JSONP parsing."""
-        from pyhako.blog.nogizaka import parse_jsonp
+        from pysaka.blog.nogizaka import parse_jsonp
 
         jsonp = 'res({"count":"10","data":[]})'
         result = parse_jsonp(jsonp)
@@ -136,7 +136,7 @@ class TestNogizakaBlogScraper:
 
     def test_parse_jsonp_invalid(self):
         """Test JSONP parsing with invalid format."""
-        from pyhako.blog.nogizaka import parse_jsonp
+        from pysaka.blog.nogizaka import parse_jsonp
 
         with pytest.raises(ValueError):
             parse_jsonp('invalid({"data":[]})')

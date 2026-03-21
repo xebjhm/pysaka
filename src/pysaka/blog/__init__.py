@@ -5,8 +5,8 @@ websites of Hinatazaka46, Nogizaka46, and Sakurazaka46.
 
 Example usage:
     >>> import aiohttp
-    >>> from pyhako.client import Group
-    >>> from pyhako.blog import BlogEntry, get_scraper
+    >>> from pysaka.client import Group
+    >>> from pysaka.blog import BlogEntry, get_scraper
     >>>
     >>> async with aiohttp.ClientSession() as session:
     ...     scraper = get_scraper(Group.HINATAZAKA46, session)
@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
-from pyhako.client import Group
+from pysaka.client import Group
 
 from .base import BaseBlogScraper, BlogEntry, BlogGoneError, MemberInfo
 from .config import (

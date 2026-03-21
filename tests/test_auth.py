@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyhako import Group
-from pyhako.auth import BrowserAuth
+from pysaka import Group
+from pysaka.auth import BrowserAuth
 
 
 @pytest.mark.asyncio
@@ -20,7 +20,7 @@ async def test_invalid_group():
 
 @pytest.fixture
 def mock_playwright_env():
-    with patch("pyhako.auth.async_playwright") as mock_pw:
+    with patch("pysaka.auth.async_playwright") as mock_pw:
         mock_ctx_mgr = AsyncMock()
         mock_pw.return_value = mock_ctx_mgr
 

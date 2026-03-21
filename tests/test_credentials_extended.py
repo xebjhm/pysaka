@@ -1,10 +1,10 @@
-"""Extended tests for pyhako.credentials module to improve coverage."""
+"""Extended tests for pysaka.credentials module to improve coverage."""
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyhako.credentials import (
+from pysaka.credentials import (
     KeyringStore,
     TokenManager,
     _compress_data,
@@ -13,7 +13,7 @@ from pyhako.credentials import (
     get_user_data_dir,
     is_windows,
 )
-from pyhako.exceptions import HakoError
+from pysaka.exceptions import SakaError
 
 
 class TestCompressionFunctions:
@@ -77,7 +77,7 @@ class TestGetUserDataDir:
             result = get_user_data_dir()
             assert "AppData" in str(result)
             assert "Roaming" in str(result)
-            assert "pyhako" in str(result)
+            assert "pysaka" in str(result)
 
     def test_get_user_data_dir_macos(self, tmp_path):
         """Test macOS data directory path."""
@@ -89,7 +89,7 @@ class TestGetUserDataDir:
             result = get_user_data_dir()
             assert "Library" in str(result)
             assert "Application Support" in str(result)
-            assert "pyhako" in str(result)
+            assert "pysaka" in str(result)
 
     def test_get_user_data_dir_linux(self, tmp_path):
         """Test Linux data directory path."""
@@ -101,7 +101,7 @@ class TestGetUserDataDir:
             result = get_user_data_dir()
             assert ".local" in str(result)
             assert "share" in str(result)
-            assert "pyhako" in str(result)
+            assert "pysaka" in str(result)
 
     def test_get_user_data_dir_creates_directory(self, tmp_path):
         """Test that the directory is created if it doesn't exist."""
@@ -226,7 +226,7 @@ class TestKeyringStore:
             store.delete("group1")
 
             # Should have called delete on main keyring
-            assert ("pyhako", "group1") in delete_calls
+            assert ("pysaka", "group1") in delete_calls
 
 
 class TestTokenManager:
@@ -234,8 +234,8 @@ class TestTokenManager:
 
     def test_token_manager_requires_keyring(self):
         """Test that TokenManager raises if keyring fails."""
-        with patch("pyhako.credentials.KeyringStore", side_effect=Exception("No keyring")):
-            with pytest.raises(HakoError) as exc:
+        with patch("pysaka.credentials.KeyringStore", side_effect=Exception("No keyring")):
+            with pytest.raises(SakaError) as exc:
                 TokenManager()
             assert "Secure storage" in str(exc.value)
 
@@ -243,7 +243,7 @@ class TestTokenManager:
         """Test save_session method."""
         mock_store = MagicMock()
 
-        with patch("pyhako.credentials.KeyringStore", return_value=mock_store):
+        with patch("pysaka.credentials.KeyringStore", return_value=mock_store):
             tm = TokenManager()
             tm.save_session("group1", "token", "refresh", {"c": "v"})
 
@@ -259,7 +259,7 @@ class TestTokenManager:
         mock_store = MagicMock()
         mock_store.load.return_value = {"access_token": "loaded"}
 
-        with patch("pyhako.credentials.KeyringStore", return_value=mock_store):
+        with patch("pysaka.credentials.KeyringStore", return_value=mock_store):
             tm = TokenManager()
             result = tm.load_session("group1")
 
@@ -270,7 +270,7 @@ class TestTokenManager:
         """Test delete_session method."""
         mock_store = MagicMock()
 
-        with patch("pyhako.credentials.KeyringStore", return_value=mock_store):
+        with patch("pysaka.credentials.KeyringStore", return_value=mock_store):
             tm = TokenManager()
             tm.delete_session("group1")
 
