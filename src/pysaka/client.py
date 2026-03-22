@@ -548,6 +548,7 @@ class Client:
         # by finding the since_id message in the stream (old behaviour).
         effective_ts: Optional[str] = since_ts
         need_discover_ts = since_id is not None and since_ts is None
+        first_page_retried = False
 
         while True:
             params: dict[str, Any] = {"count": 200, "order": "desc"}
@@ -559,7 +560,8 @@ class Client:
 
             data = await self.fetch_json(session, f"/groups/{group_id}/timeline", params)
             if not data:
-                if page == 0 and await self.refresh_access_token(session):
+                if page == 0 and not first_page_retried and await self.refresh_access_token(session):
+                    first_page_retried = True
                     continue
                 break
 
@@ -674,7 +676,6 @@ class Client:
                 return filepath
         except Exception as e:
             logger.error(f"Message media download error: {e}")
-            pass
 
         return None
 
@@ -842,6 +843,8 @@ class Client:
                 else:
                     logger.warning(f"DELETE {endpoint} returned {resp.status}")
                     return False
+        except (SessionExpiredError, RefreshFailedError):
+            raise
         except Exception as e:
             logger.error(f"Error deleting {url}: {e}")
             return False

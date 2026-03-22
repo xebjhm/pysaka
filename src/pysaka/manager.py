@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,23 +54,33 @@ class SyncManager:
         Uses a unique temp filename and retries os.replace to handle
         Windows file locking (antivirus, search indexer).
         """
-        tmp = self.state_file.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
+        self._atomic_write_json(self.state_file, self.sync_state)
+
+    @staticmethod
+    def _atomic_write_json(target: Path, data: Any, retries: int = 5) -> None:
+        """Write JSON data atomically with retry for Windows file locking."""
+        tmp = target.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
         try:
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.sync_state, f, indent=2)
+                json.dump(data, f, indent=2, ensure_ascii=False)
 
             last_err: Optional[Exception] = None
-            for attempt in range(5):
+            for attempt in range(retries):
                 try:
-                    os.replace(tmp, self.state_file)
+                    os.replace(tmp, target)
                     return
                 except OSError as e:
                     last_err = e
-                    time.sleep(0.05 * (attempt + 1))
+                    # Brief busy-wait for file lock release (non-blocking alternative
+                    # not available in sync context; kept short to minimize impact)
+                    if attempt < retries - 1:
+                        import time
 
-            logger.error("Failed to save sync state after retries", error=str(last_err))
+                        time.sleep(0.05 * (attempt + 1))
+
+            logger.error("Failed to write file after retries", file=str(target), error=str(last_err))
         except Exception as e:
-            logger.error("Failed to save sync state", error=str(e))
+            logger.error("Failed to write file", file=str(target), error=str(e))
         finally:
             try:
                 tmp.unlink(missing_ok=True)
@@ -269,10 +278,7 @@ class SyncManager:
                 "messages": merged,
             }
 
-            tmp_file = existing_file.with_suffix(".json.tmp")
-            async with aiofiles.open(tmp_file, "w", encoding="utf-8") as f:
-                await f.write(json.dumps(export_data, ensure_ascii=False, indent=2))
-            os.replace(tmp_file, existing_file)
+            self._atomic_write_json(existing_file, export_data)
 
             # Update State
             max_id = max(x["id"] for x in merged) if merged else 0
@@ -458,8 +464,7 @@ class SyncManager:
                             updated = True
 
             if updated:
-                async with aiofiles.open(messages_file, "w", encoding="utf-8") as f:
-                    await f.write(json.dumps(data, ensure_ascii=False, indent=2))
+                self._atomic_write_json(messages_file, data)
 
         except Exception as e:
             logger.error("Failed to update message metadata", file=str(messages_file), error=str(e))

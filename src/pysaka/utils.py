@@ -17,7 +17,15 @@ def sanitize_name(name: str) -> str:
     Returns:
         Safe string with '/' replaced by '_', but preserving spaces for readability.
     """
-    return name.replace("/", "_").strip()
+    # Replace path separators and traversal components
+    name = name.replace("/", "_").replace("\\", "_").replace("..", "_")
+    # Strip characters forbidden on Windows: < > : " | ? *
+    forbidden = '<>:"|?*'
+    for ch in forbidden:
+        name = name.replace(ch, "_")
+    # Strip control characters (0x00-0x1f)
+    name = "".join(c for c in name if ord(c) > 0x1F)
+    return name.strip()
 
 
 def get_media_extension(url: Optional[str], msg_type: str) -> str:
@@ -72,7 +80,9 @@ def parse_jwt_expiry(token: str) -> Optional[int]:
         # JWT payload is base64url encoded
         payload = parts[1]
         # Add padding for base64 decode
-        payload += "=" * (4 - len(payload) % 4)
+        padding_needed = len(payload) % 4
+        if padding_needed:
+            payload += "=" * (4 - padding_needed)
         decoded = base64.b64decode(payload)
         data = json.loads(decoded)
 
