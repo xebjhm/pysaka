@@ -287,6 +287,10 @@ class Client:
         has_auth_dir = bool(self.auth_dir and self.auth_dir.exists())
         cookie_keys = list(self.cookies.keys()) if self.cookies else []
 
+        # Cookies are a WEB-only refresh credential. In android mode we never send web
+        # session cookies (absolute fingerprint purity), so treat them as unusable here.
+        cookies_usable = bool(self.cookies) and self.platform == "web"
+
         logger.info(
             "Token refresh attempt starting",
             has_refresh_token=has_refresh_token,
@@ -297,7 +301,7 @@ class Client:
         )
 
         # Early exit only if ALL refresh methods are unavailable
-        if not self.refresh_token and not self.cookies and not (self.auth_dir and self.auth_dir.exists()):
+        if not self.refresh_token and not cookies_usable and not (self.auth_dir and self.auth_dir.exists()):
             logger.warning("No credentials (refresh_token/cookies/auth_dir) available for refresh.")
             return False
 
@@ -326,8 +330,8 @@ class Client:
             except Exception as e:
                  logger.warning(f"Error during refresh_token attempt: {e}")
 
-        # 2. Try cookies (Web Session) if available
-        if self.cookies:
+        # 2. Try cookies (Web Session) if available — WEB platform only (purity)
+        if cookies_usable:
             logger.debug(
                 "Attempting cookie-based refresh (Plan B)",
                 cookie_count=len(self.cookies),

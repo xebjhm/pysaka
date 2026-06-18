@@ -98,3 +98,15 @@ async def test_get_news_web_sends_platform_web(_mock_session):
 
     call_kwargs = _mock_session.get.call_args[1]
     assert call_kwargs["params"]["platform"] == "web"
+
+
+@pytest.mark.asyncio
+async def test_android_skips_cookie_refresh_for_purity():
+    """Absolute fingerprint purity: android mode must never POST web session cookies
+    on token refresh — a real Flutter client only uses the refresh_token grant. With no
+    refresh_token and android platform, refresh is a no-op (cookie fallback is web-only)."""
+    c = Client(group=Group.NOGIZAKA46, platform="android", cookies={"session": "x"})
+    session = MagicMock()
+    result = await c.refresh_access_token(session)
+    assert result is False
+    session.post.assert_not_called()
