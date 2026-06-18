@@ -1,5 +1,6 @@
 from pysaka import Group
 from pysaka.client import GROUP_CONFIG
+from pysaka import Client
 
 
 def test_group_config_has_verified_mobile_hosts():
@@ -8,3 +9,49 @@ def test_group_config_has_verified_mobile_hosts():
     assert GROUP_CONFIG[Group.SAKURAZAKA46]["mobile_api_base"] == "https://api.s46.glastonr.net/v2"
     # Yodel has no known mobile host
     assert GROUP_CONFIG[Group.YODEL]["mobile_api_base"] is None
+
+
+def test_android_profile_nogizaka():
+    c = Client(group=Group.NOGIZAKA46, platform="android")
+    assert c.api_base == "https://api.n46.glastonr.net/v2"
+    assert c.headers["x-talk-app-platform"] == "android"
+    assert c.headers["user-agent"] == "Dart/3.7 (dart:io)"
+    assert c.headers["accept-language"] == "ja-JP;q=1.0,en-US;q=0.9"
+    assert c.headers["accept"] == "application/json"
+    assert c.headers["content-type"] == "application/json"
+    assert c.headers["x-talk-app-id"] == "jp.co.sonymusic.communication.nogizaka 2.5"
+    assert "origin" not in c.headers
+    assert "referer" not in c.headers
+
+
+def test_web_profile_unchanged_regression():
+    c = Client(group=Group.NOGIZAKA46)  # default platform="web"
+    assert c.api_base == "https://api.message.nogizaka46.com/v2"
+    assert c.headers["x-talk-app-platform"] == "web"
+    assert c.headers["user-agent"].startswith("Mozilla/5.0")
+    assert c.headers["origin"] == "https://message.nogizaka46.com"
+    assert c.headers["referer"] == "https://message.nogizaka46.com/"
+    assert c.headers["accept-language"] == "ja,en-US;q=0.9,en;q=0.8"
+
+
+def test_android_yodel_falls_back_to_web_host():
+    c = Client(group=Group.YODEL, platform="android")
+    assert c.api_base == "https://api.service.yodel-app.com/v2"
+    assert c.headers["x-talk-app-platform"] == "android"
+    assert "origin" not in c.headers
+
+
+def test_unknown_platform_defaults_to_web():
+    c = Client(group=Group.NOGIZAKA46, platform="bogus")
+    assert c.headers["x-talk-app-platform"] == "web"
+    assert c.api_base == "https://api.message.nogizaka46.com/v2"
+
+
+def test_android_with_token_sets_bearer():
+    c = Client(group=Group.NOGIZAKA46, platform="android", access_token="TKN")
+    assert c.headers["Authorization"] == "Bearer TKN"
+
+
+def test_explicit_user_agent_overrides_android_default():
+    c = Client(group=Group.NOGIZAKA46, platform="android", user_agent="Custom/1.0")
+    assert c.headers["user-agent"] == "Custom/1.0"

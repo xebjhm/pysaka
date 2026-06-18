@@ -78,7 +78,8 @@ class Client:
         app_id: Optional[str] = None,
         user_agent: Optional[str] = None,
         auth_dir: Optional[Union[str, Path]] = None,
-        use_token_storage: bool = False
+        use_token_storage: bool = False,
+        platform: str = "web"
     ):
         """
         Initialize the client.
@@ -91,6 +92,8 @@ class Client:
             app_id: The X-Talk-App-ID header value (optional, defaults to group config).
             user_agent: The User-Agent header value (optional, defaults to hardcoded).
             use_token_storage: If True, attempts to load/save credentials using system keyring (or file fallback).
+            platform: Request profile — "web" (default, browser-like) or "android"
+                (Flutter app: Dart UA, mobile host, x-talk-app-platform=android).
 
         Raises:
             ValueError: If an invalid group string is provided.
@@ -122,23 +125,64 @@ class Client:
         self.access_token = access_token
         self.refresh_token = refresh_token
         self.cookies = cookies
-        self.user_agent = user_agent or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        self.app_id = app_id or self.config["app_id"]
-        self.api_base = self.config["api_base"]
         self.auth_dir = Path(auth_dir) if auth_dir else None
 
-        self.headers = {
+        # Platform profile: "web" (default) mimics the browser client;
+        # "android" mimics the Flutter/Dart app (different UA, host, headers).
+        self.platform = platform if platform in ("web", "android") else "web"
+        if platform not in ("web", "android"):
+            logger.warning(f"Unknown platform '{platform}', defaulting to 'web'.")
+
+        self.app_id = app_id or self.config["app_id"]
+
+        # Host: android uses the per-group mobile host when known, else web host.
+        if self.platform == "android":
+            mobile_base = self.config.get("mobile_api_base")
+            if mobile_base:
+                self.api_base = mobile_base
+            else:
+                self.api_base = self.config["api_base"]
+                logger.info(
+                    f"No mobile_api_base for {self.group.value}; using web host in android mode."
+                )
+        else:
+            self.api_base = self.config["api_base"]
+
+        # User-Agent: explicit override wins; else platform default.
+        if user_agent:
+            self.user_agent = user_agent
+        elif self.platform == "android":
+            self.user_agent = "Dart/3.7 (dart:io)"
+        else:
+            self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+        self.headers = self._build_headers()
+        if self.access_token:
+            self.headers["Authorization"] = f"Bearer {self.access_token}"
+
+    def _build_headers(self) -> dict[str, str]:
+        """Build request headers for the active platform profile.
+
+        web:     mimics the official browser client (origin/referer, Mozilla UA).
+        android: mimics the Flutter app (Dart UA, x-talk-app-platform=android,
+                 no origin/referer, JP-first accept-language). Values verified in
+                 the android-msg-study capture.
+        """
+        headers = {
             "x-talk-app-id": self.app_id,
             "user-agent": self.user_agent,
             "content-type": "application/json",
-            "x-talk-app-platform": "web",
-            "origin": self.config["auth_url"].rstrip('/'),
-            "referer": self.config["auth_url"],
             "accept": "application/json",
-            "accept-language": "ja,en-US;q=0.9,en;q=0.8"
         }
-        if self.access_token:
-            self.headers["Authorization"] = f"Bearer {self.access_token}"
+        if self.platform == "android":
+            headers["x-talk-app-platform"] = "android"
+            headers["accept-language"] = "ja-JP;q=1.0,en-US;q=0.9"
+        else:
+            headers["x-talk-app-platform"] = "web"
+            headers["origin"] = self.config["auth_url"].rstrip("/")
+            headers["referer"] = self.config["auth_url"]
+            headers["accept-language"] = "ja,en-US;q=0.9,en;q=0.8"
+        return headers
 
     async def update_token(self, new_token: str, new_refresh_token: Optional[str] = None) -> None:
         """
