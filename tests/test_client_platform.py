@@ -1,3 +1,7 @@
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from pysaka import Group
 from pysaka.client import GROUP_CONFIG
 from pysaka import Client
@@ -55,3 +59,42 @@ def test_android_with_token_sets_bearer():
 def test_explicit_user_agent_overrides_android_default():
     c = Client(group=Group.NOGIZAKA46, platform="android", user_agent="Custom/1.0")
     assert c.headers["user-agent"] == "Custom/1.0"
+
+
+# --- Query-param platform tests ---
+
+@pytest.fixture
+def _mock_session():
+    session = MagicMock()
+    session.get.return_value.__aenter__.return_value = AsyncMock()
+    session.get.return_value.__aexit__.return_value = None
+    return session
+
+
+@pytest.mark.asyncio
+async def test_get_news_android_sends_platform_android(_mock_session):
+    """Android client must send ?platform=android in get_news."""
+    c = Client(group=Group.NOGIZAKA46, platform="android", access_token="TKN")
+    mock_resp = _mock_session.get.return_value.__aenter__.return_value
+    mock_resp.status = 200
+    mock_resp.json = AsyncMock(return_value={"announcements": [{"id": 1}]})
+
+    result = await c.get_news(_mock_session)
+
+    call_kwargs = _mock_session.get.call_args[1]
+    assert call_kwargs["params"]["platform"] == "android"
+    assert result == [{"id": 1}]
+
+
+@pytest.mark.asyncio
+async def test_get_news_web_sends_platform_web(_mock_session):
+    """Web client must send ?platform=web in get_news."""
+    c = Client(group=Group.NOGIZAKA46, platform="web", access_token="TKN")
+    mock_resp = _mock_session.get.return_value.__aenter__.return_value
+    mock_resp.status = 200
+    mock_resp.json = AsyncMock(return_value={"announcements": []})
+
+    await c.get_news(_mock_session)
+
+    call_kwargs = _mock_session.get.call_args[1]
+    assert call_kwargs["params"]["platform"] == "web"

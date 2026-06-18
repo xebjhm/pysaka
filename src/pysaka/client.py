@@ -129,9 +129,10 @@ class Client:
 
         # Platform profile: "web" (default) mimics the browser client;
         # "android" mimics the Flutter/Dart app (different UA, host, headers).
-        self.platform = platform if platform in ("web", "android") else "web"
         if platform not in ("web", "android"):
             logger.warning(f"Unknown platform '{platform}', defaulting to 'web'.")
+            platform = "web"
+        self.platform = platform
 
         self.app_id = app_id or self.config["app_id"]
 
@@ -758,7 +759,7 @@ class Client:
         Returns:
             List of news items.
         """
-        params = {"platform": "web", "count": count}
+        params = {"platform": self.platform, "count": count}
         data = await self.fetch_json(session, "/announcements", params)
         if data and "announcements" in data:
             return data["announcements"]
