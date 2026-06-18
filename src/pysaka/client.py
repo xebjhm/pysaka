@@ -25,28 +25,32 @@ GROUP_CONFIG = {
         "app_id": "jp.co.sonymusic.communication.keyakizaka 2.5",
         "auth_url": "https://message.hinatazaka46.com/",
         "display_name": "日向坂46",
-        "organization_id": 1
+        "organization_id": 1,
+        "mobile_api_base": "https://api.kh.glastonr.net/v2"
     },
     Group.NOGIZAKA46: {
         "api_base": "https://api.message.nogizaka46.com/v2",
         "app_id": "jp.co.sonymusic.communication.nogizaka 2.5",
         "auth_url": "https://message.nogizaka46.com/",
         "display_name": "乃木坂46",
-        "organization_id": 1
+        "organization_id": 1,
+        "mobile_api_base": "https://api.n46.glastonr.net/v2"
     },
     Group.SAKURAZAKA46: {
         "api_base": "https://api.message.sakurazaka46.com/v2",
         "app_id": "jp.co.sonymusic.communication.sakurazaka 2.5",
         "auth_url": "https://message.sakurazaka46.com/",
         "display_name": "櫻坂46",
-        "organization_id": 1
+        "organization_id": 1,
+        "mobile_api_base": "https://api.s46.glastonr.net/v2"
     },
     Group.YODEL: {
         "api_base": "https://api.service.yodel-app.com/v2",
         "app_id": "jp.co.sonymusic.communication.yodel 2.5",
         "auth_url": "https://service.yodel-app.com/",
         "display_name": "Yodel",
-        "organization_id": None
+        "organization_id": None,
+        "mobile_api_base": None
     }
 }
 
