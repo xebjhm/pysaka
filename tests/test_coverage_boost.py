@@ -187,11 +187,15 @@ async def test_login_successful_flow_with_handler():
         # 3. Yield to let login reach page.on or wait_for
         await asyncio.sleep(0.1)
 
-        # 4. Verify page.on was called and extract handler
+        # 4. Verify page.on was called and extract the response handler.
+        # page.on is registered for multiple events (response + close), so find
+        # the response handler specifically rather than assuming a single call.
         mock_page.on.assert_called()
-        args, _ = mock_page.on.call_args
-        event_name, handler = args
-        assert event_name == "response"
+        response_handlers = [
+            a[1] for a, _ in mock_page.on.call_args_list if a and a[0] == "response"
+        ]
+        assert response_handlers, "response handler was not registered"
+        handler = response_handlers[0]
 
         # 5. Create a Mock Response ensuring matching host
         mock_request = MagicMock()
