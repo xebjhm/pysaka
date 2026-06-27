@@ -105,27 +105,51 @@ class BrowserAuth:
             token_future: asyncio.Future[None] = asyncio.Future()
 
             async def handle_response(response):
+                request = response.request
+                if api_host not in request.url or response.status != 200:
+                    return
+
+                # Capture the long-lived refresh_token from the signin/token
+                # response body. The web flow receives it too, but we previously
+                # only scraped the access_token from request headers.
+                if "refresh_token" not in captured_data and (
+                    "/signin" in request.url or "/update_token" in request.url
+                ):
+                    try:
+                        data = await response.json()
+                        if isinstance(data, dict) and data.get("refresh_token"):
+                            captured_data["refresh_token"] = data["refresh_token"]
+                            logger.debug("Captured refresh_token from signin response")
+                    except Exception:
+                        pass
+
                 if token_future.done():
                     return
 
-                request = response.request
-                if api_host in request.url and response.status == 200:
-                    headers = request.headers
-                    auth = headers.get("authorization") or headers.get("Authorization")
+                headers = request.headers
+                auth = headers.get("authorization") or headers.get("Authorization")
 
-                    if auth and "Bearer" in auth:
-                        token = auth.split("Bearer ")[1]
-                        if token:
-                            captured_data["access_token"] = token
-                            captured_data["x-talk-app-id"] = headers.get("x-talk-app-id") or headers.get(
-                                "X-Talk-App-ID"
-                            )
-                            captured_data["user-agent"] = headers.get("user-agent") or headers.get("User-Agent")
+                if auth and "Bearer" in auth:
+                    token = auth.split("Bearer ")[1]
+                    if token:
+                        captured_data["access_token"] = token
+                        captured_data["x-talk-app-id"] = headers.get("x-talk-app-id") or headers.get("X-Talk-App-ID")
+                        captured_data["user-agent"] = headers.get("user-agent") or headers.get("User-Agent")
 
-                            if not token_future.done():
-                                token_future.set_result(True)
+                        if not token_future.done():
+                            token_future.set_result(True)
 
             page.on("response", handle_response)
+
+            def handle_close(*_args):
+                # User closed the browser/page before a token was captured.
+                # Fail the wait so login() returns promptly and releases the
+                # caller's lock, instead of hanging until the interactive timeout.
+                if not token_future.done():
+                    token_future.set_exception(RuntimeError("Browser closed before authentication completed."))
+
+            page.on("close", handle_close)
+            context.on("close", handle_close)
 
             try:
                 # DESIGN DECISION: Trust the persistent browser context for OAuth session management.
@@ -184,7 +208,7 @@ class BrowserAuth:
 
                 return {
                     "access_token": captured_data["access_token"],
-                    "refresh_token": None,
+                    "refresh_token": captured_data.get("refresh_token"),
                     "cookies": captured_data["cookies"],
                     "app_id": captured_data.get("x-talk-app-id", ""),
                     "user_agent": captured_data.get("user-agent", ""),

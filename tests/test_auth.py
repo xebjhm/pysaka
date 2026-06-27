@@ -89,3 +89,77 @@ async def test_login_generic_error(mock_playwright_env):
     with patch("asyncio.wait_for", side_effect=Exception("Catastrophic Failure")):
         result = await BrowserAuth.login(Group.NOGIZAKA46)
         assert result is None
+
+
+@pytest.mark.asyncio
+async def test_login_captures_refresh_token_from_signin_response(mock_playwright_env):
+    """The refresh_token in the /v2/signin response body is captured and returned
+    (previously it was discarded — only the Bearer access_token was scraped)."""
+    _, _, mock_context, mock_page = mock_playwright_env
+
+    handlers = {}
+    mock_page.on.side_effect = lambda ev, cb: handlers.__setitem__(ev, cb)
+    mock_context.on.side_effect = lambda ev, cb: handlers.__setitem__(ev, cb)
+
+    async def drive(*args, **kwargs):
+        # 1) The signin response carrying the long-lived refresh_token.
+        signin = MagicMock()
+        signin.status = 200
+        signin.request = MagicMock()
+        signin.request.url = "https://api.message.nogizaka46.com/v2/signin"
+        signin.request.headers = {}
+        signin.json = AsyncMock(return_value={"access_token": "AT", "refresh_token": "RT123", "expires_in": 3600})
+        await handlers["response"](signin)
+        # 2) A subsequent authed request carrying the Bearer (completes login).
+        authed = MagicMock()
+        authed.status = 200
+        authed.request = MagicMock()
+        authed.request.url = "https://api.message.nogizaka46.com/v2/messages"
+        authed.request.headers = {
+            "authorization": "Bearer AT",
+            "x-talk-app-id": "app",
+            "user-agent": "ua",
+        }
+        await handlers["response"](authed)
+
+    mock_page.goto.side_effect = drive
+
+    result = await asyncio.wait_for(BrowserAuth.login(Group.NOGIZAKA46), timeout=5)
+    assert result is not None
+    assert result["access_token"] == "AT"
+    assert result["refresh_token"] == "RT123"
+
+
+@pytest.mark.asyncio
+async def test_login_returns_promptly_when_browser_closed(mock_playwright_env):
+    """If the user closes the browser before a token is captured, login() must
+    return promptly so the caller's lock is released — instead of hanging until
+    the 300s interactive timeout. Regression test for the manual-close deadlock.
+    """
+    _, _, mock_context, mock_page = mock_playwright_env
+
+    # Capture event handlers registered via page.on(...) / context.on(...)
+    handlers: dict[str, object] = {}
+
+    def register(event, cb):
+        handlers[event] = cb
+
+    mock_page.on.side_effect = register
+    mock_context.on.side_effect = register
+
+    # Simulate the user closing the window during navigation: fire the "close"
+    # handler. No token will ever be captured.
+    def goto_then_close(*args, **kwargs):
+        close_cb = handlers.get("close")
+        if close_cb:
+            close_cb()
+
+    mock_page.goto.side_effect = goto_then_close
+
+    # Must finish well within the interactive timeout; otherwise the lock stays held.
+    try:
+        result = await asyncio.wait_for(BrowserAuth.login(Group.NOGIZAKA46), timeout=5)
+    except asyncio.TimeoutError:
+        pytest.fail("login() hung after the browser was closed (lock would stay held)")
+
+    assert result is None
