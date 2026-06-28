@@ -200,12 +200,11 @@ class BrowserAuth:
                 captured_data["cookies"] = relevant_cookies
                 logger.debug(f"Captured {len(relevant_cookies)} session cookies.")
 
+                # Build the result and return. Cleanup happens once, in the
+                # `finally` below — not here — so we never double-close (closing
+                # a persistent context twice raised "Target page, context or
+                # browser has been closed" on Windows and discarded the login).
                 logger.info("Closing browser...")
-                await page.close()
-                await context.close()
-                if not user_data_dir:
-                    await browser.close()
-
                 return {
                     "access_token": captured_data["access_token"],
                     "refresh_token": captured_data.get("refresh_token"),
@@ -219,13 +218,16 @@ class BrowserAuth:
             except Exception as e:
                 logger.error(f"Login error: {e}")
             finally:
+                # Single cleanup site for every path (success, timeout, error).
+                # Best-effort: a teardown error must never propagate out of a
+                # successful login or mask a real error.
                 try:
                     if user_data_dir:
                         await context.close()
                     else:
                         await browser.close()
-                except Exception:
-                    pass
+                except Exception as close_err:
+                    logger.debug(f"Browser close (non-fatal): {close_err}")
 
             return None
 
