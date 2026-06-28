@@ -574,6 +574,7 @@ class Client:
         since_ts: Optional[str] = None,
         max_id: Optional[int] = None,
         progress_callback=None,
+        clear_unread: bool = False,
     ) -> list[dict[str, Any]]:
         """
         Fetch all new messages from a group's timeline.
@@ -585,6 +586,10 @@ class Client:
             since_ts: ISO timestamp cursor. Fetch messages published after this time.
             max_id: Ignored by API, kept for compatibility.
             progress_callback: Optional async function(date_str, count).
+            clear_unread: If True, the server clears the account's unread badge for
+                this group (the official app sends this on chat-open). Defaults to
+                False so a background sync does NOT zero the user's unread count on
+                the official mobile app.
 
         Returns:
             List of message dicts, sorted by ID ascending.
@@ -602,7 +607,13 @@ class Client:
         first_page_retried = False
 
         while True:
-            params: dict[str, Any] = {"count": 200, "order": "desc"}
+            params: dict[str, Any] = {
+                "count": 200,
+                "order": "desc",
+                # Never advance the server-side read pointer during a sync — that
+                # would zero the user's unread badge on the official mobile app.
+                "clear_unread": "true" if clear_unread else "false",
+            }
             if current_continuation:
                 params["continuation"] = current_continuation
 

@@ -132,6 +132,36 @@ async def test_get_messages_pagination(client, mock_session):
 
 
 @pytest.mark.asyncio
+async def test_get_messages_does_not_clear_unread_by_default(client, mock_session):
+    """Syncing must NOT clear the user's unread badge on the official mobile app.
+
+    The timeline GET must carry clear_unread=false; otherwise the server's
+    absent-default zeroes the official app's unread count/red-dot on every sync.
+    """
+    mock_resp = mock_session.get.return_value.__aenter__.return_value
+    mock_resp.status = 200
+    mock_resp.json.return_value = {"messages": [{"id": 1}], "continuation": None}
+
+    await client.get_messages(mock_session, group_id=1)
+
+    _, kwargs = mock_session.get.call_args
+    assert kwargs["params"]["clear_unread"] == "false"
+
+
+@pytest.mark.asyncio
+async def test_get_messages_can_opt_in_to_clear_unread(client, mock_session):
+    """Callers may explicitly clear the badge (e.g. an opt-in setting)."""
+    mock_resp = mock_session.get.return_value.__aenter__.return_value
+    mock_resp.status = 200
+    mock_resp.json.return_value = {"messages": [{"id": 1}], "continuation": None}
+
+    await client.get_messages(mock_session, group_id=1, clear_unread=True)
+
+    _, kwargs = mock_session.get.call_args
+    assert kwargs["params"]["clear_unread"] == "true"
+
+
+@pytest.mark.asyncio
 async def test_get_additional_endpoints(client, mock_session):
     mock_resp = mock_session.get.return_value.__aenter__.return_value
     mock_resp.status = 200
