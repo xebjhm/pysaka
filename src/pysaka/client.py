@@ -167,8 +167,7 @@ class Client:
 
         web:     mimics the official browser client (origin/referer, Mozilla UA).
         android: mimics the Flutter app (Dart UA, x-talk-app-platform=android,
-                 no origin/referer, JP-first accept-language). Values verified in
-                 the android-msg-study capture.
+                 no origin/referer, JP-first accept-language).
         """
         headers = {
             "x-talk-app-id": self.app_id,
