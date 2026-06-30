@@ -26,6 +26,25 @@ class BrowserAuth:
     """Handles browser-based authentication for Sakamichi Groups Message."""
 
     @staticmethod
+    def _scrape_token_headers(headers: Any) -> Optional[dict[str, Any]]:
+        """Pull access_token + app-id + user-agent from an authenticated API request.
+
+        Shared by the interactive-login and headless-refresh response handlers so the
+        Bearer-capture contract lives in one place. Returns None if no usable Bearer.
+        """
+        auth = headers.get("authorization") or headers.get("Authorization")
+        if not (auth and "Bearer" in auth):
+            return None
+        token = auth.split("Bearer ")[1]
+        if not token:
+            return None
+        return {
+            "access_token": token,
+            "x-talk-app-id": headers.get("x-talk-app-id") or headers.get("X-Talk-App-ID"),
+            "user-agent": headers.get("user-agent") or headers.get("User-Agent"),
+        }
+
+    @staticmethod
     async def login(
         group: Union[Group, str],
         headless: bool = False,
@@ -126,18 +145,11 @@ class BrowserAuth:
                 if token_future.done():
                     return
 
-                headers = request.headers
-                auth = headers.get("authorization") or headers.get("Authorization")
-
-                if auth and "Bearer" in auth:
-                    token = auth.split("Bearer ")[1]
-                    if token:
-                        captured_data["access_token"] = token
-                        captured_data["x-talk-app-id"] = headers.get("x-talk-app-id") or headers.get("X-Talk-App-ID")
-                        captured_data["user-agent"] = headers.get("user-agent") or headers.get("User-Agent")
-
-                        if not token_future.done():
-                            token_future.set_result(True)
+                creds = BrowserAuth._scrape_token_headers(request.headers)
+                if creds:
+                    captured_data.update(creds)
+                    if not token_future.done():
+                        token_future.set_result(True)
 
             page.on("response", handle_response)
 
@@ -324,21 +336,13 @@ class BrowserAuth:
                         api_host.replace("https://", "").split("/")[0] in response.request.url
                         and response.status == 200
                     ):
-                        headers = response.request.headers
-                        auth = headers.get("authorization") or headers.get("Authorization")
-                        if auth and "Bearer" in auth:
-                            token = auth.split("Bearer ")[1]
-                            captured_data["access_token"] = token
-                            captured_data["x-talk-app-id"] = headers.get("x-talk-app-id") or headers.get(
-                                "X-Talk-App-ID"
-                            )
-                            captured_data["user-agent"] = headers.get("user-agent") or headers.get("User-Agent")
-
+                        creds = BrowserAuth._scrape_token_headers(response.request.headers)
+                        if creds:
+                            captured_data.update(creds)
                             logger.debug(
                                 "Headless refresh captured token",
                                 capture_url=str(response.request.url),
                             )
-
                             if not token_future.done():
                                 token_future.set_result(True)
 

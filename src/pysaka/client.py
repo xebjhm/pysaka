@@ -139,16 +139,14 @@ class Client:
 
         self.app_id = app_id or self.config["app_id"]
 
-        # Host: android uses the per-group mobile host when known, else web host.
+        # Host: android uses the per-group mobile host when known, else the web host.
+        self.api_base = self.config["api_base"]
         if self.platform == "android":
             mobile_base = self.config.get("mobile_api_base")
             if mobile_base:
                 self.api_base = mobile_base
             else:
-                self.api_base = self.config["api_base"]
                 logger.info(f"No mobile_api_base for {self.group.value}; using web host in android mode.")
-        else:
-            self.api_base = self.config["api_base"]
 
         # User-Agent: explicit override wins; else platform default.
         if user_agent:

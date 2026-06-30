@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,7 +59,11 @@ class SyncManager:
 
     @staticmethod
     def _atomic_write_json(target: Path, data: Any, retries: int = 5) -> None:
-        """Write JSON data atomically with retry for Windows file locking."""
+        """Write JSON data atomically with retry for Windows file locking.
+
+        Synchronous + blocking (it retries with ``time.sleep``); on the async path
+        callers MUST offload it via ``asyncio.to_thread`` so it never stalls the loop.
+        """
         tmp = target.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
         try:
             with open(tmp, "w", encoding="utf-8") as f:
@@ -71,11 +76,8 @@ class SyncManager:
                     return
                 except OSError as e:
                     last_err = e
-                    # Brief busy-wait for file lock release (non-blocking alternative
-                    # not available in sync context; kept short to minimize impact)
+                    # Brief wait for the file lock to release before retrying.
                     if attempt < retries - 1:
-                        import time
-
                         time.sleep(0.05 * (attempt + 1))
 
             logger.error("Failed to write file after retries", file=str(target), error=str(last_err))
@@ -278,7 +280,7 @@ class SyncManager:
                 "messages": merged,
             }
 
-            self._atomic_write_json(existing_file, export_data)
+            await asyncio.to_thread(self._atomic_write_json, existing_file, export_data)
 
             # Update State
             max_id = max(x["id"] for x in merged) if merged else 0
@@ -464,7 +466,7 @@ class SyncManager:
                             updated = True
 
             if updated:
-                self._atomic_write_json(messages_file, data)
+                await asyncio.to_thread(self._atomic_write_json, messages_file, data)
 
         except Exception as e:
             logger.error("Failed to update message metadata", file=str(messages_file), error=str(e))
