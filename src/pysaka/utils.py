@@ -77,10 +77,10 @@ def parse_jwt_expiry(token: str) -> Optional[int]:
         if len(parts) < 2:
             return None
 
-        # JWT payload is base64url encoded; pad to a multiple of 4 for b64decode.
+        # JWT payload is base64url encoded (uses '-'/'_'); pad to a multiple of 4.
         payload = parts[1]
         payload += "=" * (-len(payload) % 4)
-        decoded = base64.b64decode(payload)
+        decoded = base64.urlsafe_b64decode(payload)
         data = json.loads(decoded)
 
         if "exp" in data:

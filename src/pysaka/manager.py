@@ -58,11 +58,19 @@ class SyncManager:
         self._atomic_write_json(self.state_file, self.sync_state)
 
     @staticmethod
-    def _atomic_write_json(target: Path, data: Any, retries: int = 5) -> None:
+    def _atomic_write_json(target: Path, data: Any, retries: int = 5) -> bool:
         """Write JSON data atomically with retry for Windows file locking.
 
-        Synchronous + blocking (it retries with ``time.sleep``); on the async path
-        callers MUST offload it via ``asyncio.to_thread`` so it never stalls the loop.
+        Synchronous + blocking (it retries with ``time.sleep``). Callers writing a
+        *local* payload from an async path SHOULD offload via ``asyncio.to_thread``
+        (see the messages.json / metadata writes). The shared ``sync_state`` writes
+        deliberately do NOT offload: callers gather ``sync_member`` across groups, so
+        running the mutate+serialize on the single event-loop thread is what keeps
+        ``self.sync_state`` race-free — at the cost of a brief loop stall only on the
+        rare Windows-lock retry.
+
+        Returns True on success, False if the write/replace ultimately failed — so
+        callers can avoid advancing persisted state past data that never hit disk.
         """
         tmp = target.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
         try:
@@ -73,7 +81,7 @@ class SyncManager:
             for attempt in range(retries):
                 try:
                     os.replace(tmp, target)
-                    return
+                    return True
                 except OSError as e:
                     last_err = e
                     # Brief wait for the file lock to release before retrying.
@@ -81,8 +89,10 @@ class SyncManager:
                         time.sleep(0.05 * (attempt + 1))
 
             logger.error("Failed to write file after retries", file=str(target), error=str(last_err))
+            return False
         except Exception as e:
             logger.error("Failed to write file", file=str(target), error=str(e))
+            return False
         finally:
             try:
                 tmp.unlink(missing_ok=True)
@@ -280,9 +290,18 @@ class SyncManager:
                 "messages": merged,
             }
 
-            await asyncio.to_thread(self._atomic_write_json, existing_file, export_data)
+            wrote = await asyncio.to_thread(self._atomic_write_json, existing_file, export_data)
+            if not wrote:
+                # The messages never hit disk — do NOT advance the cursor, or the next
+                # sync would skip them permanently. Abort this member; retry next run.
+                logger.error("Skipping cursor advance: messages.json write failed", member=mname)
+                return 0
 
-            # Update State
+            # Update State. Kept synchronous (NOT offloaded to a thread): callers gather
+            # sync_member across groups, all sharing self.sync_state — running the
+            # mutate+serialize on the event loop keeps it atomic under cooperative
+            # scheduling. (The messages.json write above writes a local dict, so it is
+            # safe to offload.)
             max_id = max(x["id"] for x in merged) if merged else 0
             newest_ts = max((x.get("timestamp") or "" for x in merged), default=None)
             self.update_sync_state(gid, mid, max_id, len(merged), last_ts=newest_ts)

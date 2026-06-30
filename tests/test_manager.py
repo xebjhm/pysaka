@@ -97,6 +97,29 @@ async def test_sync_member_flow(sync_manager):
 
 
 @pytest.mark.asyncio
+async def test_sync_member_write_failure_does_not_advance_cursor(sync_manager, monkeypatch):
+    """If the messages.json write fails, the cursor must NOT advance — otherwise the
+    next sync would skip the unwritten messages permanently."""
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp", "subscription": {"state": "active"}}
+    member = {"id": 10, "name": "Mem", "portrait": "url"}
+
+    sync_manager.client.get_messages.return_value = [
+        {"id": 101, "type": "text", "text": "Hi", "member_id": 10, "published_at": "2023-01-01T10:00:00Z"},
+    ]
+    # Simulate a persistent write failure (e.g. Windows lock exhausting retries).
+    write_mock = MagicMock(return_value=False)
+    monkeypatch.setattr(SyncManager, "_atomic_write_json", staticmethod(write_mock))
+
+    count = await sync_manager.sync_member(session, group, member, [])
+
+    write_mock.assert_called_once()  # the write was actually attempted (not an early exit)
+    assert count == 0  # member sync aborted, not reported as success
+    assert "1_10" not in sync_manager.sync_state  # cursor was NOT advanced
+    assert sync_manager.get_last_ts(1, 10) is None
+
+
+@pytest.mark.asyncio
 async def test_process_media_queue(sync_manager):
     session = AsyncMock()
     queue = [{"url": "u1", "path": Path("p1"), "timestamp": "t1"}, {"url": "u2", "path": Path("p2"), "timestamp": "t2"}]

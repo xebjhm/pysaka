@@ -33,9 +33,9 @@ class BrowserAuth:
         Bearer-capture contract lives in one place. Returns None if no usable Bearer.
         """
         auth = headers.get("authorization") or headers.get("Authorization")
-        if not (auth and "Bearer" in auth):
+        if not auth or "Bearer " not in auth:
             return None
-        token = auth.split("Bearer ")[1]
+        token = auth.split("Bearer ", 1)[1].strip()
         if not token:
             return None
         return {
@@ -139,8 +139,8 @@ class BrowserAuth:
                         if isinstance(data, dict) and data.get("refresh_token"):
                             captured_data["refresh_token"] = data["refresh_token"]
                             logger.debug("Captured refresh_token from signin response")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Could not parse refresh_token from response", error=str(e))
 
                 if token_future.done():
                     return

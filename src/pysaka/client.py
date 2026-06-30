@@ -301,8 +301,8 @@ class Client:
         refresh_headers = self.headers.copy()
         refresh_headers.pop("Authorization", None)
 
-        # 1. Try refresh_token if available (Plan A - Unused in Web Flow, kept for future mobile support)
-        # Note: Web flow sets refresh_token=None, so this block is skipped.
+        # 1. Plan A — refresh_token grant. Used by mobile/android mode, and now also by
+        # web sessions when the /signin response carried a refresh_token (captured at login).
         if self.refresh_token:
             logger.debug("Attempting refresh using refresh_token...")
             try:
