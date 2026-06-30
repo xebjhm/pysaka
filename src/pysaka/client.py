@@ -953,6 +953,26 @@ class Client:
             return data["messages"]
         return []
 
+    async def mark_group_read(self, session: aiohttp.ClientSession, group_id: int) -> bool:
+        """Clear the account's unread count for a group on the server.
+
+        Sends a minimal timeline fetch with ``clear_unread=true`` — the same
+        signal the official app sends when you open a room. Call this only when
+        the user opens a conversation and has opted in to syncing read status to
+        their phone. A background sync must NOT call this (use ``get_messages``,
+        which defaults to ``clear_unread=false``).
+
+        Args:
+            session: Active aiohttp ClientSession.
+            group_id: The ID of the group/member room to mark read.
+
+        Returns:
+            True if the request succeeded.
+        """
+        params: dict[str, Any] = {"count": 1, "order": "desc", "clear_unread": "true"}
+        data = await self.fetch_json(session, f"/groups/{group_id}/timeline", params)
+        return data is not None
+
     async def get_subscription_streak(self, session: aiohttp.ClientSession, group_id: int) -> Optional[dict[str, Any]]:
         """
         Fetch consecutive subscription days for a member.

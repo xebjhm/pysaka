@@ -149,6 +149,23 @@ async def test_get_messages_does_not_clear_unread_by_default(client, mock_sessio
 
 
 @pytest.mark.asyncio
+async def test_mark_group_read_clears_unread(client, mock_session):
+    """mark_group_read sends a minimal timeline fetch with clear_unread=true
+    (what the official app does on room-open) and reports success."""
+    mock_resp = mock_session.get.return_value.__aenter__.return_value
+    mock_resp.status = 200
+    mock_resp.json.return_value = {"messages": [], "continuation": None}
+
+    ok = await client.mark_group_read(mock_session, group_id=42)
+
+    assert ok is True
+    url, kwargs = mock_session.get.call_args
+    assert url[0].endswith("/groups/42/timeline")
+    assert kwargs["params"]["clear_unread"] == "true"
+    assert kwargs["params"]["count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_get_messages_can_opt_in_to_clear_unread(client, mock_session):
     """Callers may explicitly clear the badge (e.g. an opt-in setting)."""
     mock_resp = mock_session.get.return_value.__aenter__.return_value
