@@ -1,0 +1,29 @@
+{
+  "meta": {"group": "hinatazaka46"},
+  "members": [
+    {
+      "blogId": "12",
+      "nameKanji": "金村 美玖",
+      "nameHiragana": "かねむら みく",
+      "nameRomaji": "Kanemura Miku",
+      "generation": 2,
+      "status": "active"
+    },
+    {
+      "blogId": "14",
+      "nameKanji": "小坂 菜緒",
+      "nameHiragana": "こさか なお",
+      "nameRomaji": "Kosaka Nao",
+      "generation": 1,
+      "status": "active"
+    },
+    {
+      "blogId": "13",
+      "nameKanji": "河田 陽菜",
+      "nameHiragana": "かわた ひな",
+      "nameRomaji": "Kawata Hina",
+      "generation": 1,
+      "status": "active"
+    }
+  ]
+}
