@@ -7,12 +7,15 @@ from .models import CanonicalId, Member
 _WHITESPACE = (" ", "\t", "\n", "\r", "　")  # ASCII space/tab/newlines + ideographic space
 
 
-def _normkey(name: str) -> str:
-    """Normalize a member name into a lookup key.
+def normalize_name(name: str) -> str:
+    """Normalize a member name (or alias) into a lookup key.
 
     Applies NFKC normalization then strips all whitespace (ASCII space/tab and the
     full-width ideographic space `　`) so that e.g. "金村 美玖" and "金村　美玖"
     (full-width space) resolve to the same key.
+
+    Public so other `pysaka.knowledge` modules (e.g. `aliases.AliasTable`) can reuse
+    the exact same normalization instead of reimplementing it.
     """
     normalized = unicodedata.normalize("NFKC", name)
     for ch in _WHITESPACE:
@@ -58,7 +61,7 @@ class MemberRegistry:
                 blog_id=blog_id,
                 aliases=[],
             )
-            registry._add(member, _normkey(name))
+            registry._add(member, normalize_name(name))
         return registry
 
     def _add(self, member: Member, normname: str) -> None:
@@ -91,7 +94,7 @@ class MemberRegistry:
         """
         if group != self._group:
             raise ValueError(f"MemberRegistry is scoped to group {self._group!r}, got {group!r}")
-        normname = _normkey(name)
+        normname = normalize_name(name)
         canonical_id = self._by_normname.get(normname)
         if canonical_id is not None:
             return canonical_id
