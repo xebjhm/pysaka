@@ -133,3 +133,38 @@ def test_resolve_raises_on_scope_group_mismatch():
     table = AliasTable.seed_from_registry(_registry())
     with pytest.raises(ValueError, match="AliasTable is scoped to group"):
         table.resolve("美玖", Scope(service="nogizaka46"))
+
+
+def test_seed_from_registry_empty_registry_yields_empty_table():
+    """Empty registry exercises the `group = members[0].group if members else ""` branch."""
+    empty_reg = MemberRegistry.from_members_json({"members": []}, "hinatazaka46")
+    table = AliasTable.seed_from_registry(empty_reg)
+    # With no members, the table is empty and table group is ""
+    assert table.entries("") == []
+    assert table.aliases_for("any_id") == []
+
+
+def test_seed_from_registry_single_token_name_skips_empty_given_name():
+    """Single-token name exercises `_given_name` returning "" and empty-skip in `_add`."""
+    members_data = {
+        "meta": {"group": "hinatazaka46"},
+        "members": [
+            {
+                "blogId": "000",
+                "nameKanji": "ポカ",
+                "nameHiragana": "ぽか",
+                "nameRomaji": "Poka",
+                "generation": 2,
+                "status": "active",
+            }
+        ],
+    }
+    reg = MemberRegistry.from_members_json(members_data, "hinatazaka46")
+    table = AliasTable.seed_from_registry(reg)
+    aliases = table.aliases_for("hinatazaka46:000")
+    # Full forms are included
+    assert "ポカ" in aliases
+    assert "ぽか" in aliases
+    assert "Poka" in aliases
+    # Empty given-name from single-token name is skipped
+    assert "" not in aliases
