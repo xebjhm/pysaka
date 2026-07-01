@@ -13,6 +13,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
 from pysaka.knowledge.aliases import AliasTable
+from pysaka.knowledge.cleaner import SUBSCRIBER_SENTINEL, normalize_text
 from pysaka.knowledge.lexical import PureLexicalIndex
 from pysaka.knowledge.llm import ToolCall
 from pysaka.knowledge.models import Chunk, Document, Scope, SourceRef
@@ -317,6 +318,18 @@ def test_get_document_returns_error_for_unknown_id():
     result = runner.run(ToolCall("get_document", {"doc_id": "does-not-exist"}), _SCOPE)
 
     assert result == {"error": "not found", "doc_id": "does-not-exist"}
+
+
+def test_get_document_unmasks_subscriber_sentinel_but_not_stored_doc_text():
+    runner, reg, aliases, store, old, new, other = _build_fixture()
+    sentinel_doc = _doc("blog:hinatazaka46:99", text=normalize_text("%%%さん、こんにちは"))
+    store.upsert([sentinel_doc])
+
+    result = runner.run(ToolCall("get_document", {"doc_id": sentinel_doc.doc_id}), _SCOPE)
+
+    assert SUBSCRIBER_SENTINEL in sentinel_doc.text  # stored/indexed text is untouched
+    assert "you" in result["text"]
+    assert SUBSCRIBER_SENTINEL not in result["text"]
 
 
 # --- aggregate ---------------------------------------------------------------

@@ -16,7 +16,7 @@ from __future__ import annotations
 from pysaka.knowledge.agent import KnowledgeAgent
 from pysaka.knowledge.aliases import AliasTable
 from pysaka.knowledge.chunking import chunk_documents
-from pysaka.knowledge.cleaner import html_to_text, normalize_text
+from pysaka.knowledge.cleaner import SUBSCRIBER_SENTINEL, html_to_text, normalize_text, strip_sentinel
 from pysaka.knowledge.ingest import ingest_blog, ingest_messages
 from pysaka.knowledge.lexical import PureLexicalIndex
 from pysaka.knowledge.llm import LLMClient, LLMResponse, ToolCall
@@ -61,6 +61,7 @@ __all__ = [
     "MemberRegistry",
     "MentionDetector",
     "PureLexicalIndex",
+    "SUBSCRIBER_SENTINEL",
     "Scope",
     "SearchFilters",
     "SourceRef",
@@ -73,5 +74,6 @@ __all__ = [
     "ingest_blog",
     "ingest_messages",
     "normalize_text",
+    "strip_sentinel",
     "validate",
 ]

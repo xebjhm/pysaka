@@ -26,7 +26,7 @@ such answer, which defeats the point of the validator. Instead this module:
 
 from __future__ import annotations
 
-from .cleaner import normalize_text
+from .cleaner import normalize_text, strip_sentinel
 from .models import Answer, AnswerSentence, Citation, Document
 from .store import DocumentStore
 
@@ -98,7 +98,9 @@ def validate(answer: Answer, surfaced_doc_ids: set[str], store: DocumentStore, t
             citations_by_doc_id[cid] = Citation(
                 doc_id=cid,
                 source_ref=doc.source_ref,
-                quoted_snippet=doc.text[:240],
+                # un-mask the `%%%` subscriber sentinel: `quoted_snippet` is user/LLM-facing
+                # output; the sentinel stays in `doc.text` (the stored/indexed copy) untouched.
+                quoted_snippet=strip_sentinel(doc.text[:240]),
                 member=doc.author_id,
                 timestamp=doc.timestamp,
             )

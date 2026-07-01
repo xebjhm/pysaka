@@ -29,6 +29,8 @@ PUBLIC_NAMES = [
     # cleaner / ingest / chunking
     "html_to_text",
     "normalize_text",
+    "strip_sentinel",
+    "SUBSCRIBER_SENTINEL",
     "ingest_blog",
     "ingest_messages",
     "chunk_documents",

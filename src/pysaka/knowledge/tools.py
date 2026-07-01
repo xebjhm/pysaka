@@ -15,7 +15,7 @@ from dataclasses import asdict
 from datetime import datetime
 
 from .aliases import AliasTable
-from .cleaner import normalize_text
+from .cleaner import normalize_text, strip_sentinel
 from .llm import ToolCall
 from .models import Document, Hit, Scope, SearchFilters
 from .registry import MemberRegistry
@@ -115,6 +115,15 @@ class ToolRunner:
         self._retriever = retriever
         self._store = store
 
+    @property
+    def store(self) -> DocumentStore:
+        """Read-only access to the `DocumentStore` this runner was constructed with.
+
+        Lets callers (e.g. `KnowledgeAgent.answer`) reach the store for grounding
+        validation without threading it through separately.
+        """
+        return self._store
+
     def run(self, call: ToolCall, scope: Scope) -> dict:
         """Dispatch `call` (by `call.name`, args in `call.arguments`) and return a JSON-serializable dict.
 
@@ -187,7 +196,9 @@ class ToolRunner:
             return {"error": "not found", "doc_id": doc_id}
         return {
             "doc_id": doc.doc_id,
-            "text": doc.text,
+            # un-mask the `%%%` subscriber sentinel: this text is quoted verbatim by the LLM/user,
+            # so it's an output boundary -- `doc.text` itself (the stored/indexed copy) is untouched.
+            "text": strip_sentinel(doc.text),
             "source_ref": asdict(doc.source_ref),
             "author": doc.author_id,
             "timestamp": doc.timestamp.isoformat(),
