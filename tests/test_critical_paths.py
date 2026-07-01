@@ -14,6 +14,7 @@ Covers edge cases and regression scenarios that protect against:
 import base64
 import json
 import os
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -29,7 +30,7 @@ from pysaka.utils import parse_jwt_expiry, sanitize_name
 # ---------------------------------------------------------------------------
 
 
-def _make_jwt(payload: dict, pad_to_mod: int | None = None) -> str:
+def _make_jwt(payload: dict, pad_to_mod: Optional[int] = None) -> str:
     """Create a test JWT with optional payload length control.
 
     Args:
