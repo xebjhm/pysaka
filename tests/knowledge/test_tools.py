@@ -364,6 +364,23 @@ def test_aggregate_unknown_group_by_returns_empty_bucket():
     assert result == {"count": 3, "by_bucket": {}}
 
 
+def test_aggregate_query_filters_to_matching_docs_only():
+    # old="ライブ楽しかった", new="ライブ最高でした" both contain "ライブ"; other="今日は元気です" doesn't.
+    runner, *_ = _build_fixture()
+
+    result = runner.run(ToolCall("aggregate", {"query": "ライブ", "group_by": "type"}), _SCOPE)
+
+    assert result == {"count": 2, "by_bucket": {"blog": 2}}
+
+
+def test_aggregate_query_matching_no_docs_returns_zero_count():
+    runner, *_ = _build_fixture()
+
+    result = runner.run(ToolCall("aggregate", {"query": "存在しない文字列"}), _SCOPE)
+
+    assert result == {"count": 0, "by_bucket": {}}
+
+
 # --- unknown tool --------------------------------------------------------
 
 
@@ -373,3 +390,30 @@ def test_run_unknown_tool_returns_error_dict():
     result = runner.run(ToolCall("not_a_tool", {}), _SCOPE)
 
     assert result == {"error": "unknown tool: not_a_tool"}
+
+
+# --- malformed args (Fix 2: must not raise out of run()) ---------------------
+
+
+def test_run_get_document_missing_doc_id_returns_error_dict():
+    runner, *_ = _build_fixture()
+
+    result = runner.run(ToolCall("get_document", {}), _SCOPE)
+
+    assert "error" in result
+
+
+def test_run_resolve_member_missing_text_returns_error_dict():
+    runner, *_ = _build_fixture()
+
+    result = runner.run(ToolCall("resolve_member", {}), _SCOPE)
+
+    assert "error" in result
+
+
+def test_run_search_malformed_date_from_returns_error_dict():
+    runner, *_ = _build_fixture()
+
+    result = runner.run(ToolCall("search", {"date_from": "not-a-date"}), _SCOPE)
+
+    assert "error" in result
