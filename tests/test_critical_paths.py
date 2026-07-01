@@ -480,6 +480,78 @@ class TestDeleteJsonErrorPropagation:
 
 
 # ---------------------------------------------------------------------------
+# 5b. fetch_json auth-error propagation (parity with delete_json)
+# ---------------------------------------------------------------------------
+
+
+class TestFetchJsonErrorPropagation:
+    """Verify fetch_json propagates auth failures instead of swallowing them
+    into ``return None`` (which callers read as 'no data')."""
+
+    @pytest.fixture
+    def client(self):
+        return Client(group=Group.HINATAZAKA46, access_token="test_token", cookies={"session": "val"})
+
+    @pytest.fixture
+    def mock_session(self):
+        session = MagicMock()
+        session.get.return_value.__aenter__.return_value = AsyncMock()
+        session.get.return_value.__aexit__.return_value = None
+        return session
+
+    async def test_session_expired_propagates_from_refresh(self, client, mock_session):
+        """A 401 whose refresh raises SessionExpiredError propagates out."""
+        mock_resp_401 = AsyncMock()
+        mock_resp_401.status = 401
+        mock_session.get.return_value.__aenter__.return_value = mock_resp_401
+
+        with patch.object(
+            client,
+            "refresh_access_token",
+            new_callable=AsyncMock,
+            side_effect=SessionExpiredError("Session invalidated"),
+        ):
+            with pytest.raises(SessionExpiredError, match="Session invalidated"):
+                await client.fetch_json(mock_session, "/groups")
+
+    async def test_refresh_failed_error_propagates(self, client, mock_session):
+        """A 401 whose refresh raises RefreshFailedError propagates out instead
+        of being swallowed into None (the app must be able to prompt re-login)."""
+        mock_resp_401 = AsyncMock()
+        mock_resp_401.status = 401
+        mock_session.get.return_value.__aenter__.return_value = mock_resp_401
+
+        with patch.object(
+            client,
+            "refresh_access_token",
+            new_callable=AsyncMock,
+            side_effect=RefreshFailedError("All plans failed"),
+        ):
+            with pytest.raises(RefreshFailedError, match="All plans failed"):
+                await client.fetch_json(mock_session, "/groups")
+
+
+# ---------------------------------------------------------------------------
+# 5c. sanitize_name path-traversal hardening
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeNameTraversal:
+    """A control byte must not be able to smuggle a '..' component past the
+    traversal guard (control chars are stripped before '..' is collapsed)."""
+
+    @pytest.mark.parametrize("raw", [".\x1f.", ".\x00.", "a\x01.\x02.\x03b", "..", "....", "a/../b"])
+    def test_no_traversal_component_survives(self, raw):
+        result = sanitize_name(raw)
+        assert ".." not in result
+        assert "/" not in result
+        assert "\\" not in result
+
+    def test_preserves_spaces_and_normal_text(self):
+        assert sanitize_name("34 金村 美玖") == "34 金村 美玖"
+
+
+# ---------------------------------------------------------------------------
 # 6. SyncManager atomic writes
 # ---------------------------------------------------------------------------
 

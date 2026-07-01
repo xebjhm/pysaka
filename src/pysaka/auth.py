@@ -61,7 +61,8 @@ class BrowserAuth:
             channel: Browser channel (e.g. 'chrome', 'msedge').
 
         Returns:
-            Dictionary containing access token and cookies, or None if failed.
+            Dictionary containing the access token, refresh_token, and cookies,
+            or None if login failed.
 
         Raises:
             ValueError: If invalid group provided.

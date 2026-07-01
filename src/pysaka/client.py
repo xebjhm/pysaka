@@ -225,6 +225,9 @@ class Client:
 
         Raises:
             ApiError: If the API returns a server error (5xx) or other unhandled status.
+            SessionExpiredError: If the session is invalidated during the request.
+            RefreshFailedError: If a 401 triggers a token refresh and all refresh
+                plans fail (surfaced so callers can prompt re-login).
         """
         url = f"{self.api_base}{endpoint}"
         logger.debug("API GET request", endpoint=endpoint, params=params)
@@ -255,8 +258,12 @@ class Client:
                     return None
         except ApiError:
             raise
-        except SessionExpiredError as e:
-            logger.debug(f"Session expired during request to {endpoint}: {e}")
+        except (SessionExpiredError, RefreshFailedError) as e:
+            # Propagate auth failures so callers can prompt re-login. Without
+            # RefreshFailedError here it would fall into the broad handler below
+            # and be swallowed into None — the app would render empty results
+            # instead of surfacing that the session died (parity with delete_json).
+            logger.debug(f"Auth error during request to {endpoint}: {e}")
             raise
         except aiohttp.ClientError as e:
             logger.error(f"Network error fetching {url}: {e}")
@@ -329,7 +336,7 @@ class Client:
                 session_cookie_present="session" in self.cookies,
             )
             try:
-                # For web sessions, pass cookies with refresh_token:null (as browser does per HAR)
+                # For web sessions, pass cookies with refresh_token:null
                 async with session.post(
                     url, headers=refresh_headers, json={"refresh_token": None}, cookies=self.cookies
                 ) as resp:
@@ -607,8 +614,10 @@ class Client:
             params: dict[str, Any] = {
                 "count": 200,
                 "order": "desc",
-                # Never advance the server-side read pointer during a sync — that
-                # would zero the user's unread badge on the official mobile app.
+                # Defaults to false so a background sync does NOT advance the
+                # server-side read pointer (which would zero the user's unread
+                # badge on the official mobile app); only the caller opting in
+                # (e.g. mark_group_read) advances it.
                 "clear_unread": "true" if clear_unread else "false",
             }
             if current_continuation:
@@ -835,7 +844,7 @@ class Client:
         return []
 
     # -------------------------------------------------------------------------
-    # New API methods discovered via HAR analysis (Official App Feature Parity)
+    # Additional API methods (official-app feature parity)
     # -------------------------------------------------------------------------
 
     async def post_json(

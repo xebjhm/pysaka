@@ -15,16 +15,24 @@ def sanitize_name(name: str) -> str:
         name: The raw input string.
 
     Returns:
-        Safe string with '/' replaced by '_', but preserving spaces for readability.
+        A filesystem-safe string: control characters (0x00-0x1f) are removed,
+        path separators ('/', '\\') and traversal components ('..') are replaced
+        with '_', and Windows-forbidden characters (<>:"|?*) are replaced with
+        '_'. Spaces are preserved for readability.
     """
-    # Replace path separators and traversal components
-    name = name.replace("/", "_").replace("\\", "_").replace("..", "_")
+    # Strip control characters FIRST (0x00-0x1f) so a control byte can't hide a
+    # traversal sequence across the collapse below (e.g. ".\x1f." -> ".." would
+    # otherwise survive as a real ".." after the byte is removed later).
+    name = "".join(c for c in name if ord(c) > 0x1F)
+    # Replace path separators, then collapse ".." until stable — a single-pass
+    # str.replace misses overlapping runs (e.g. "....." leaves a "..").
+    name = name.replace("/", "_").replace("\\", "_")
+    while ".." in name:
+        name = name.replace("..", "_")
     # Strip characters forbidden on Windows: < > : " | ? *
     forbidden = '<>:"|?*'
     for ch in forbidden:
         name = name.replace(ch, "_")
-    # Strip control characters (0x00-0x1f)
-    name = "".join(c for c in name if ord(c) > 0x1F)
     return name.strip()
 
 
