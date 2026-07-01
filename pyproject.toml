@@ -35,6 +35,7 @@ dependencies = [
     "tzdata>=2025.3",
     "Pillow>=10.0.0",
     "pymediainfo>=6.0.0",
+    "pyahocorasick>=2.2.0",
 ]
 
 [project.optional-dependencies]
