@@ -17,16 +17,18 @@ def _to_utc(ts: str) -> datetime:
 def ingest_blog(blog_json: dict, service: str, resolve: Callable[[str, str], str]) -> Document:
     meta, html = blog_json["meta"], blog_json.get("content", {}).get("html", "")
     text = html_to_text(html)
+    author = resolve(meta["member_name"], service)
+    _num = author.rsplit(":", 1)[-1]
     ref = SourceRef(
         service=service,
         kind="blog",
         blog_id=str(meta["id"]),
-        member_id=int(meta["id"]) if str(meta.get("member_id", "")).isdigit() else None,
+        member_id=int(_num) if _num.isdigit() else None,
     )
     return Document(
         doc_id=f"blog:{service}:{meta['id']}",
         source_ref=ref,
-        author_id=resolve(meta["member_name"], service),
+        author_id=author,
         group=service,
         timestamp=_to_utc(meta["published_at"]),
         type="blog",

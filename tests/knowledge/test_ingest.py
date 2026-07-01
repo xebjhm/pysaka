@@ -22,6 +22,8 @@ def test_ingest_blog_builds_document():
     assert doc.doc_id == "blog:hinatazaka46:68177"
     assert doc.text == "焼肉たべた" and doc.has_text
     assert doc.source_ref.kind == "blog" and doc.source_ref.blog_id == "68177"
+    # member_id must be the resolved AUTHOR's blog-system id (12), not the post id (68177)
+    assert doc.source_ref.member_id == 12
     assert doc.timestamp.tzinfo is not None  # tz-aware UTC
 
 
