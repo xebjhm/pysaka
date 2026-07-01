@@ -15,8 +15,13 @@ def _to_utc(ts: str) -> datetime:
 
 
 def ingest_blog(blog_json: dict, service: str, resolve: Callable[[str, str], str]) -> Document:
-    meta, html = blog_json["meta"], blog_json.get("content", {}).get("html", "")
-    text = html_to_text(html)
+    meta = blog_json["meta"]
+    content = blog_json.get("content", {}) or {}
+    html = content.get("html") or content.get("html_raw")
+    if html:
+        text = html_to_text(html)
+    else:
+        text = normalize_text(content.get("plain_text") or "")
     author = resolve(meta["member_name"], service)
     _num = author.rsplit(":", 1)[-1]
     ref = SourceRef(
