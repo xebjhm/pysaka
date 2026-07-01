@@ -217,7 +217,7 @@ class SyncManager:
                 return 0
 
             # Process & Prepare
-            processed = self.prepare_messages(messages, member_dir, media_queue)
+            processed, earliest_failed_ts = self.prepare_messages(messages, member_dir, media_queue)
 
             # Load existing
             existing_file = member_dir / "messages.json"
@@ -304,6 +304,14 @@ class SyncManager:
             # safe to offload.)
             max_id = max(x["id"] for x in merged) if merged else 0
             newest_ts = max((x.get("timestamp") or "" for x in merged), default=None)
+            # If any message failed to normalize, do NOT advance the cursor to or
+            # past it. The next sync fetches published_at >= cursor (inclusive), so
+            # an un-clamped cursor would filter the failed message out forever —
+            # silent data loss. Clamping to the earliest failure re-fetches it (and
+            # its successful siblings, idempotently) next run. A failed message with
+            # no timestamp clamps to "" (full re-fetch) — safe over lossy.
+            if earliest_failed_ts is not None and newest_ts is not None:
+                newest_ts = min(newest_ts, earliest_failed_ts)
             self.update_sync_state(gid, mid, max_id, len(merged), last_ts=newest_ts)
 
             return len(processed)
@@ -314,7 +322,7 @@ class SyncManager:
 
     def prepare_messages(
         self, messages: list[dict[str, Any]], member_dir: Path, queue: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], Optional[str]]:
         """
         Normalize messages and queue media downloads.
 
@@ -324,9 +332,16 @@ class SyncManager:
             queue: Media download waiting queue.
 
         Returns:
-            List of processed message dicts.
+            A tuple ``(processed, earliest_failed_ts)``. ``processed`` is the list
+            of normalized message dicts. ``earliest_failed_ts`` is the
+            ``published_at`` of the oldest message that failed to normalize (``""``
+            if such a message had no timestamp), or ``None`` if every message
+            processed. The caller must not advance the sync cursor to or past
+            ``earliest_failed_ts`` — doing so would drop the failed message
+            permanently on the next timestamp-filtered sync.
         """
         processed = []
+        earliest_failed_ts: Optional[str] = None
         for msg in messages:
             try:
                 # Normalize core fields
@@ -380,8 +395,13 @@ class SyncManager:
                 processed.append(p_msg)
             except Exception as e:
                 mid = msg.get("id")
+                # Track the oldest failure's timestamp so the caller can hold the
+                # cursor behind it and re-fetch next run instead of losing it.
+                failed_ts = msg.get("published_at") or ""
+                if earliest_failed_ts is None or failed_ts < earliest_failed_ts:
+                    earliest_failed_ts = failed_ts
                 logger.error("Prepare error", message_id=mid, error=str(e))
-        return processed
+        return processed, earliest_failed_ts
 
     async def process_media_queue(
         self,

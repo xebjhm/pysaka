@@ -120,6 +120,33 @@ async def test_sync_member_write_failure_does_not_advance_cursor(sync_manager, m
 
 
 @pytest.mark.asyncio
+async def test_sync_member_prepare_failure_holds_cursor(sync_manager):
+    """A message that fails to normalize must NOT let the cursor advance past it.
+    The next sync fetches published_at >= cursor, so an un-clamped cursor would
+    filter the failed message out permanently (silent data loss)."""
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp"}
+    member = {"id": 10, "name": "Mem", "portrait": "url"}
+    media_queue: list = []
+
+    prefetched = [
+        # Valid, newer message — normalizes fine.
+        {"id": 101, "type": "text", "text": "Hi", "member_id": 10, "published_at": "2023-01-01T10:00:00Z"},
+        # Malformed: no "id" -> normalize_message raises KeyError. Older timestamp.
+        {"type": "text", "text": "Broken", "member_id": 10, "published_at": "2023-01-01T09:00:00Z"},
+    ]
+
+    count = await sync_manager.sync_member(session, group, member, media_queue, prefetched_messages=prefetched)
+
+    # Only the valid message is persisted...
+    assert count == 1
+    # ...but the cursor is held at the FAILED message's timestamp, not the newer
+    # valid one, so the failed message is re-fetched (>= cursor) on the next sync
+    # instead of being skipped forever.
+    assert sync_manager.get_last_ts(1, 10) == "2023-01-01T09:00:00Z"
+
+
+@pytest.mark.asyncio
 async def test_process_media_queue(sync_manager):
     session = AsyncMock()
     queue = [{"url": "u1", "path": Path("p1"), "timestamp": "t1"}, {"url": "u2", "path": Path("p2"), "timestamp": "t2"}]
