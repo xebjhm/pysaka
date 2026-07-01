@@ -89,6 +89,8 @@ class MemberRegistry:
         normalized name and returns its canonical id. Re-resolving the same
         unknown name is idempotent (returns the same id, no re-provisioning).
         """
+        if group != self._group:
+            raise ValueError(f"MemberRegistry is scoped to group {self._group!r}, got {group!r}")
         normname = _normkey(name)
         canonical_id = self._by_normname.get(normname)
         if canonical_id is not None:

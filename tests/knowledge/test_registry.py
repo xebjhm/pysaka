@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from pysaka.knowledge.registry import MemberRegistry
 
 MEMBERS = {
@@ -46,3 +48,9 @@ def test_link_message_ids_sets_ids_and_reuses_resolution():
     assert member.message_group_id == 34
     assert member.message_member_id == 58
     assert member not in reg.unaliased()  # roster member, not auto-provisioned
+
+
+def test_resolve_author_fails_on_cross_group():
+    reg = MemberRegistry.from_members_json(MEMBERS, "hinatazaka46")
+    with pytest.raises(ValueError, match="MemberRegistry is scoped to group"):
+        reg.resolve_author("金村 美玖", "other_group")
