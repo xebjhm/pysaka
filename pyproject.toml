@@ -129,3 +129,8 @@ module = [
     "pysaka.auth",
 ]
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
