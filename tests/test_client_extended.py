@@ -59,7 +59,7 @@ class TestClientTokenStorage:
         mock_tm.load_session.return_value = {
             "access_token": "stored_token",
             "refresh_token": "stored_refresh",
-            "cookies": {"s": "v"}
+            "cookies": {"s": "v"},
         }
 
         with patch("pysaka.client.get_token_manager", return_value=mock_tm):
@@ -76,11 +76,7 @@ class TestClientTokenStorage:
         mock_tm.load_session.return_value = {"access_token": "stored"}
 
         with patch("pysaka.client.get_token_manager", return_value=mock_tm):
-            client = Client(
-                group=Group.NOGIZAKA46,
-                access_token="explicit_token",
-                use_token_storage=True
-            )
+            client = Client(group=Group.NOGIZAKA46, access_token="explicit_token", use_token_storage=True)
 
             # Explicit token should not be overwritten
             assert client.access_token == "explicit_token"
@@ -138,11 +134,7 @@ class TestClientSaveSession:
         mock_tm.load_session.return_value = None
 
         with patch("pysaka.client.get_token_manager", return_value=mock_tm):
-            client = Client(
-                group=Group.NOGIZAKA46,
-                access_token="token",
-                use_token_storage=True
-            )
+            client = Client(group=Group.NOGIZAKA46, access_token="token", use_token_storage=True)
             client.save_session()
 
             mock_tm.save_session.assert_called_once()
@@ -275,10 +267,7 @@ class TestClientRefreshToken:
 
         # Import path for BrowserAuth is pysaka.auth, not pysaka.client
         with patch("pysaka.auth.BrowserAuth.refresh_token_headless") as mock_refresh:
-            mock_refresh.return_value = {
-                "access_token": "headless_token",
-                "cookies": {"s": "v"}
-            }
+            mock_refresh.return_value = {"access_token": "headless_token", "cookies": {"s": "v"}}
 
             result = await client.refresh_access_token(mock_session)
 
@@ -357,14 +346,16 @@ class TestClientGetMessages:
         """Test that since_id filtering works."""
         mock_resp = mock_session.get.return_value.__aenter__.return_value
         mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={
-            "messages": [
-                {"id": 100},
-                {"id": 50},  # Below since_id
-                {"id": 30},  # Below since_id
-            ],
-            "continuation": None
-        })
+        mock_resp.json = AsyncMock(
+            return_value={
+                "messages": [
+                    {"id": 100},
+                    {"id": 50},  # Below since_id
+                    {"id": 30},  # Below since_id
+                ],
+                "continuation": None,
+            }
+        )
 
         messages = await client.get_messages(mock_session, group_id=1, since_id=60)
 
@@ -377,10 +368,9 @@ class TestClientGetMessages:
         """Test that progress callback is called."""
         mock_resp = mock_session.get.return_value.__aenter__.return_value
         mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={
-            "messages": [{"id": 1, "published_at": "2024-01-01"}],
-            "continuation": None
-        })
+        mock_resp.json = AsyncMock(
+            return_value={"messages": [{"id": 1, "published_at": "2024-01-01"}], "continuation": None}
+        )
 
         callback_calls = []
 
@@ -396,10 +386,9 @@ class TestClientGetMessages:
         """Test that async progress callback is awaited."""
         mock_resp = mock_session.get.return_value.__aenter__.return_value
         mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={
-            "messages": [{"id": 1, "published_at": "2024-01-01"}],
-            "continuation": None
-        })
+        mock_resp.json = AsyncMock(
+            return_value={"messages": [{"id": 1, "published_at": "2024-01-01"}], "continuation": None}
+        )
 
         callback_calls = []
 

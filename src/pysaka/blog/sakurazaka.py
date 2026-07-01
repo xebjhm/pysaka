@@ -249,9 +249,7 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                     thumbnail_span = box.select_one("span.img")
                     if thumbnail_span:
                         style = thumbnail_span.get("style", "")
-                        bg_match = re.search(
-                            r'background-image:\s*url\(["\']?([^"\')\s]+)["\']?\)', style
-                        )
+                        bg_match = re.search(r'background-image:\s*url\(["\']?([^"\')\s]+)["\']?\)', style)
                         if bg_match:
                             images.append(self.normalize_url(bg_match.group(1)))
 

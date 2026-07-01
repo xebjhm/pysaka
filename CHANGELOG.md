@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-01
+
+### Added
+- Mobile auth mode: `platform` parameter with an Android header/host profile,
+  verified per-group `mobile_api_base`, and `refresh_token` capture from the
+  signin response so mobile mode can refresh via `/update_token`.
+- Absolute Android purity — in android mode, web session cookies are never used
+  for token refresh (refresh_token grant only); web behavior unchanged.
+- `mark_group_read()` — opt-in clear of a room's unread count on the server
+  (the official app's room-open signal).
+
+### Changed
+- Announcements query sends `platform=android` in android mode to match the app.
+- Large `messages.json` / metadata writes are offloaded via `asyncio.to_thread`
+  so the blocking write + retry no longer stalls the event loop.
+
+### Fixed
+- **Data loss:** a failed `messages.json` write no longer advances the sync
+  cursor — previously a swallowed write error moved the cursor past messages
+  that never hit disk, permanently skipping them on the next sync.
+- **Data loss:** a message that fails to normalize no longer lets the cursor
+  advance past it; it is re-fetched on the next sync instead of being dropped.
+- `fetch_json` now propagates `RefreshFailedError` instead of swallowing it into
+  `None`, so a dead session surfaces as a re-login prompt rather than empty data.
+- Background sync no longer clears the official app's unread badge; read state is
+  now controlled explicitly via the timeline `clear_unread` flag.
+- Browser login closes exactly once, so a teardown error can no longer discard a
+  fully successful login (previously `login()` could return `None` on success).
+- Infinite retry loop in `get_messages()` when the first page returns `None`.
+- `SessionExpiredError` / `RefreshFailedError` propagate from `delete_json`
+  instead of being swallowed into `return False`.
+
+### Security
+- `sanitize_name()` strips path-traversal sequences (`..`, `/`, `\`), including
+  `..` hidden across a control byte; control characters are removed first.
+- JWT decoding uses urlsafe base64 with correct padding.
+
 ## [0.3.0] - 2026-03-21
 
 ### Changed

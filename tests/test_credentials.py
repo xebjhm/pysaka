@@ -1,4 +1,3 @@
-
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -14,11 +13,13 @@ def mock_keyring():
     with patch.dict(sys.modules, {"keyring": mock}):
         yield mock
 
+
 def test_token_manager_init_keyring():
     with patch("pysaka.credentials.KeyringStore") as mock_store_cls:
         tm = TokenManager()
         mock_store_cls.assert_called_once()
         assert tm.store == mock_store_cls.return_value
+
 
 def test_token_manager_init_fail():
     # Force KeyringStore to raise Exception (mimicking ImportError or other init fail)
@@ -27,20 +28,23 @@ def test_token_manager_init_fail():
             TokenManager()
         assert "Secure storage (keyring) is required" in str(e.value)
 
+
 def test_keyring_save_load(mock_keyring):
     # Enable KeyringStore to succeed init
     with patch.dict(sys.modules, {"keyring": mock_keyring}):
         # Mock Windows backend if needed
         with patch.dict(sys.modules, {"keyring.backends.Windows": MagicMock()}):
-             tm = TokenManager()
+            tm = TokenManager()
 
     # Inject our mock into the instance
     tm.store._keyring = mock_keyring
 
     # Setup mock behaviors
     stored_data = {}
+
     def set_password(service, username, password):
         stored_data[username] = password
+
     def get_password(service, username):
         return stored_data.get(username)
 

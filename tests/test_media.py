@@ -87,6 +87,7 @@ class TestGetVideoDimensions:
             import importlib
 
             import pysaka.media
+
             importlib.reload(pysaka.media)
 
             width, height = pysaka.media.get_video_dimensions(Path("/fake/video.mp4"))
@@ -109,6 +110,7 @@ class TestGetVideoDimensions:
             import importlib
 
             import pysaka.media
+
             importlib.reload(pysaka.media)
 
             width, height = pysaka.media.get_video_dimensions(Path("/fake/audio.mp3"))
@@ -125,6 +127,7 @@ class TestGetVideoDimensions:
             import importlib
 
             import pysaka.media
+
             importlib.reload(pysaka.media)
 
             width, height = pysaka.media.get_video_dimensions(Path("/fake/bad.mp4"))
@@ -175,6 +178,7 @@ class TestGetMediaDimensions:
             import importlib
 
             import pysaka.media
+
             importlib.reload(pysaka.media)
 
             width, height = pysaka.media.get_media_dimensions(Path("/fake/clip.mp4"), "video")

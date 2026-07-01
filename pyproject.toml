@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pysaka"
-version = "0.3.0"
+version = "0.4.0"
 description = "Async Python client for Sakamichi Group Message API (Nogizaka46, Sakurazaka46, Hinatazaka46)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -63,6 +63,7 @@ dev = [
     "pytest-benchmark>=5.2.3",
     "syrupy>=4.9.1",
     "time-machine>=2.19.0",
+    "pre-commit>=4.3.0",
 ]
 
 [tool.ruff]
