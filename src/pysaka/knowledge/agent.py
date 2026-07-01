@@ -117,17 +117,26 @@ def _parse_answer(text: str | None) -> Answer:
     if not isinstance(data, dict):
         return _fallback_answer(text)
 
-    if data.get("no_evidence") or not data.get("sentences"):
+    # If no_evidence key is explicitly truthy, return no evidence
+    if data.get("no_evidence"):
         return Answer(sentences=[], citations=[], no_evidence=True)
 
-    try:
-        sentences = [
-            AnswerSentence(text=s["text"], citation_ids=list(s.get("citation_ids", []))) for s in data["sentences"]
-        ]
-    except (KeyError, TypeError):
-        return _fallback_answer(text)
+    # If sentences key is present, check its value
+    if "sentences" in data:
+        if not data["sentences"]:
+            # Empty sentences list means no evidence
+            return Answer(sentences=[], citations=[], no_evidence=True)
+        # Non-empty sentences list: parse and return
+        try:
+            sentences = [
+                AnswerSentence(text=s["text"], citation_ids=list(s.get("citation_ids", []))) for s in data["sentences"]
+            ]
+        except (KeyError, TypeError):
+            return _fallback_answer(text)
+        return Answer(sentences=sentences, citations=[], no_evidence=False)
 
-    return Answer(sentences=sentences, citations=[], no_evidence=False)
+    # Dict present but missing both no_evidence and sentences: fallback to uncited sentence
+    return _fallback_answer(text)
 
 
 def _extract_json(text: str | None) -> object | None:

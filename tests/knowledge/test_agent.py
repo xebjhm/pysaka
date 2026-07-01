@@ -192,6 +192,20 @@ async def test_ask_returns_no_evidence_when_sentences_list_is_empty():
     assert answer.sentences == []
 
 
+async def test_ask_falls_back_to_uncited_sentence_when_dict_missing_both_keys():
+    tools, _doc = _build_tools()
+    script = [LLMResponse(text=json.dumps({"answer": "some text"}))]
+    fake = FakeLLMClient(script)
+    agent = KnowledgeAgent(fake, tools)
+
+    answer, _surfaced = await agent.ask("unexpected shape", _SCOPE)
+
+    assert answer.no_evidence is False
+    assert len(answer.sentences) == 1
+    assert answer.sentences[0].text == json.dumps({"answer": "some text"})
+    assert answer.sentences[0].citation_ids == []
+
+
 async def test_ask_falls_back_to_uncited_sentence_on_unparseable_json():
     tools, _doc = _build_tools()
     script = [LLMResponse(text="this is not json")]
