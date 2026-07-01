@@ -91,6 +91,22 @@ class KnowledgeAgent:
 
         return Answer(sentences=[], citations=[], no_evidence=True), surfaced
 
+    async def answer(self, question: str, scope: Scope, history: list[dict] | None = None) -> Answer:
+        """Ask `question` and return a grounding-VALIDATED `Answer` -- the recommended entry point.
+
+        Runs `ask()` and then feeds its `(answer, surfaced_doc_ids)` straight into
+        Task 15's `validate()` against the store `self._tools` was built with, so
+        every citation returned here is guaranteed to resolve to a doc_id this
+        turn actually surfaced. `ask()` remains available as the advanced,
+        unvalidated entry point (e.g. for callers who want to validate against a
+        different store or inspect `surfaced_doc_ids` themselves); prefer
+        `answer()` unless you have a specific reason not to.
+        """
+        from .validator import validate
+
+        raw, surfaced = await self.ask(question, scope, history)
+        return validate(raw, surfaced, self._tools.store)
+
 
 def _surfaced_doc_ids(result: dict) -> set[str]:
     """Extract every `doc_id` a tool result surfaced (`search` hits, or a found `get_document`)."""

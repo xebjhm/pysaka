@@ -349,3 +349,50 @@ async def test_ask_appends_assistant_tool_calls_and_tool_result_messages():
     assert tool_turn["id"] == "call_1"
     parsed = json.loads(tool_turn["content"])
     assert parsed["hits"][0]["doc_id"] == doc.doc_id
+
+
+# --- answer(): grounded facade (ask() + validate() atomically) -----------------
+
+
+async def test_answer_drops_a_citation_to_a_doc_id_ask_never_surfaced():
+    """`ask()` blindly returns whatever the model cites; `answer()` must not.
+
+    The model cites a doc_id no tool call ever surfaced this turn (fabricated /
+    stale). `ask()` -- which never validates -- returns it as-is. `answer()`
+    must run the same script through `validate()` and drop it, proving it is
+    the grounded, by-construction entry point that `ask()` is not.
+    """
+    tools, _doc = _build_tools()
+    fabricated_script = [
+        LLMResponse(text=json.dumps({"sentences": [{"text": "fabricated claim", "citation_ids": ["blog:fake:999"]}]}))
+    ]
+
+    ask_agent = KnowledgeAgent(FakeLLMClient(fabricated_script), tools)
+    raw_answer, surfaced = await ask_agent.ask("question with a fabricated citation", _SCOPE)
+    assert raw_answer.no_evidence is False
+    assert raw_answer.sentences[0].citation_ids == ["blog:fake:999"]  # unvalidated: leaks the bad citation
+    assert "blog:fake:999" not in surfaced
+
+    answer_agent = KnowledgeAgent(FakeLLMClient(fabricated_script), tools)
+    validated = await answer_agent.answer("question with a fabricated citation", _SCOPE)
+
+    assert validated.no_evidence is True
+    assert validated.sentences == []
+    assert validated.citations == []
+
+
+async def test_answer_keeps_a_citation_to_a_doc_id_ask_did_surface():
+    tools, doc = _build_tools()
+    script = [
+        LLMResponse(tool_calls=[ToolCall("get_document", {"doc_id": doc.doc_id}, id="call_1")]),
+        LLMResponse(text=json.dumps({"sentences": [{"text": "genuine claim", "citation_ids": [doc.doc_id]}]})),
+    ]
+    agent = KnowledgeAgent(FakeLLMClient(script), tools)
+
+    validated = await agent.answer("question with a real citation", _SCOPE)
+
+    assert validated.no_evidence is False
+    assert len(validated.sentences) == 1
+    assert validated.sentences[0].citation_ids == [doc.doc_id]
+    assert len(validated.citations) == 1
+    assert validated.citations[0].doc_id == doc.doc_id

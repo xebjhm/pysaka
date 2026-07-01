@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timedelta, timezone
 
+from pysaka.knowledge.cleaner import SUBSCRIBER_SENTINEL, normalize_text
 from pysaka.knowledge.lexical import PureLexicalIndex
 from pysaka.knowledge.models import Chunk, Document, Scope, SearchFilters, SourceRef
 from pysaka.knowledge.retrieve import HybridRetriever
@@ -234,3 +235,22 @@ def test_captionless_doc_is_recent_retrievable_but_not_query_matched():
 
     relevant_hits = retriever.search(_filters(sort="relevant", query="ライブ", limit=10))
     assert [hit.doc_id for hit in relevant_hits] == [with_text.doc_id]
+
+
+# --- snippet un-masks the `%%%` subscriber sentinel (stored text stays masked) ---
+
+
+def test_hit_snippet_unmasks_subscriber_sentinel_that_stays_masked_in_stored_text():
+    store = DocumentStore()
+    doc = _doc("blog:hinatazaka46:1", text=normalize_text("%%%さん、こんにちは"))
+    store.upsert([doc])
+    # sort="recent" bypasses ranking/indexing entirely, so `_build_hit` falls back to
+    # `doc.text` as the snippet source -- exercising the un-masking at that boundary.
+    retriever = HybridRetriever(store, PureLexicalIndex(), FakeVectorStore(), FakeEmbedder({}))
+
+    hits = retriever.search(_filters(sort="recent", query=None, limit=10))
+
+    assert SUBSCRIBER_SENTINEL in doc.text  # stored/indexed text is untouched
+    assert len(hits) == 1
+    assert "you" in hits[0].snippet
+    assert SUBSCRIBER_SENTINEL not in hits[0].snippet

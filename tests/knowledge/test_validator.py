@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from pysaka.knowledge.cleaner import SUBSCRIBER_SENTINEL, normalize_text
 from pysaka.knowledge.models import Answer, AnswerSentence, Document, SourceRef
 from pysaka.knowledge.store import DocumentStore
 from pysaka.knowledge.validator import _containment_ratio, _has_cjk, _trigrams, validate
@@ -262,3 +263,22 @@ def test_validate_dedupes_citations_by_doc_id_and_sorts_them():
     assert len(result.sentences) == 2
     assert [c.doc_id for c in result.citations] == sorted([_JP_DOC.doc_id, _JP_DOC_2.doc_id])
     assert len(result.citations) == 2
+
+
+# --- validate: quoted_snippet un-masks the `%%%` subscriber sentinel --------
+
+
+def test_validate_unmasks_subscriber_sentinel_in_quoted_snippet_but_not_stored_doc_text():
+    sentinel_doc = _doc("blog:hinatazaka46:5", normalize_text("%%%さん、こんにちは"))
+    store = _store(sentinel_doc)
+    # English (no-CJK) sentence -- skips the trigram gate, isolating the un-masking behavior.
+    answer = Answer(
+        sentences=[AnswerSentence(text="A greeting was posted.", citation_ids=[sentinel_doc.doc_id])], citations=[]
+    )
+
+    result = validate(answer, surfaced_doc_ids={sentinel_doc.doc_id}, store=store)
+
+    assert SUBSCRIBER_SENTINEL in sentinel_doc.text  # stored/indexed text is untouched
+    assert len(result.citations) == 1
+    assert "you" in result.citations[0].quoted_snippet
+    assert SUBSCRIBER_SENTINEL not in result.citations[0].quoted_snippet
