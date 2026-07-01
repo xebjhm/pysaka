@@ -7,6 +7,7 @@ from pysaka import BrowserAuth, Client, Group
 
 pysaka.configure_logging()
 
+
 async def main():
     # 1. Login (or provide tokens manually)
     creds = await BrowserAuth.login(Group.HINATAZAKA46, headless=True)
@@ -18,10 +19,10 @@ async def main():
     async with aiohttp.ClientSession() as session:
         client = Client(
             group=Group.HINATAZAKA46,
-            access_token=creds['access_token'],
-            cookies=creds['cookies'],
-            app_id=creds['app_id'],
-            user_agent=creds['user_agent']
+            access_token=creds["access_token"],
+            cookies=creds["cookies"],
+            app_id=creds["app_id"],
+            user_agent=creds["user_agent"],
         )
 
         # 3. Fetch Profile
@@ -31,6 +32,7 @@ async def main():
         # 4. Fetch News
         news = await client.get_news(session, count=5)
         print(f"Latest News: {[n['title'] for n in news]}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

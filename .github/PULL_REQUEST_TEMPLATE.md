@@ -68,5 +68,3 @@ Closes #
 ## Additional Notes
 
 <!-- Any additional context for reviewers -->
-
-

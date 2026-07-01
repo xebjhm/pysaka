@@ -100,9 +100,7 @@ class TestHinatazakaBlogScraper:
         </body>
         </html>
         """
-        entry = scraper._parse_blog_detail(
-            html, "67452", "https://www.hinatazaka46.com/s/official/diary/detail/67452"
-        )
+        entry = scraper._parse_blog_detail(html, "67452", "https://www.hinatazaka46.com/s/official/diary/detail/67452")
 
         assert entry.id == "67452"
         assert entry.title == "Test Blog Title"
@@ -146,7 +144,7 @@ class TestNogizakaBlogScraper:
         blog_data = {
             "code": "104268",
             "title": "Test Title",
-            "text": "<p>Content with <img src=\"/files/test.jpg\"/></p>",
+            "text": '<p>Content with <img src="/files/test.jpg"/></p>',
             "date": "2026/01/08 20:17:04",
             "link": "https://www.nogizaka46.com/s/n46/diary/detail/104268",
             "name": "Test Member",
@@ -189,9 +187,7 @@ class TestSakurazakaBlogScraper:
         </body>
         </html>
         """
-        entry = scraper._parse_blog_detail(
-            html, "67495", "https://sakurazaka46.com/s/s46/diary/detail/67495"
-        )
+        entry = scraper._parse_blog_detail(html, "67495", "https://sakurazaka46.com/s/s46/diary/detail/67495")
 
         assert entry.id == "67495"
         assert entry.title == "Test OG Title"

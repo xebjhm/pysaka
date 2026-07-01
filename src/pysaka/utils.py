@@ -4,11 +4,8 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-MEDIA_EXTENSIONS: dict[str, str] = {
-    'image': 'jpg', 'picture': 'jpg',
-    'voice': 'm4a',
-    'movie': 'mp4', 'video': 'mp4'
-}
+MEDIA_EXTENSIONS: dict[str, str] = {"image": "jpg", "picture": "jpg", "voice": "m4a", "movie": "mp4", "video": "mp4"}
+
 
 def sanitize_name(name: str) -> str:
     """
@@ -18,9 +15,26 @@ def sanitize_name(name: str) -> str:
         name: The raw input string.
 
     Returns:
-        Safe string with '/' replaced by '_', but preserving spaces for readability.
+        A filesystem-safe string: control characters (0x00-0x1f) are removed,
+        path separators ('/', '\\') and traversal components ('..') are replaced
+        with '_', and Windows-forbidden characters (<>:"|?*) are replaced with
+        '_'. Spaces are preserved for readability.
     """
-    return name.replace('/', '_').strip()
+    # Strip control characters FIRST (0x00-0x1f) so a control byte can't hide a
+    # traversal sequence across the collapse below (e.g. ".\x1f." -> ".." would
+    # otherwise survive as a real ".." after the byte is removed later).
+    name = "".join(c for c in name if ord(c) > 0x1F)
+    # Replace path separators, then collapse ".." until stable — a single-pass
+    # str.replace misses overlapping runs (e.g. "....." leaves a "..").
+    name = name.replace("/", "_").replace("\\", "_")
+    while ".." in name:
+        name = name.replace("..", "_")
+    # Strip characters forbidden on Windows: < > : " | ? *
+    forbidden = '<>:"|?*'
+    for ch in forbidden:
+        name = name.replace(ch, "_")
+    return name.strip()
+
 
 def get_media_extension(url: Optional[str], msg_type: str) -> str:
     """
@@ -36,11 +50,12 @@ def get_media_extension(url: Optional[str], msg_type: str) -> str:
     if url:
         parsed = urlparse(url)
         path = parsed.path
-        if '.' in path:
-            ext = path.split('.')[-1].lower()
-            if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp', 'm4a', 'mp3', 'wav', 'mp4', 'mov', 'webm']:
+        if "." in path:
+            ext = path.split(".")[-1].lower()
+            if ext in ["jpg", "jpeg", "png", "gif", "webp", "m4a", "mp3", "wav", "mp4", "mov", "webm"]:
                 return ext
-    return MEDIA_EXTENSIONS.get(msg_type, 'bin')
+    return MEDIA_EXTENSIONS.get(msg_type, "bin")
+
 
 def parse_jwt_expiry(token: str) -> Optional[int]:
     """
@@ -66,19 +81,18 @@ def parse_jwt_expiry(token: str) -> Optional[int]:
         return None
 
     try:
-        parts = token.split('.')
+        parts = token.split(".")
         if len(parts) < 2:
             return None
 
-        # JWT payload is base64url encoded
+        # JWT payload is base64url encoded (uses '-'/'_'); pad to a multiple of 4.
         payload = parts[1]
-        # Add padding for base64 decode
-        payload += '=' * (4 - len(payload) % 4)
-        decoded = base64.b64decode(payload)
+        payload += "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(payload)
         data = json.loads(decoded)
 
-        if 'exp' in data:
-            return int(data['exp'])
+        if "exp" in data:
+            return int(data["exp"])
     except Exception:
         pass
 
@@ -146,21 +160,21 @@ def normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
         Normalized message dictionary.
     """
     # Map type to spec: text, video, picture, voice
-    raw_type = msg.get('type')
-    msg_type = 'text'
-    if raw_type in ['image', 'picture']:
-        msg_type = 'picture'
-    elif raw_type in ['video', 'movie']:
-        msg_type = 'video'
-    elif raw_type in ['voice']:
-        msg_type = 'voice'
+    raw_type = msg.get("type")
+    msg_type = "text"
+    if raw_type in ["image", "picture"]:
+        msg_type = "picture"
+    elif raw_type in ["video", "movie"]:
+        msg_type = "video"
+    elif raw_type in ["voice"]:
+        msg_type = "voice"
 
     return {
-        "id": msg['id'],
-        "timestamp": msg.get('published_at'), # ISO string from API
+        "id": msg["id"],
+        "timestamp": msg.get("published_at"),  # ISO string from API
         "type": msg_type,
-        "is_favorite": msg.get('is_favorite', False),
-        "content": msg.get('text'),
+        "is_favorite": msg.get("is_favorite", False),
+        "content": msg.get("text"),
         # raw type useful for extension determination later
-        "_raw_type": raw_type
+        "_raw_type": raw_type,
     }

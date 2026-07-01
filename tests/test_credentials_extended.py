@@ -72,8 +72,7 @@ class TestGetUserDataDir:
         mock_home = tmp_path / "home"
         mock_home.mkdir()
 
-        with patch("platform.system", return_value="Windows"), \
-             patch("pathlib.Path.home", return_value=mock_home):
+        with patch("platform.system", return_value="Windows"), patch("pathlib.Path.home", return_value=mock_home):
             result = get_user_data_dir()
             assert "AppData" in str(result)
             assert "Roaming" in str(result)
@@ -84,8 +83,7 @@ class TestGetUserDataDir:
         mock_home = tmp_path / "home"
         mock_home.mkdir()
 
-        with patch("platform.system", return_value="Darwin"), \
-             patch("pathlib.Path.home", return_value=mock_home):
+        with patch("platform.system", return_value="Darwin"), patch("pathlib.Path.home", return_value=mock_home):
             result = get_user_data_dir()
             assert "Library" in str(result)
             assert "Application Support" in str(result)
@@ -96,8 +94,7 @@ class TestGetUserDataDir:
         mock_home = tmp_path / "home"
         mock_home.mkdir()
 
-        with patch("platform.system", return_value="Linux"), \
-             patch("pathlib.Path.home", return_value=mock_home):
+        with patch("platform.system", return_value="Linux"), patch("pathlib.Path.home", return_value=mock_home):
             result = get_user_data_dir()
             assert ".local" in str(result)
             assert "share" in str(result)
@@ -108,8 +105,7 @@ class TestGetUserDataDir:
         mock_home = tmp_path / "home"
         mock_home.mkdir()
 
-        with patch("platform.system", return_value="Linux"), \
-             patch("pathlib.Path.home", return_value=mock_home):
+        with patch("platform.system", return_value="Linux"), patch("pathlib.Path.home", return_value=mock_home):
             result = get_user_data_dir()
             # Directory should be created
             assert result.exists()
@@ -123,8 +119,7 @@ class TestGetAuthDir:
         mock_home = tmp_path / "home"
         mock_home.mkdir()
 
-        with patch("platform.system", return_value="Linux"), \
-             patch("pathlib.Path.home", return_value=mock_home):
+        with patch("platform.system", return_value="Linux"), patch("pathlib.Path.home", return_value=mock_home):
             result = get_auth_dir()
             assert "auth_data" in str(result)
             assert result.exists()
@@ -135,8 +130,7 @@ class TestKeyringStore:
 
     def test_keyring_store_init_success(self):
         """Test successful KeyringStore initialization."""
-        with patch("keyring.set_password"), \
-             patch("keyring.delete_password"):
+        with patch("keyring.set_password"), patch("keyring.delete_password"):
             store = KeyringStore()
             assert store._keyring is not None
 
@@ -151,9 +145,11 @@ class TestKeyringStore:
             # Second call (after fallback) succeeds
 
         # Mock the keyring module and fallback path
-        with patch("keyring.set_password", side_effect=mock_set), \
-             patch("keyring.delete_password"), \
-             patch("keyring.set_keyring"):
+        with (
+            patch("keyring.set_password", side_effect=mock_set),
+            patch("keyring.delete_password"),
+            patch("keyring.set_keyring"),
+        ):
             # This should attempt fallback - may fail but we're testing the path
             try:
                 KeyringStore()
@@ -172,8 +168,7 @@ class TestKeyringStore:
         def mock_set(service, key, val):
             stored_data[key] = val
 
-        with patch("keyring.set_password", side_effect=mock_set), \
-             patch("keyring.delete_password"):
+        with patch("keyring.set_password", side_effect=mock_set), patch("keyring.delete_password"):
             store = KeyringStore()
 
             token_data = {"access_token": "test", "cookies": {"s": "v"}}
@@ -183,18 +178,22 @@ class TestKeyringStore:
             assert "group1" in stored_data
             # The stored value should be different from raw JSON
             import json
+
             raw_json = json.dumps(token_data)
             assert stored_data["group1"] != raw_json
 
     def test_keyring_store_load_decompresses_data(self):
         """Test that load decompresses data."""
         import json
+
         token_data = {"access_token": "test123", "cookies": {}}
         compressed = _compress_data(json.dumps(token_data))
 
-        with patch("keyring.set_password"), \
-             patch("keyring.delete_password"), \
-             patch("keyring.get_password", return_value=compressed):
+        with (
+            patch("keyring.set_password"),
+            patch("keyring.delete_password"),
+            patch("keyring.get_password", return_value=compressed),
+        ):
             store = KeyringStore()
             result = store.load("group1")
 
@@ -202,9 +201,11 @@ class TestKeyringStore:
 
     def test_keyring_store_load_returns_none_on_error(self):
         """Test that load returns None if get_password fails."""
-        with patch("keyring.set_password"), \
-             patch("keyring.delete_password"), \
-             patch("keyring.get_password", side_effect=Exception("Error")):
+        with (
+            patch("keyring.set_password"),
+            patch("keyring.delete_password"),
+            patch("keyring.get_password", side_effect=Exception("Error")),
+        ):
             store = KeyringStore()
             result = store.load("group1")
             assert result is None
@@ -219,9 +220,11 @@ class TestKeyringStore:
         mock_alt = MagicMock()
         mock_alt.delete_password = MagicMock()
 
-        with patch("keyring.set_password"), \
-             patch("keyring.delete_password", side_effect=track_delete), \
-             patch.dict("sys.modules", {"keyrings.alt.file": MagicMock(PlaintextKeyring=lambda: mock_alt)}):
+        with (
+            patch("keyring.set_password"),
+            patch("keyring.delete_password", side_effect=track_delete),
+            patch.dict("sys.modules", {"keyrings.alt.file": MagicMock(PlaintextKeyring=lambda: mock_alt)}),
+        ):
             store = KeyringStore()
             store.delete("group1")
 

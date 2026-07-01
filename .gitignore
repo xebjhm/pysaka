@@ -61,3 +61,7 @@ logs/
 *.tmp
 *.temp
 .cache/
+
+# Docs site (Astro)
+node_modules/
+.astro/

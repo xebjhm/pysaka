@@ -120,7 +120,7 @@ class BaseBlogScraper(ABC):
             quote = match.group(2)  # '"' or "'"
             url = match.group(3)
             normalized = self.normalize_url(url)
-            return f'{attr}={quote}{normalized}{quote}'
+            return f"{attr}={quote}{normalized}{quote}"
 
         # Match src="..." or href="..." with either double or single quotes
         pattern = r'(src|href)=(["\'])([^"\']+)\2'

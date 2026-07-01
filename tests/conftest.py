@@ -15,6 +15,7 @@ def mock_session():
     session.post.return_value.__aexit__.return_value = None
     return session
 
+
 @pytest.fixture
 def client():
     return Client(group=Group.HINATAZAKA46, access_token="test_token")

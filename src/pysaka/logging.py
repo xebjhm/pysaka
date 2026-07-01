@@ -135,25 +135,35 @@ def configure_logging(
 
     # Silence noisy libraries - these are very verbose at DEBUG level
     noisy_loggers = [
-        "parso", "asyncio", "httpcore", "httpx",
-        "aiohttp", "urllib3", "charset_normalizer",
-        "chardet", "PIL", "aiohttp.access",
+        "parso",
+        "asyncio",
+        "httpcore",
+        "httpx",
+        "aiohttp",
+        "urllib3",
+        "charset_normalizer",
+        "chardet",
+        "PIL",
+        "aiohttp.access",
         "urllib3.connectionpool",
     ]
     for lib in noisy_loggers:
         logging.getLogger(lib).setLevel(logging.WARNING)
 
 
-def _redact_secrets(
-    logger: logging.Logger,
-    method_name: str,
-    event_dict: dict[str, Any]
-) -> dict[str, Any]:
+def _redact_secrets(logger: logging.Logger, method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
     """
     Processor to redact sensitive keys from log output.
     """
     sensitive_keys = {
-        "access_token", "refresh_token", "token", "password", "secret", "cookie", "cookies", "authorization"
+        "access_token",
+        "refresh_token",
+        "token",
+        "password",
+        "secret",
+        "cookie",
+        "cookies",
+        "authorization",
     }
 
     # Redact top-level keys

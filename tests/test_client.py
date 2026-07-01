@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from pysaka import ApiError, Client, Group
+from pysaka import ApiError, Client, Group, RefreshFailedError
 
 
 @pytest.mark.asyncio
@@ -16,6 +16,7 @@ async def test_client_init():
 
     with pytest.raises(ValueError):
         Client(group="invalid_group")
+
 
 @pytest.mark.asyncio
 async def test_fetch_json_success(client, mock_session):
@@ -31,6 +32,7 @@ async def test_fetch_json_success(client, mock_session):
         params=None,
     )
 
+
 @pytest.mark.asyncio
 async def test_fetch_json_server_error(client, mock_session):
     mock_resp = mock_session.get.return_value.__aenter__.return_value
@@ -38,6 +40,7 @@ async def test_fetch_json_server_error(client, mock_session):
 
     with pytest.raises(ApiError):
         await client.fetch_json(mock_session, "/error")
+
 
 @pytest.mark.asyncio
 async def test_refresh_token(client, mock_session):
@@ -52,12 +55,14 @@ async def test_refresh_token(client, mock_session):
     assert client.access_token == "new_token"
     assert client.headers["Authorization"] == "Bearer new_token"
 
+
 @pytest.mark.asyncio
 async def test_refresh_missing_token(client, mock_session):
     client.refresh_token = None
     success = await client.refresh_access_token(mock_session)
     assert success is False
     mock_session.post.assert_not_called()
+
 
 @pytest.mark.asyncio
 async def test_refresh_cookie_success(client, mock_session):
@@ -76,8 +81,9 @@ async def test_refresh_cookie_success(client, mock_session):
     assert client.access_token == "cookie_token"
     # Verify post called with cookies
     call_kwargs = mock_session.post.call_args[1]
-    assert call_kwargs['cookies'] == {"session": "valid_cookie"}
-    assert call_kwargs['json'] == {"refresh_token": None}
+    assert call_kwargs["cookies"] == {"session": "valid_cookie"}
+    assert call_kwargs["json"] == {"refresh_token": None}
+
 
 @pytest.mark.asyncio
 async def test_get_profile(client, mock_session):
@@ -88,13 +94,14 @@ async def test_get_profile(client, mock_session):
     profile = await client.get_profile(mock_session)
     assert profile["nickname"] == "TestUser"
 
+
 @pytest.mark.asyncio
 async def test_get_groups(client, mock_session):
     mock_resp = mock_session.get.return_value.__aenter__.return_value
     mock_resp.status = 200
     mock_resp.json.return_value = [
         {"id": 1, "name": "Group1", "subscription": {"state": "active"}},
-        {"id": 2, "name": "Group2", "subscription": {"state": "expired"}}
+        {"id": 2, "name": "Group2", "subscription": {"state": "expired"}},
     ]
 
     # Active only
@@ -106,6 +113,7 @@ async def test_get_groups(client, mock_session):
     groups = await client.get_groups(mock_session, include_inactive=True)
     assert len(groups) == 2
 
+
 @pytest.mark.asyncio
 async def test_get_messages_pagination(client, mock_session):
     mock_resp = mock_session.get.return_value.__aenter__.return_value
@@ -113,20 +121,62 @@ async def test_get_messages_pagination(client, mock_session):
 
     # Page 1
     mock_resp.json.side_effect = [
-        {
-            "messages": [{"id": 10}, {"id": 9}],
-            "continuation": "next_cursor"
-        },
-        {
-            "messages": [{"id": 8}],
-            "continuation": None
-        }
+        {"messages": [{"id": 10}, {"id": 9}], "continuation": "next_cursor"},
+        {"messages": [{"id": 8}], "continuation": None},
     ]
 
     msgs = await client.get_messages(mock_session, group_id=1)
     assert len(msgs) == 3
     assert msgs[0]["id"] == 8
     assert msgs[2]["id"] == 10  # Sorted ascending
+
+
+@pytest.mark.asyncio
+async def test_get_messages_does_not_clear_unread_by_default(client, mock_session):
+    """Syncing must NOT clear the user's unread badge on the official mobile app.
+
+    The timeline GET must carry clear_unread=false; otherwise the server's
+    absent-default zeroes the official app's unread count/red-dot on every sync.
+    """
+    mock_resp = mock_session.get.return_value.__aenter__.return_value
+    mock_resp.status = 200
+    mock_resp.json.return_value = {"messages": [{"id": 1}], "continuation": None}
+
+    await client.get_messages(mock_session, group_id=1)
+
+    _, kwargs = mock_session.get.call_args
+    assert kwargs["params"]["clear_unread"] == "false"
+
+
+@pytest.mark.asyncio
+async def test_mark_group_read_clears_unread(client, mock_session):
+    """mark_group_read sends a minimal timeline fetch with clear_unread=true
+    (what the official app does on room-open) and reports success."""
+    mock_resp = mock_session.get.return_value.__aenter__.return_value
+    mock_resp.status = 200
+    mock_resp.json.return_value = {"messages": [], "continuation": None}
+
+    ok = await client.mark_group_read(mock_session, group_id=42)
+
+    assert ok is True
+    url, kwargs = mock_session.get.call_args
+    assert url[0].endswith("/groups/42/timeline")
+    assert kwargs["params"]["clear_unread"] == "true"
+    assert kwargs["params"]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_messages_can_opt_in_to_clear_unread(client, mock_session):
+    """Callers may explicitly clear the badge (e.g. an opt-in setting)."""
+    mock_resp = mock_session.get.return_value.__aenter__.return_value
+    mock_resp.status = 200
+    mock_resp.json.return_value = {"messages": [{"id": 1}], "continuation": None}
+
+    await client.get_messages(mock_session, group_id=1, clear_unread=True)
+
+    _, kwargs = mock_session.get.call_args
+    assert kwargs["params"]["clear_unread"] == "true"
+
 
 @pytest.mark.asyncio
 async def test_get_additional_endpoints(client, mock_session):
@@ -148,6 +198,7 @@ async def test_get_additional_endpoints(client, mock_session):
     # Products
     mock_resp.json.return_value = {"products": [{"id": 1}]}
     assert len(await client.get_products(mock_session)) == 1
+
 
 @pytest.mark.asyncio
 async def test_fetch_json_auto_refresh_success(client, mock_session):
@@ -176,6 +227,7 @@ async def test_fetch_json_auto_refresh_success(client, mock_session):
     mock_session.post.assert_called_once()
     assert mock_session.get.call_count == 2
 
+
 @pytest.mark.asyncio
 async def test_fetch_json_auto_refresh_fail(client, mock_session):
     resp_401 = AsyncMock()
@@ -189,8 +241,10 @@ async def test_fetch_json_auto_refresh_fail(client, mock_session):
 
     client.refresh_token = "valid_rt"
 
-    result = await client.fetch_json(mock_session, "/test")
-
-    assert result is None
+    # When the 401 refresh exhausts all plans, fetch_json must propagate
+    # RefreshFailedError (not swallow it into None) so the caller can prompt
+    # re-login instead of silently rendering empty data.
+    with pytest.raises(RefreshFailedError):
+        await client.fetch_json(mock_session, "/test")
     mock_session.get.assert_called_once()
     mock_session.post.assert_called_once()

@@ -88,15 +88,15 @@ from pysaka import Client, Group
 
 async def main():
     # ... assume creds obtained via BrowserAuth ...
-    token = "YOUR_ACCESS_TOKEN" 
-    
+    token = "YOUR_ACCESS_TOKEN"
+
     async with aiohttp.ClientSession() as session:
         client = Client(Group.NOGIZAKA46, access_token=token)
-        
+
         # Get Profile
         profile = await client.get_profile(session)
         print(f"Hello, {profile['nickname']}!")
-        
+
         # Get Groups (Members)
         groups = await client.get_groups(session)
         for g in groups:

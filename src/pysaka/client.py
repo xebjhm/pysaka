@@ -13,11 +13,13 @@ from .utils import get_jwt_remaining_seconds, get_media_extension
 
 logger = structlog.get_logger()
 
+
 class Group(Enum):
     HINATAZAKA46 = "hinatazaka46"
     NOGIZAKA46 = "nogizaka46"
     SAKURAZAKA46 = "sakurazaka46"
     YODEL = "yodel"
+
 
 GROUP_CONFIG = {
     Group.HINATAZAKA46: {
@@ -25,30 +27,35 @@ GROUP_CONFIG = {
         "app_id": "jp.co.sonymusic.communication.keyakizaka 2.5",
         "auth_url": "https://message.hinatazaka46.com/",
         "display_name": "日向坂46",
-        "organization_id": 1
+        "organization_id": 1,
+        "mobile_api_base": "https://api.kh.glastonr.net/v2",
     },
     Group.NOGIZAKA46: {
         "api_base": "https://api.message.nogizaka46.com/v2",
         "app_id": "jp.co.sonymusic.communication.nogizaka 2.5",
         "auth_url": "https://message.nogizaka46.com/",
         "display_name": "乃木坂46",
-        "organization_id": 1
+        "organization_id": 1,
+        "mobile_api_base": "https://api.n46.glastonr.net/v2",
     },
     Group.SAKURAZAKA46: {
         "api_base": "https://api.message.sakurazaka46.com/v2",
         "app_id": "jp.co.sonymusic.communication.sakurazaka 2.5",
         "auth_url": "https://message.sakurazaka46.com/",
         "display_name": "櫻坂46",
-        "organization_id": 1
+        "organization_id": 1,
+        "mobile_api_base": "https://api.s46.glastonr.net/v2",
     },
     Group.YODEL: {
         "api_base": "https://api.service.yodel-app.com/v2",
         "app_id": "jp.co.sonymusic.communication.yodel 2.5",
         "auth_url": "https://service.yodel-app.com/",
         "display_name": "Yodel",
-        "organization_id": None
-    }
+        "organization_id": None,
+        "mobile_api_base": None,
+    },
 }
+
 
 class Client:
     """
@@ -74,7 +81,8 @@ class Client:
         app_id: Optional[str] = None,
         user_agent: Optional[str] = None,
         auth_dir: Optional[Union[str, Path]] = None,
-        use_token_storage: bool = False
+        use_token_storage: bool = False,
+        platform: str = "web",
     ):
         """
         Initialize the client.
@@ -87,6 +95,8 @@ class Client:
             app_id: The X-Talk-App-ID header value (optional, defaults to group config).
             user_agent: The User-Agent header value (optional, defaults to hardcoded).
             use_token_storage: If True, attempts to load/save credentials using system keyring (or file fallback).
+            platform: Request profile — "web" (default, browser-like) or "android"
+                (Flutter app: Dart UA, mobile host, x-talk-app-platform=android).
 
         Raises:
             ValueError: If an invalid group string is provided.
@@ -118,23 +128,60 @@ class Client:
         self.access_token = access_token
         self.refresh_token = refresh_token
         self.cookies = cookies
-        self.user_agent = user_agent or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        self.app_id = app_id or self.config["app_id"]
-        self.api_base = self.config["api_base"]
         self.auth_dir = Path(auth_dir) if auth_dir else None
 
-        self.headers = {
+        # Platform profile: "web" (default) mimics the browser client;
+        # "android" mimics the Flutter/Dart app (different UA, host, headers).
+        if platform not in ("web", "android"):
+            logger.warning(f"Unknown platform '{platform}', defaulting to 'web'.")
+            platform = "web"
+        self.platform = platform
+
+        self.app_id = app_id or self.config["app_id"]
+
+        # Host: android uses the per-group mobile host when known, else the web host.
+        self.api_base = self.config["api_base"]
+        if self.platform == "android":
+            mobile_base = self.config.get("mobile_api_base")
+            if mobile_base:
+                self.api_base = mobile_base
+            else:
+                logger.info(f"No mobile_api_base for {self.group.value}; using web host in android mode.")
+
+        # User-Agent: explicit override wins; else platform default.
+        if user_agent:
+            self.user_agent = user_agent
+        elif self.platform == "android":
+            self.user_agent = "Dart/3.7 (dart:io)"
+        else:
+            self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+        self.headers = self._build_headers()
+        if self.access_token:
+            self.headers["Authorization"] = f"Bearer {self.access_token}"
+
+    def _build_headers(self) -> dict[str, str]:
+        """Build request headers for the active platform profile.
+
+        web:     mimics the official browser client (origin/referer, Mozilla UA).
+        android: mimics the Flutter app (Dart UA, x-talk-app-platform=android,
+                 no origin/referer, JP-first accept-language).
+        """
+        headers = {
             "x-talk-app-id": self.app_id,
             "user-agent": self.user_agent,
             "content-type": "application/json",
-            "x-talk-app-platform": "web",
-            "origin": self.config["auth_url"].rstrip('/'),
-            "referer": self.config["auth_url"],
             "accept": "application/json",
-            "accept-language": "ja,en-US;q=0.9,en;q=0.8"
         }
-        if self.access_token:
-            self.headers["Authorization"] = f"Bearer {self.access_token}"
+        if self.platform == "android":
+            headers["x-talk-app-platform"] = "android"
+            headers["accept-language"] = "ja-JP;q=1.0,en-US;q=0.9"
+        else:
+            headers["x-talk-app-platform"] = "web"
+            headers["origin"] = self.config["auth_url"].rstrip("/")
+            headers["referer"] = self.config["auth_url"]
+            headers["accept-language"] = "ja,en-US;q=0.9,en;q=0.8"
+        return headers
 
     async def update_token(self, new_token: str, new_refresh_token: Optional[str] = None) -> None:
         """
@@ -153,26 +200,18 @@ class Client:
 
         if self.token_manager:
             try:
-                self.token_manager.save_session(
-                    self.group.value,
-                    self.access_token,
-                    self.refresh_token,
-                    self.cookies
-                )
+                self.token_manager.save_session(self.group.value, self.access_token, self.refresh_token, self.cookies)
             except Exception as e:
                 logger.warning(f"Failed to auto-save refreshed token: {e}")
 
     def save_session(self) -> None:
         """Manually save current session to storage if configured."""
         if self.token_manager and self.access_token:
-            self.token_manager.save_session(
-                self.group.value,
-                self.access_token,
-                self.refresh_token,
-                self.cookies
-            )
+            self.token_manager.save_session(self.group.value, self.access_token, self.refresh_token, self.cookies)
 
-    async def fetch_json(self, session: aiohttp.ClientSession, endpoint: str, params: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+    async def fetch_json(
+        self, session: aiohttp.ClientSession, endpoint: str, params: Optional[dict[str, Any]] = None
+    ) -> Optional[dict[str, Any]]:
         """
         Helper method to perform JSON GET requests.
 
@@ -186,6 +225,9 @@ class Client:
 
         Raises:
             ApiError: If the API returns a server error (5xx) or other unhandled status.
+            SessionExpiredError: If the session is invalidated during the request.
+            RefreshFailedError: If a 401 triggers a token refresh and all refresh
+                plans fail (surfaced so callers can prompt re-login).
         """
         url = f"{self.api_base}{endpoint}"
         logger.debug("API GET request", endpoint=endpoint, params=params)
@@ -216,8 +258,12 @@ class Client:
                     return None
         except ApiError:
             raise
-        except SessionExpiredError as e:
-            logger.debug(f"Session expired during request to {endpoint}: {e}")
+        except (SessionExpiredError, RefreshFailedError) as e:
+            # Propagate auth failures so callers can prompt re-login. Without
+            # RefreshFailedError here it would fall into the broad handler below
+            # and be swallowed into None — the app would render empty results
+            # instead of surfacing that the session died (parity with delete_json).
+            logger.debug(f"Auth error during request to {endpoint}: {e}")
             raise
         except aiohttp.ClientError as e:
             logger.error(f"Network error fetching {url}: {e}")
@@ -238,17 +284,21 @@ class Client:
         has_auth_dir = bool(self.auth_dir and self.auth_dir.exists())
         cookie_keys = list(self.cookies.keys()) if self.cookies else []
 
+        # Cookies are a WEB-only refresh credential. In android mode we never send web
+        # session cookies (absolute fingerprint purity), so treat them as unusable here.
+        cookies_usable = bool(self.cookies) and self.platform == "web"
+
         logger.info(
             "Token refresh attempt starting",
             has_refresh_token=has_refresh_token,
             has_cookies=has_cookies,
             has_auth_dir=has_auth_dir,
             cookie_keys=cookie_keys,
-            current_token_expiry_seconds=self.get_token_expiry_seconds()
+            current_token_expiry_seconds=self.get_token_expiry_seconds(),
         )
 
         # Early exit only if ALL refresh methods are unavailable
-        if not self.refresh_token and not self.cookies and not (self.auth_dir and self.auth_dir.exists()):
+        if not self.refresh_token and not cookies_usable and not (self.auth_dir and self.auth_dir.exists()):
             logger.warning("No credentials (refresh_token/cookies/auth_dir) available for refresh.")
             return False
 
@@ -258,35 +308,38 @@ class Client:
         refresh_headers = self.headers.copy()
         refresh_headers.pop("Authorization", None)
 
-
-        # 1. Try refresh_token if available (Plan A - Unused in Web Flow, kept for future mobile support)
-        # Note: Web flow sets refresh_token=None, so this block is skipped.
+        # 1. Plan A — refresh_token grant. Used by mobile/android mode, and now also by
+        # web sessions when the /signin response carried a refresh_token (captured at login).
         if self.refresh_token:
             logger.debug("Attempting refresh using refresh_token...")
             try:
-                async with session.post(url, headers=refresh_headers, json={"refresh_token": self.refresh_token}) as resp:
+                async with session.post(
+                    url, headers=refresh_headers, json={"refresh_token": self.refresh_token}
+                ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        new_at = data.get('access_token')
+                        new_at = data.get("access_token")
                         if new_at:
-                            await self.update_token(new_at, data.get('refresh_token'))
+                            await self.update_token(new_at, data.get("refresh_token"))
                             logger.info("Token refreshed successfully via refresh_token.")
                             return True
                     elif resp.status in (400, 401):
                         logger.warning(f"refresh_token failed (Status {resp.status}). Falling back...")
             except Exception as e:
-                 logger.warning(f"Error during refresh_token attempt: {e}")
+                logger.warning(f"Error during refresh_token attempt: {e}")
 
-        # 2. Try cookies (Web Session) if available
-        if self.cookies:
+        # 2. Try cookies (Web Session) if available — WEB platform only (purity)
+        if cookies_usable:
             logger.debug(
                 "Attempting cookie-based refresh (Plan B)",
                 cookie_count=len(self.cookies),
-                session_cookie_present='session' in self.cookies
+                session_cookie_present="session" in self.cookies,
             )
             try:
-                # For web sessions, pass cookies with refresh_token:null (as browser does per HAR)
-                async with session.post(url, headers=refresh_headers, json={"refresh_token": None}, cookies=self.cookies) as resp:
+                # For web sessions, pass cookies with refresh_token:null
+                async with session.post(
+                    url, headers=refresh_headers, json={"refresh_token": None}, cookies=self.cookies
+                ) as resp:
                     # Safe cookie key extraction (handles both real responses and mocks)
                     try:
                         response_cookie_keys = list(resp.cookies.keys()) if resp.cookies else []
@@ -294,14 +347,12 @@ class Client:
                         response_cookie_keys = []
 
                     logger.info(
-                        "Cookie refresh response received",
-                        status=resp.status,
-                        response_cookies=response_cookie_keys
+                        "Cookie refresh response received", status=resp.status, response_cookies=response_cookie_keys
                     )
 
                     if resp.status == 200:
                         data = await resp.json()
-                        new_token = data.get('access_token')
+                        new_token = data.get("access_token")
                         if new_token:
                             old_expiry = self.get_token_expiry_seconds()
                             await self.update_token(new_token)
@@ -317,13 +368,13 @@ class Client:
                                 logger.info(
                                     "Session cookies updated from response",
                                     updated_cookies=cookies_updated,
-                                    new_cookie_count=len(self.cookies)
+                                    new_cookie_count=len(self.cookies),
                                 )
 
                             logger.info(
                                 "Token refreshed successfully via session cookies",
                                 old_expiry_seconds=old_expiry,
-                                new_expiry_seconds=new_expiry
+                                new_expiry_seconds=new_expiry,
                             )
                             return True
                     elif resp.status == 400:
@@ -331,11 +382,13 @@ class Client:
                         body = await resp.json()
                         logger.warning(
                             "Cookie refresh returned 400",
-                            response_code=body.get('code'),
-                            response_message=body.get('message')
+                            response_code=body.get("code"),
+                            response_message=body.get("message"),
                         )
-                        if body.get('code') == 'invalid_parameter':
-                            logger.error("Session invalidated - user may have logged in elsewhere or session expired on server.")
+                        if body.get("code") == "invalid_parameter":
+                            logger.error(
+                                "Session invalidated - user may have logged in elsewhere or session expired on server."
+                            )
                             raise SessionExpiredError(
                                 "Your session has been invalidated. "
                                 "This usually happens when you log in from another browser."
@@ -348,7 +401,7 @@ class Client:
                         logger.warning(
                             "Cookie refresh failed with unexpected status",
                             status=resp.status,
-                            response_body=body_text[:500]
+                            response_body=body_text[:500],
                         )
             except SessionExpiredError:
                 raise
@@ -360,18 +413,21 @@ class Client:
             try:
                 # Lazy import to avoid circular dependency
                 from .auth import BrowserAuth
+
                 logger.info("Attempting headless browser refresh (Plan C)...")
 
                 # Check if playwright is installed by trying import, though BrowserAuth import essentially checked it
                 creds = await BrowserAuth.refresh_token_headless(self.group, self.auth_dir)
                 if creds:
                     # Update local state
-                    await self.update_token(creds['access_token'])
-                    self.cookies = creds.get('cookies', {})
+                    await self.update_token(creds["access_token"])
+                    self.cookies = creds.get("cookies", {})
 
                     # Persist immediately
                     if self.token_manager:
-                        self.token_manager.save_session(self.group.value, self.access_token, self.refresh_token, self.cookies)
+                        self.token_manager.save_session(
+                            self.group.value, self.access_token, self.refresh_token, self.cookies
+                        )
 
                     logger.info("Headless refresh successful!")
                     return True
@@ -381,8 +437,7 @@ class Client:
         # All refresh plans exhausted - this is unexpected and should be reported
         logger.error("All token refresh plans failed - raising RefreshFailedError")
         raise RefreshFailedError(
-            "All token refresh attempts failed unexpectedly. "
-            "Please log in again to continue using the service."
+            "All token refresh attempts failed unexpectedly. Please log in again to continue using the service."
         )
 
     def get_token_expiry_seconds(self) -> Optional[int]:
@@ -406,11 +461,7 @@ class Client:
             return None
         return get_jwt_remaining_seconds(self.access_token)
 
-    async def refresh_if_needed(
-        self,
-        session: aiohttp.ClientSession,
-        min_seconds_remaining: int = 300
-    ) -> bool:
+    async def refresh_if_needed(self, session: aiohttp.ClientSession, min_seconds_remaining: int = 300) -> bool:
         """
         Refresh token only if it expires within min_seconds_remaining.
 
@@ -436,7 +487,7 @@ class Client:
             threshold_seconds=min_seconds_remaining,
             token_present=bool(self.access_token),
             cookies_present=bool(self.cookies),
-            cookie_count=len(self.cookies) if self.cookies else 0
+            cookie_count=len(self.cookies) if self.cookies else 0,
         )
 
         if remaining is None:
@@ -445,17 +496,14 @@ class Client:
             return await self.refresh_access_token(session)
 
         if remaining <= 0:
-            logger.warning(
-                "Token already expired!",
-                expired_by_seconds=abs(remaining)
-            )
+            logger.warning("Token already expired!", expired_by_seconds=abs(remaining))
             return await self.refresh_access_token(session)
 
         if remaining <= min_seconds_remaining:
             logger.info(
                 "Token expires soon, triggering refresh",
                 remaining_seconds=remaining,
-                threshold_seconds=min_seconds_remaining
+                threshold_seconds=min_seconds_remaining,
             )
             return await self.refresh_access_token(session)
 
@@ -463,7 +511,7 @@ class Client:
             "Token still valid, skipping refresh",
             remaining_seconds=remaining,
             remaining_minutes=round(remaining / 60, 1),
-            threshold_seconds=min_seconds_remaining
+            threshold_seconds=min_seconds_remaining,
         )
         return False
 
@@ -491,15 +539,15 @@ class Client:
         for g in groups:
             # Always include closed groups for graduation detection.
             # Callers must skip syncing these (timeline/members return 404).
-            if g.get('state') == 'closed':
+            if g.get("state") == "closed":
                 filtered.append(g)
                 continue
 
             # Open groups: check subscription state
-            sub = g.get('subscription')
-            sub_state = sub.get('state') if sub else None
+            sub = g.get("subscription")
+            sub_state = sub.get("state") if sub else None
 
-            if sub_state == 'active':
+            if sub_state == "active":
                 filtered.append(g)
             elif include_inactive and sub_state is not None:
                 # Include expired/suspended open groups the user previously subscribed to.
@@ -529,7 +577,8 @@ class Client:
         since_id: Optional[int] = None,
         since_ts: Optional[str] = None,
         max_id: Optional[int] = None,
-        progress_callback=None
+        progress_callback=None,
+        clear_unread: bool = False,
     ) -> list[dict[str, Any]]:
         """
         Fetch all new messages from a group's timeline.
@@ -541,6 +590,10 @@ class Client:
             since_ts: ISO timestamp cursor. Fetch messages published after this time.
             max_id: Ignored by API, kept for compatibility.
             progress_callback: Optional async function(date_str, count).
+            clear_unread: If True, the server clears the account's unread badge for
+                this group (the official app sends this on chat-open). Defaults to
+                False so a background sync does NOT zero the user's unread count on
+                the official mobile app.
 
         Returns:
             List of message dicts, sorted by ID ascending.
@@ -555,11 +608,17 @@ class Client:
         # by finding the since_id message in the stream (old behaviour).
         effective_ts: Optional[str] = since_ts
         need_discover_ts = since_id is not None and since_ts is None
+        first_page_retried = False
 
         while True:
             params: dict[str, Any] = {
                 "count": 200,
-                "order": "desc"
+                "order": "desc",
+                # Defaults to false so a background sync does NOT advance the
+                # server-side read pointer (which would zero the user's unread
+                # badge on the official mobile app); only the caller opting in
+                # (e.g. mark_group_read) advances it.
+                "clear_unread": "true" if clear_unread else "false",
             }
             if current_continuation:
                 params["continuation"] = current_continuation
@@ -569,24 +628,25 @@ class Client:
 
             data = await self.fetch_json(session, f"/groups/{group_id}/timeline", params)
             if not data:
-                if page == 0 and await self.refresh_access_token(session):
+                if page == 0 and not first_page_retried and await self.refresh_access_token(session):
+                    first_page_retried = True
                     continue
                 break
 
-            messages = data.get('messages', [])
+            messages = data.get("messages", [])
             if not messages:
                 break
 
             for m in messages:
-                all_messages[m['id']] = m
+                all_messages[m["id"]] = m
 
                 # Legacy path: discover timestamp of since_id message
-                if need_discover_ts and m['id'] == since_id:
-                    effective_ts = m.get('published_at')
+                if need_discover_ts and m["id"] == since_id:
+                    effective_ts = m.get("published_at")
                     need_discover_ts = False
 
             if progress_callback and messages:
-                oldest_in_batch = messages[-1].get('published_at')
+                oldest_in_batch = messages[-1].get("published_at")
                 if asyncio.iscoroutinefunction(progress_callback):
                     await progress_callback(oldest_in_batch, len(all_messages))
                 else:
@@ -594,11 +654,11 @@ class Client:
 
             # Stop condition: oldest message in this batch is older than cursor
             if effective_ts and messages:
-                oldest_timestamp = messages[-1].get('published_at', '')
+                oldest_timestamp = messages[-1].get("published_at", "")
                 if oldest_timestamp and oldest_timestamp <= effective_ts:
                     break
 
-            current_continuation = data.get('continuation')
+            current_continuation = data.get("continuation")
             if not current_continuation or current_continuation == params.get("continuation"):
                 break
 
@@ -607,17 +667,16 @@ class Client:
 
         # Filter: keep only messages newer than the cursor
         if effective_ts:
-            all_messages = {
-                k: v for k, v in all_messages.items()
-                if (v.get('published_at') or '') >= effective_ts
-            }
+            all_messages = {k: v for k, v in all_messages.items() if (v.get("published_at") or "") >= effective_ts}
         elif since_id:
             # Pure legacy fallback (no timestamp available at all)
             all_messages = {k: v for k, v in all_messages.items() if k > since_id}
 
-        return sorted(all_messages.values(), key=lambda x: x['id'])
+        return sorted(all_messages.values(), key=lambda x: x["id"])
 
-    async def download_file(self, session: aiohttp.ClientSession, url: str, filepath: Path, timestamp: Optional[str] = None) -> bool:
+    async def download_file(
+        self, session: aiohttp.ClientSession, url: str, filepath: Path, timestamp: Optional[str] = None
+    ) -> bool:
         """
         Download a file from a URL to the local filesystem.
 
@@ -637,7 +696,7 @@ class Client:
             filepath.parent.mkdir(parents=True, exist_ok=True)
             async with session.get(url) as resp:
                 if resp.status == 200:
-                    async with aiofiles.open(filepath, 'wb') as f:
+                    async with aiofiles.open(filepath, "wb") as f:
                         await f.write(await resp.read())
                     return True
                 else:
@@ -646,7 +705,9 @@ class Client:
             logger.error(f"Error downloading {url}: {e}")
         return False
 
-    async def download_message_media(self, session: aiohttp.ClientSession, message: dict[str, Any], output_dir: Path) -> Optional[Path]:
+    async def download_message_media(
+        self, session: aiohttp.ClientSession, message: dict[str, Any], output_dir: Path
+    ) -> Optional[Path]:
         """
         Download media associated with a message to the specified directory.
 
@@ -658,17 +719,17 @@ class Client:
         Returns:
             Path to the downloaded file, or None if no media/download failed.
         """
-        raw_type = message.get('type')
-        msg_type = 'text'
-        if raw_type in ['image', 'picture']:
-            msg_type = 'picture'
-        elif raw_type in ['video', 'movie']:
-            msg_type = 'video'
-        elif raw_type == 'voice':
-            msg_type = 'voice'
+        raw_type = message.get("type")
+        msg_type = "text"
+        if raw_type in ["image", "picture"]:
+            msg_type = "picture"
+        elif raw_type in ["video", "movie"]:
+            msg_type = "video"
+        elif raw_type == "voice":
+            msg_type = "voice"
 
-        media_url = message.get('file') or message.get('thumbnail')
-        if not media_url or msg_type == 'text':
+        media_url = message.get("file") or message.get("thumbnail")
+        if not media_url or msg_type == "text":
             return None
 
         try:
@@ -683,7 +744,6 @@ class Client:
                 return filepath
         except Exception as e:
             logger.error(f"Message media download error: {e}")
-            pass
 
         return None
 
@@ -710,7 +770,7 @@ class Client:
         Returns:
             List of news items.
         """
-        params = {"platform": "web", "count": count}
+        params = {"platform": self.platform, "count": count}
         data = await self.fetch_json(session, "/announcements", params)
         if data and "announcements" in data:
             return data["announcements"]
@@ -762,7 +822,9 @@ class Client:
             return data["organizations"]
         return []
 
-    async def get_products(self, session: aiohttp.ClientSession, product_type: Optional[str] = None) -> list[dict[str, Any]]:
+    async def get_products(
+        self, session: aiohttp.ClientSession, product_type: Optional[str] = None
+    ) -> list[dict[str, Any]]:
         """
         Fetch products (subscriptions etc).
 
@@ -782,14 +844,11 @@ class Client:
         return []
 
     # -------------------------------------------------------------------------
-    # New API methods discovered via HAR analysis (Official App Feature Parity)
+    # Additional API methods (official-app feature parity)
     # -------------------------------------------------------------------------
 
     async def post_json(
-        self,
-        session: aiohttp.ClientSession,
-        endpoint: str,
-        data: Optional[dict[str, Any]] = None
+        self, session: aiohttp.ClientSession, endpoint: str, data: Optional[dict[str, Any]] = None
     ) -> Optional[dict[str, Any]]:
         """
         Helper method to perform JSON POST requests.
@@ -828,11 +887,7 @@ class Client:
             logger.error(f"Network error posting to {url}: {e}")
             raise ApiError(f"Network error: {e}") from e
 
-    async def delete_json(
-        self,
-        session: aiohttp.ClientSession,
-        endpoint: str
-    ) -> bool:
+    async def delete_json(self, session: aiohttp.ClientSession, endpoint: str) -> bool:
         """
         Helper method to perform DELETE requests.
 
@@ -856,16 +911,14 @@ class Client:
                 else:
                     logger.warning(f"DELETE {endpoint} returned {resp.status}")
                     return False
+        except (SessionExpiredError, RefreshFailedError):
+            raise
         except Exception as e:
             logger.error(f"Error deleting {url}: {e}")
             return False
 
     async def get_letters(
-        self,
-        session: aiohttp.ClientSession,
-        group_id: int,
-        updated_from: Optional[str] = None,
-        count: int = 200
+        self, session: aiohttp.ClientSession, group_id: int, updated_from: Optional[str] = None, count: int = 200
     ) -> list[dict[str, Any]]:
         """
         Fetch user's sent letters/cards to a member.
@@ -888,11 +941,7 @@ class Client:
             return data["letters"]
         return []
 
-    async def get_past_messages(
-        self,
-        session: aiohttp.ClientSession,
-        group_id: int
-    ) -> list[dict[str, Any]]:
+    async def get_past_messages(self, session: aiohttp.ClientSession, group_id: int) -> list[dict[str, Any]]:
         """
         Fetch historical messages (before user's subscription start date).
 
@@ -911,11 +960,27 @@ class Client:
             return data["messages"]
         return []
 
-    async def get_subscription_streak(
-        self,
-        session: aiohttp.ClientSession,
-        group_id: int
-    ) -> Optional[dict[str, Any]]:
+    async def mark_group_read(self, session: aiohttp.ClientSession, group_id: int) -> bool:
+        """Clear the account's unread count for a group on the server.
+
+        Sends a minimal timeline fetch with ``clear_unread=true`` — the same
+        signal the official app sends when you open a room. Call this only when
+        the user opens a conversation and has opted in to syncing read status to
+        their phone. A background sync must NOT call this (use ``get_messages``,
+        which defaults to ``clear_unread=false``).
+
+        Args:
+            session: Active aiohttp ClientSession.
+            group_id: The ID of the group/member room to mark read.
+
+        Returns:
+            True if the request succeeded.
+        """
+        params: dict[str, Any] = {"count": 1, "order": "desc", "clear_unread": "true"}
+        data = await self.fetch_json(session, f"/groups/{group_id}/timeline", params)
+        return data is not None
+
+    async def get_subscription_streak(self, session: aiohttp.ClientSession, group_id: int) -> Optional[dict[str, Any]]:
         """
         Fetch consecutive subscription days for a member.
 
@@ -928,11 +993,7 @@ class Client:
         """
         return await self.fetch_json(session, f"/groups/{group_id}/consecutive-subscription-day")
 
-    async def get_member(
-        self,
-        session: aiohttp.ClientSession,
-        member_id: int
-    ) -> Optional[dict[str, Any]]:
+    async def get_member(self, session: aiohttp.ClientSession, member_id: int) -> Optional[dict[str, Any]]:
         """
         Fetch individual member details.
 
@@ -957,11 +1018,7 @@ class Client:
         """
         return await self.fetch_json(session, "/account")
 
-    async def add_favorite(
-        self,
-        session: aiohttp.ClientSession,
-        message_id: int
-    ) -> bool:
+    async def add_favorite(self, session: aiohttp.ClientSession, message_id: int) -> bool:
         """
         Add a message to favorites (server-side).
 
@@ -976,11 +1033,7 @@ class Client:
         # API returns {} on success
         return result is not None
 
-    async def remove_favorite(
-        self,
-        session: aiohttp.ClientSession,
-        message_id: int
-    ) -> bool:
+    async def remove_favorite(self, session: aiohttp.ClientSession, message_id: int) -> bool:
         """
         Remove a message from favorites (server-side).
 

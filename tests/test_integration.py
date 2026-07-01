@@ -22,8 +22,8 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
         not get_auth_dir().exists() or not any(get_auth_dir().iterdir()),
-        reason="No auth_data present. Login first with CLI."
-    )
+        reason="No auth_data present. Login first with CLI.",
+    ),
 ]
 
 
@@ -48,15 +48,11 @@ class TestHeadlessRefresh:
         # Try with first available group that has auth
         for group in Group:
             try:
-                result = await BrowserAuth.refresh_token_headless(
-                    group=group,
-                    auth_dir=auth_dir,
-                    auto_install=True
-                )
-                if result and result.get('access_token'):
+                result = await BrowserAuth.refresh_token_headless(group=group, auth_dir=auth_dir, auto_install=True)
+                if result and result.get("access_token"):
                     # Verify token structure
-                    assert result['access_token'].startswith('eyJ')  # JWT format
-                    assert 'cookies' in result
+                    assert result["access_token"].startswith("eyJ")  # JWT format
+                    assert "cookies" in result
                     print(f"✅ Headless refresh successful for {group.value}")
                     return
             except Exception as e:
@@ -73,11 +69,7 @@ class TestHeadlessRefresh:
 
         for group in Group:
             try:
-                result = await BrowserAuth.refresh_token_headless(
-                    group=group,
-                    auth_dir=auth_dir,
-                    auto_install=True
-                )
+                result = await BrowserAuth.refresh_token_headless(group=group, auth_dir=auth_dir, auto_install=True)
                 if result:
                     # If we got here, either chromium was installed or auto-installed
                     print(f"✅ Playwright chromium functional for {group.value}")
@@ -101,11 +93,9 @@ class TestAPIIntegration:
         for group in Group:
             try:
                 session_data = token_manager.load_session(group.value)
-                if session_data and session_data.get('access_token'):
+                if session_data and session_data.get("access_token"):
                     client = Client(
-                        group=group,
-                        access_token=session_data['access_token'],
-                        auth_dir=str(get_auth_dir())
+                        group=group, access_token=session_data["access_token"], auth_dir=str(get_auth_dir())
                     )
 
                     async with aiohttp.ClientSession() as session:
@@ -114,8 +104,8 @@ class TestAPIIntegration:
                         # Verify response structure
                         assert isinstance(groups, list)
                         if groups:
-                            assert 'id' in groups[0]
-                            assert 'name' in groups[0]
+                            assert "id" in groups[0]
+                            assert "name" in groups[0]
                             print(f"✅ Fetched {len(groups)} groups from {group.value}")
                         return
             except Exception as e:
@@ -136,6 +126,7 @@ class TestStoragePaths:
         assert user_dir.is_dir()
         # Check platform-specific path
         import platform
+
         if platform.system() == "Windows":
             assert "AppData" in str(user_dir)
         elif platform.system() == "Darwin":

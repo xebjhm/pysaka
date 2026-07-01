@@ -132,9 +132,9 @@ class TestHinatazakaBlogScraperAsync:
         assert len(members) >= 1
         # Check first member has proper fields
         if members:
-            assert hasattr(members[0], 'id')
-            assert hasattr(members[0], 'name')
-            assert hasattr(members[0], 'thumbnail_url')
+            assert hasattr(members[0], "id")
+            assert hasattr(members[0], "name")
+            assert hasattr(members[0], "thumbnail_url")
 
     @pytest.mark.asyncio
     async def test_get_blogs_metadata_single_page(self, scraper, mock_session):
@@ -388,7 +388,7 @@ class TestNogizakaBlogScraperAsync:
     @pytest.mark.asyncio
     async def test_get_blogs_metadata_from_api(self, scraper, mock_session):
         """Test fetching blog metadata from JSONP API."""
-        jsonp = '''res({"count":"1","data":[{
+        jsonp = """res({"count":"1","data":[{
             "code":"104268",
             "title":"Test Blog",
             "text":"<p>Content</p>",
@@ -396,7 +396,7 @@ class TestNogizakaBlogScraperAsync:
             "link":"https://www.nogizaka46.com/s/n46/diary/detail/104268",
             "name":"久保史緒里",
             "arti_code":"55401"
-        }]})'''
+        }]})"""
 
         empty_jsonp = 'res({"count":"0","data":[]})'
 
@@ -416,7 +416,7 @@ class TestNogizakaBlogScraperAsync:
     @pytest.mark.asyncio
     async def test_get_blog_detail_from_api(self, scraper, mock_session):
         """Test fetching blog detail from JSONP API."""
-        jsonp = '''res({"count":"1","data":[{
+        jsonp = """res({"count":"1","data":[{
             "code":"104268",
             "title":"Full Blog Title",
             "text":"<p>Full content with <img src=\\"/files/img.jpg\\"/></p>",
@@ -425,7 +425,7 @@ class TestNogizakaBlogScraperAsync:
             "name":"久保史緒里",
             "arti_code":"55401",
             "img":"https://www.nogizaka46.com/files/main.jpg"
-        }]})'''
+        }]})"""
 
         mock_session.get.return_value = MockResponse(text=jsonp, status=200)
 

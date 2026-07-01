@@ -49,7 +49,7 @@ class TestPostJson:
         mock_session = MagicMock()
         mock_session.post = MagicMock(side_effect=[mock_response_401, mock_response_200])
 
-        with patch.object(client, 'refresh_access_token', new_callable=AsyncMock) as mock_refresh:
+        with patch.object(client, "refresh_access_token", new_callable=AsyncMock) as mock_refresh:
             mock_refresh.return_value = True
             result = await client.post_json(mock_session, "/test/endpoint")
             assert result == {"refreshed": True}
@@ -66,7 +66,7 @@ class TestPostJson:
         mock_session = MagicMock()
         mock_session.post = MagicMock(return_value=mock_response)
 
-        with patch.object(client, 'refresh_access_token', new_callable=AsyncMock) as mock_refresh:
+        with patch.object(client, "refresh_access_token", new_callable=AsyncMock) as mock_refresh:
             mock_refresh.return_value = False
             result = await client.post_json(mock_session, "/test/endpoint")
             assert result is None
@@ -162,7 +162,7 @@ class TestDeleteJson:
         mock_session = MagicMock()
         mock_session.delete = MagicMock(side_effect=[mock_response_401, mock_response_200])
 
-        with patch.object(client, 'refresh_access_token', new_callable=AsyncMock) as mock_refresh:
+        with patch.object(client, "refresh_access_token", new_callable=AsyncMock) as mock_refresh:
             mock_refresh.return_value = True
             result = await client.delete_json(mock_session, "/test/endpoint")
             assert result is True
@@ -178,7 +178,7 @@ class TestDeleteJson:
         mock_session = MagicMock()
         mock_session.delete = MagicMock(return_value=mock_response)
 
-        with patch.object(client, 'refresh_access_token', new_callable=AsyncMock) as mock_refresh:
+        with patch.object(client, "refresh_access_token", new_callable=AsyncMock) as mock_refresh:
             mock_refresh.return_value = False
             result = await client.delete_json(mock_session, "/test/endpoint")
             assert result is False
@@ -219,7 +219,7 @@ class TestGetLetters:
         """Test get_letters returns letters list."""
         mock_letters = [{"id": 1, "content": "Letter 1"}, {"id": 2, "content": "Letter 2"}]
 
-        with patch.object(client, 'fetch_json', new_callable=AsyncMock) as mock_fetch:
+        with patch.object(client, "fetch_json", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = {"letters": mock_letters}
             result = await client.get_letters(MagicMock(), 123)
             assert result == mock_letters
@@ -230,7 +230,7 @@ class TestGetLetters:
     @pytest.mark.asyncio
     async def test_get_letters_with_updated_from(self, client):
         """Test get_letters passes updated_from parameter."""
-        with patch.object(client, 'fetch_json', new_callable=AsyncMock) as mock_fetch:
+        with patch.object(client, "fetch_json", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = {"letters": []}
             await client.get_letters(MagicMock(), 123, updated_from="2024-01-01T00:00:00Z")
             call_args = mock_fetch.call_args
@@ -240,7 +240,7 @@ class TestGetLetters:
     @pytest.mark.asyncio
     async def test_get_letters_empty(self, client):
         """Test get_letters returns empty list when no letters."""
-        with patch.object(client, 'fetch_json', new_callable=AsyncMock) as mock_fetch:
+        with patch.object(client, "fetch_json", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = None
             result = await client.get_letters(MagicMock(), 123)
             assert result == []
@@ -258,7 +258,7 @@ class TestGetPastMessages:
         """Test get_past_messages returns messages list."""
         mock_messages = [{"id": 1, "content": "Old message"}]
 
-        with patch.object(client, 'fetch_json', new_callable=AsyncMock) as mock_fetch:
+        with patch.object(client, "fetch_json", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = {"messages": mock_messages}
             result = await client.get_past_messages(MagicMock(), 123)
             assert result == mock_messages
@@ -266,7 +266,7 @@ class TestGetPastMessages:
     @pytest.mark.asyncio
     async def test_get_past_messages_empty(self, client):
         """Test get_past_messages returns empty list when no messages."""
-        with patch.object(client, 'fetch_json', new_callable=AsyncMock) as mock_fetch:
+        with patch.object(client, "fetch_json", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = {}
             result = await client.get_past_messages(MagicMock(), 123)
             assert result == []
@@ -285,7 +285,7 @@ class TestGetSubscriptionStreak:
         mock_streak = {"consecutive_days": 30, "start_date": "2024-01-01"}
         mock_session = MagicMock()
 
-        with patch.object(client, 'fetch_json', new_callable=AsyncMock) as mock_fetch:
+        with patch.object(client, "fetch_json", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = mock_streak
             result = await client.get_subscription_streak(mock_session, 123)
             assert result == mock_streak
@@ -306,7 +306,7 @@ class TestGetMember:
         """Test get_member returns member data."""
         mock_member = {"id": 123, "name": "Test Member"}
 
-        with patch.object(client, 'fetch_json', new_callable=AsyncMock) as mock_fetch:
+        with patch.object(client, "fetch_json", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = mock_member
             result = await client.get_member(MagicMock(), 123)
             assert result == mock_member
@@ -325,7 +325,7 @@ class TestGetAccount:
         mock_account = {"id": 1, "email": "test@example.com"}
         mock_session = MagicMock()
 
-        with patch.object(client, 'fetch_json', new_callable=AsyncMock) as mock_fetch:
+        with patch.object(client, "fetch_json", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = mock_account
             result = await client.get_account(mock_session)
             assert result == mock_account
@@ -344,7 +344,7 @@ class TestAddFavorite:
     @pytest.mark.asyncio
     async def test_add_favorite_success(self, client):
         """Test add_favorite returns True on success."""
-        with patch.object(client, 'post_json', new_callable=AsyncMock) as mock_post:
+        with patch.object(client, "post_json", new_callable=AsyncMock) as mock_post:
             mock_post.return_value = {}  # API returns empty object on success
             result = await client.add_favorite(MagicMock(), 123)
             assert result is True
@@ -353,7 +353,7 @@ class TestAddFavorite:
     @pytest.mark.asyncio
     async def test_add_favorite_failure(self, client):
         """Test add_favorite returns False on failure."""
-        with patch.object(client, 'post_json', new_callable=AsyncMock) as mock_post:
+        with patch.object(client, "post_json", new_callable=AsyncMock) as mock_post:
             mock_post.return_value = None
             result = await client.add_favorite(MagicMock(), 123)
             assert result is False
@@ -369,7 +369,7 @@ class TestRemoveFavorite:
     @pytest.mark.asyncio
     async def test_remove_favorite_success(self, client):
         """Test remove_favorite returns True on success."""
-        with patch.object(client, 'delete_json', new_callable=AsyncMock) as mock_delete:
+        with patch.object(client, "delete_json", new_callable=AsyncMock) as mock_delete:
             mock_delete.return_value = True
             result = await client.remove_favorite(MagicMock(), 123)
             assert result is True
@@ -377,7 +377,7 @@ class TestRemoveFavorite:
     @pytest.mark.asyncio
     async def test_remove_favorite_failure(self, client):
         """Test remove_favorite returns False on failure."""
-        with patch.object(client, 'delete_json', new_callable=AsyncMock) as mock_delete:
+        with patch.object(client, "delete_json", new_callable=AsyncMock) as mock_delete:
             mock_delete.return_value = False
             result = await client.remove_favorite(MagicMock(), 123)
             assert result is False

@@ -138,11 +138,13 @@ class NogizakaBlogScraper(BaseBlogScraper):
                     if member.get("img"):
                         thumbnail_url = self.normalize_url(member["img"])
 
-                    members.append(MemberInfo(
-                        id=member["code"],
-                        name=member["name"],
-                        thumbnail_url=thumbnail_url,
-                    ))
+                    members.append(
+                        MemberInfo(
+                            id=member["code"],
+                            name=member["name"],
+                            thumbnail_url=thumbnail_url,
+                        )
+                    )
                 return members
             except (ValueError, json.JSONDecodeError) as e:
                 logger.warning(
@@ -430,4 +432,3 @@ class NogizakaBlogScraper(BaseBlogScraper):
             member_id=artist_code,
             member_name=member_name,
         )
-

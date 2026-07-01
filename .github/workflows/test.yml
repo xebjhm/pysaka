@@ -28,6 +28,6 @@ jobs:
 
     - name: Run Tests
       run: uv run pytest
-    
+
     - name: Run Benchmarks (Check)
       run: uv run pytest --benchmark-only

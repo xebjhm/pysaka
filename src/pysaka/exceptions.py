@@ -3,17 +3,23 @@ from typing import Optional
 
 class SakaError(Exception):
     """Base exception for pysaka library."""
+
     pass
+
 
 class AuthError(SakaError):
     """Authentication related errors."""
+
     pass
+
 
 class ApiError(SakaError):
     """API request related errors."""
+
     def __init__(self, message: str, status_code: Optional[int] = None):
         super().__init__(message)
         self.status_code = status_code
+
 
 class SessionExpiredError(AuthError):
     """
@@ -25,6 +31,7 @@ class SessionExpiredError(AuthError):
 
     User message: "Authentication session has expired. Please log in again to continue using the service."
     """
+
     pass
 
 
@@ -38,4 +45,5 @@ class RefreshFailedError(AuthError):
     User message: "Authentication failed unexpectedly. Please log in again to continue using the service."
     Optional: Include "Report issue" action since this is unexpected.
     """
+
     pass
