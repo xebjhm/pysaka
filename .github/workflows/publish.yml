@@ -60,3 +60,8 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         # No API token needed - uses trusted publishing via OIDC
+        with:
+          # This workflow fires on BOTH the version-tag push and the GitHub
+          # Release publish for the same version. skip-existing makes the second
+          # run a graceful no-op instead of failing on a duplicate upload.
+          skip-existing: true
