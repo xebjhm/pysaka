@@ -65,3 +65,34 @@ jobs:
           # Release publish for the same version. skip-existing makes the second
           # run a graceful no-op instead of failing on a duplicate upload.
           skip-existing: true
+
+  github-release:
+    name: Create GitHub Release
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    # Only on the tag push. Creating a Release fires a `release: published`
+    # event that re-runs this workflow; guarding to the push event stops this
+    # job from looping (and PyPI publish above is idempotent via skip-existing).
+    if: github.event_name == 'push'
+    permissions:
+      contents: write  # required to create a GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          # Pull just this version's section out of CHANGELOG.md for the notes
+          # (from the "## [X.Y.Z]" heading up to the next "## [" heading).
+          NOTES=$(awk -v tag="## [$VERSION]" 'index($0, tag){f=1; next} /^## \[/{if(f) exit} f' CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            NOTES="See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md) and https://pypi.org/project/pysaka/${VERSION}/"
+          fi
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "pysaka $VERSION" \
+            --verify-tag \
+            --notes "$NOTES"
