@@ -187,6 +187,40 @@ Each scraper provides:
 - `RefreshFailedError`: All token refresh attempts failed unexpectedly.
 - `BlogGoneError`: Blog post has been permanently removed (HTTP 404/410).
 
+## Knowledge engine (`pysaka.knowledge`)
+
+`pysaka.knowledge` provides grounded, cited member Q&A over ingested blogs and
+messages: clean and ingest source documents into `Document`s, chunk and index
+them (a pure `PureLexicalIndex` plus an optional vector store behind the
+`Embedder`/`VectorStore` protocols), retrieve with a hybrid RRF ranker
+(`HybridRetriever`), and answer questions through a bounded, tool-using
+`KnowledgeAgent` whose output is checked by `validate()` against the actually
+retrieved evidence — sentences with no supporting citation are dropped.
+
+Key public types: `Document`, `Member`, `SourceRef`, `Chunk`, `Scope`,
+`SearchFilters`, `Hit`, `Citation`, `AnswerSentence`, `Answer`,
+`MemberRegistry`, `AliasTable`, `MentionDetector`, `DocumentStore`,
+`PureLexicalIndex`, `HybridRetriever`, `KnowledgeAgent`, and the
+`Embedder` / `VectorStore` / `LexicalIndex` protocols that keep `pysaka.knowledge`
+itself dependency-free. All of the above import from `pysaka.knowledge` directly.
+
+```python
+from pysaka.knowledge import DocumentStore, PureLexicalIndex, HybridRetriever, KnowledgeAgent
+```
+
+The ONNX embedder and numpy-backed vector store are an optional extra and are
+**not** imported by `pysaka.knowledge` itself — install them explicitly and
+import from `pysaka.knowledge.backends`:
+
+```bash
+uv add "pysaka[embeddings]"
+```
+
+```python
+from pysaka.knowledge.backends.onnx_embedder import OnnxEmbedder
+from pysaka.knowledge.backends.numpy_store import NumpyVectorStore
+```
+
 ## Contributing
 Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
