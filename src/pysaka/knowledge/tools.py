@@ -15,6 +15,7 @@ from dataclasses import asdict
 from datetime import datetime
 
 from .aliases import AliasTable
+from .cleaner import normalize_text
 from .llm import ToolCall
 from .models import Document, Hit, Scope, SearchFilters
 from .registry import MemberRegistry
@@ -80,7 +81,13 @@ TOOL_SCHEMAS: list[dict] = [
                     "type": "string",
                     "description": "Filter to posts/messages written by this member (name, nickname, or canonical id).",
                 },
-                "query": {"type": "string", "description": "Free-text filter (structured match only, not ranked)."},
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Free-text filter: keeps only documents whose normalized text contains this "
+                        "(normalized) substring. Not ranked -- use `search` for relevance ranking."
+                    ),
+                },
                 "date_from": {"type": "string", "description": "ISO 8601 start date/time, inclusive."},
                 "date_to": {"type": "string", "description": "ISO 8601 end date/time, inclusive."},
                 "type": {"type": "string", "description": "Document type filter, e.g. blog, text_msg, picture_msg."},
@@ -109,16 +116,26 @@ class ToolRunner:
         self._store = store
 
     def run(self, call: ToolCall, scope: Scope) -> dict:
-        """Dispatch `call` (by `call.name`, args in `call.arguments`) and return a JSON-serializable dict."""
-        if call.name == "resolve_member":
-            return self._resolve_member(call.arguments, scope)
-        if call.name == "search":
-            return self._search(call.arguments, scope)
-        if call.name == "get_document":
-            return self._get_document(call.arguments)
-        if call.name == "aggregate":
-            return self._aggregate(call.arguments, scope)
-        return {"error": f"unknown tool: {call.name}"}
+        """Dispatch `call` (by `call.name`, args in `call.arguments`) and return a JSON-serializable dict.
+
+        Malformed args -- a missing required key (`KeyError`) or an unparseable ISO date
+        (`ValueError` from `datetime.fromisoformat`) -- are caught and turned into an
+        `{"error": ...}` dict rather than propagating, so a bad LLM tool call can't crash
+        the agent loop (Task 14). The explicit error shapes below (unknown tool,
+        `get_document` not-found) are unaffected since they return rather than raise.
+        """
+        try:
+            if call.name == "resolve_member":
+                return self._resolve_member(call.arguments, scope)
+            if call.name == "search":
+                return self._search(call.arguments, scope)
+            if call.name == "get_document":
+                return self._get_document(call.arguments)
+            if call.name == "aggregate":
+                return self._aggregate(call.arguments, scope)
+            return {"error": f"unknown tool: {call.name}"}
+        except (KeyError, ValueError) as exc:
+            return {"error": str(exc) or f"invalid arguments for tool: {call.name}"}
 
     def _resolve_member(self, args: dict, scope: Scope) -> dict:
         canonical_ids = self._aliases.resolve(args["text"], scope)
@@ -177,15 +194,21 @@ class ToolRunner:
         }
 
     def _aggregate(self, args: dict, scope: Scope) -> dict:
+        query = args.get("query")
         filters = SearchFilters(
             scope=scope,
             author_id=self._resolve_person_arg(args.get("author"), scope),
-            query=args.get("query"),
+            query=query,
             date_from=_parse_datetime(args.get("date_from")),
             date_to=_parse_datetime(args.get("date_to")),
             type=args.get("type"),
         )
         docs = self._store.filter(filters)
+        if query:
+            # `store.filter` never applies `filters.query` (see store.py); apply it here as a
+            # normalized substring match so `aggregate`'s advertised `query` filter isn't a no-op.
+            normalized_query = normalize_text(query)
+            docs = [doc for doc in docs if normalized_query in normalize_text(doc.text)]
         return {"count": len(docs), "by_bucket": _bucket_counts(docs, args.get("group_by"))}
 
 
