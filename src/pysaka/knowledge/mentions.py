@@ -34,21 +34,29 @@ class MentionDetector:
 
     def __init__(self, alias_entries: list[tuple[str, CanonicalId]]) -> None:
         self._automaton: ahocorasick.Automaton = ahocorasick.Automaton()
+        by_alias: dict[str, set[CanonicalId]] = {}
         for alias, canonical_id in alias_entries:
             if alias == SUBSCRIBER_SENTINEL:
                 continue
-            self._automaton.add_word(alias, (alias, canonical_id))
+            by_alias.setdefault(alias, set()).add(canonical_id)
+        for alias, canonical_ids in by_alias.items():
+            self._automaton.add_word(alias, (alias, tuple(sorted(canonical_ids))))
         self._automaton.make_automaton()
 
     def detect(self, text: str, author_id: CanonicalId) -> list[CanonicalId]:
-        """Distinct, sorted canonical ids mentioned in `text`, excluding `author_id` (self-mentions)."""
+        """Distinct, sorted canonical ids mentioned in `text`, excluding `author_id` (self-mentions).
+
+        An alias may be ambiguous (map to multiple canonical ids, e.g. two members sharing a
+        nickname); all non-self candidates for a matched alias are kept (spec §6.4).
+        """
         found: set[CanonicalId] = set()
-        for end_index, (alias, canonical_id) in self._automaton.iter(text):
-            if canonical_id == author_id:
-                continue
+        for end_index, (alias, canonical_ids) in self._automaton.iter(text):
             if self._is_guarded_false_positive(text, alias, end_index):
                 continue
-            found.add(canonical_id)
+            for canonical_id in canonical_ids:
+                if canonical_id == author_id:
+                    continue
+                found.add(canonical_id)
         return sorted(found)
 
     @staticmethod

@@ -37,3 +37,13 @@ def test_sentinel_alias_is_skipped():
     entries = [(SUBSCRIBER_SENTINEL, "g:12"), ("かとし", "g:20")]
     d = MentionDetector(entries)
     assert d.detect(f"{SUBSCRIBER_SENTINEL}とかとし", author_id="g:99") == ["g:20"]
+
+
+def test_ambiguous_alias_preserves_both_members():
+    # Same alias string maps to two distinct members (spec §6.4: "an alias that maps to
+    # two members stores both") — must not be lost to pyahocorasick's last-write-wins.
+    entries = [("さくちゃん", "g:46"), ("さくちゃん", "g:99")]
+    d = MentionDetector(entries)
+    assert d.detect("さくちゃんだね", author_id="g:1") == ["g:46", "g:99"]
+    # Self excluded, ambiguous partner still kept.
+    assert d.detect("さくちゃんだね", author_id="g:46") == ["g:99"]
