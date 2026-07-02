@@ -35,10 +35,16 @@ dependencies = [
     "tzdata>=2025.3",
     "Pillow>=10.0.0",
     "pymediainfo>=6.0.0",
+    "pyahocorasick>=2.2.0",
 ]
 
 [project.optional-dependencies]
 headless = ["keyrings.alt>=4.0"]
+embeddings = [
+    "numpy>=1.24",
+    "onnxruntime>=1.17",
+    "tokenizers>=0.15",
+]
 
 [project.urls]
 Homepage = "https://github.com/xebjhm/pysaka"
@@ -123,3 +129,8 @@ module = [
     "pysaka.auth",
 ]
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true

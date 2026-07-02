@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `pysaka.knowledge`: a new, UI-agnostic engine for grounded, cited member
+  Q&A over ingested blogs and messages. Includes document cleaning/ingestion
+  (`html_to_text`, `normalize_text`, `ingest_blog`, `ingest_messages`),
+  member/alias resolution and mention detection (`MemberRegistry`,
+  `AliasTable`, `MentionDetector`), chunking (`chunk_documents`), a pure
+  lexical index (`PureLexicalIndex`) and hybrid RRF retriever
+  (`HybridRetriever`) behind `Embedder`/`VectorStore`/`LexicalIndex`
+  protocols, a bounded tool-using `KnowledgeAgent`, and an evidence
+  `validate()` gate that drops any answer sentence not grounded in the
+  retrieved citations.
+- New optional `pysaka[embeddings]` extra (`numpy`, `onnxruntime`,
+  `tokenizers`) providing `pysaka.knowledge.backends`: an ONNX-based
+  `OnnxEmbedder` and a numpy-backed `NumpyVectorStore`. Not imported by
+  `pysaka.knowledge` itself, so the default install stays lean.
+
 ## [0.4.0] - 2026-07-01
 
 ### Added
