@@ -159,6 +159,31 @@ def test_search_relevant_restricts_ranking_to_filtered_scope():
     assert [hit.doc_id for hit in hits] == [in_scope.doc_id]
 
 
+def test_index_lexical_rehydrates_relevant_search_without_re_embedding_passages():
+    # Simulate app startup: the vectors are ALREADY persisted (added straight to the vector
+    # store, as SqliteKnowledgeStore does on open), so rehydration must reconstruct the
+    # lexical index + chunk/doc bookkeeping WITHOUT re-embedding the corpus. The embedder
+    # here knows ONLY the query vector -- if `index_lexical` embedded any passage it would
+    # KeyError, which is exactly the guarantee we want.
+    store = DocumentStore()
+    matches = _doc("blog:hinatazaka46:a", text="今日はライブに行きました")
+    other = _doc("blog:hinatazaka46:b", text="映画を見ました")
+    store.upsert([matches, other])
+
+    vectors = FakeVectorStore()  # persisted vectors, keyed by the exact chunk_ids _chunk() makes
+    vectors.add([f"{matches.doc_id}#0"], [[1.0, 0.0]])
+    vectors.add([f"{other.doc_id}#0"], [[0.0, 1.0]])
+    embedder = FakeEmbedder({"ライブ": [1.0, 0.0]})  # ONLY the query -- no passage vectors exist
+
+    retriever = HybridRetriever(store, PureLexicalIndex(), vectors, embedder)
+    retriever.index_lexical([_chunk(matches.doc_id, matches.text), _chunk(other.doc_id, other.text)])
+
+    hits = retriever.search(_filters(query="ライブ", sort="relevant", limit=5))
+
+    # Ranked via the persisted vector + the rehydrated lexical index, with no corpus re-embed.
+    assert [hit.doc_id for hit in hits] == [matches.doc_id]
+
+
 # --- search: structured filters (author_id) -------------------------------
 
 

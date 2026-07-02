@@ -41,15 +41,27 @@ class HybridRetriever:
         self._doc_to_chunks: dict[str, list[str]] = {}
         self._chunk_text: dict[str, str] = {}
 
-    def index(self, chunks: list[Chunk]) -> None:
-        """Add `chunks` to both the lexical and vector backends, recording doc/chunk maps."""
+    def index_lexical(self, chunks: list[Chunk]) -> None:
+        """Populate the lexical index + chunk/doc bookkeeping WITHOUT embedding.
+
+        For rehydrating a retriever over a persisted `VectorStore` whose vectors are
+        already keyed by these exact `chunk_id`s (e.g. on app startup): re-chunking the
+        persisted docs deterministically and calling this reconstructs everything
+        `search()` needs for `sort="relevant"` without paying to re-embed the corpus.
+        The caller is responsible for the vectors already being present in `self._vectors`.
+        """
         for chunk in chunks:
             self._lexical.add(chunk.chunk_id, chunk.text)
-            vector = self._embedder.embed([chunk.context_text], kind="passage")[0]
-            self._vectors.add([chunk.chunk_id], [vector])
             self._chunk_to_doc[chunk.chunk_id] = chunk.doc_id
             self._doc_to_chunks.setdefault(chunk.doc_id, []).append(chunk.chunk_id)
             self._chunk_text[chunk.chunk_id] = chunk.text
+
+    def index(self, chunks: list[Chunk]) -> None:
+        """Add `chunks` to both the lexical and vector backends, recording doc/chunk maps."""
+        self.index_lexical(chunks)
+        for chunk in chunks:
+            vector = self._embedder.embed([chunk.context_text], kind="passage")[0]
+            self._vectors.add([chunk.chunk_id], [vector])
         logger.debug("hybrid_retriever.indexed", chunk_count=len(chunks))
 
     def search(self, filters: SearchFilters) -> list[Hit]:
