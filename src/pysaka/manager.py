@@ -13,7 +13,7 @@ import structlog
 
 from .client import Client
 from .media import get_audio_metadata, get_media_dimensions
-from .utils import get_media_extension, normalize_message, sanitize_name
+from .utils import get_media_extension, media_file_is_present, normalize_message, sanitize_name
 
 logger = structlog.get_logger()
 
@@ -379,10 +379,7 @@ class SyncManager:
                     filepath = member_dir / subdir / f"{msg['id']}.{ext}"
 
                     # Compute presence the same way scan_member_media does: absent OR zero-byte = missing.
-                    try:
-                        media_present = filepath.exists() and filepath.stat().st_size > 0
-                    except OSError:
-                        media_present = False
+                    media_present = media_file_is_present(filepath)
 
                     # Logic: If file doesn't exist or is zero-byte, queue it.
                     if not media_present:
@@ -459,10 +456,7 @@ class SyncManager:
                 continue
             result["checked"] += 1
             path = self.output_dir / media_file
-            try:
-                present = path.exists() and path.stat().st_size > 0
-            except OSError:
-                present = False
+            present = media_file_is_present(path)
             if not present:
                 result["missing"].append(
                     {
@@ -628,10 +622,7 @@ class SyncManager:
         # is now present and non-empty.
         for item in queue:
             p = item["path"]
-            try:
-                ok = p.exists() and p.stat().st_size > 0
-            except OSError:
-                ok = False
+            ok = media_file_is_present(p)
             if ok:
                 report["repaired"] += 1
             else:

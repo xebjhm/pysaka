@@ -11,7 +11,7 @@ import structlog
 
 from .credentials import get_token_manager
 from .exceptions import ApiError, RefreshFailedError, SessionExpiredError
-from .utils import get_jwt_remaining_seconds, get_media_extension
+from .utils import get_jwt_remaining_seconds, get_media_extension, media_file_is_present
 
 logger = structlog.get_logger()
 
@@ -705,7 +705,7 @@ class Client:
         if not url:
             return True
         # A zero-byte stub from a past truncated write is NOT complete.
-        if filepath.exists() and filepath.stat().st_size > 0:
+        if media_file_is_present(filepath):
             return True
 
         filepath.parent.mkdir(parents=True, exist_ok=True)
