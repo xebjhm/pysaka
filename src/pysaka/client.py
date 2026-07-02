@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import os
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -675,34 +677,69 @@ class Client:
         return sorted(all_messages.values(), key=lambda x: x["id"])
 
     async def download_file(
-        self, session: aiohttp.ClientSession, url: str, filepath: Path, timestamp: Optional[str] = None
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        filepath: Path,
+        timestamp: Optional[str] = None,
+        *,
+        retries: int = 3,
     ) -> bool:
         """
-        Download a file from a URL to the local filesystem.
+        Download a file to disk safely: write to a ``*.part`` temp then atomically
+        rename. Validates the body is non-empty and (when the server sends
+        ``Content-Length``) matches the declared size. Retries transient failures
+        with a short backoff. On ultimate failure leaves NO file behind — a prior
+        truncated/0-byte stub is treated as missing and re-downloaded.
 
         Args:
             session: Active aiohttp ClientSession.
             url: The download URL.
             filepath: Destination Path object.
-            timestamp: Optional ISO timestamp (unused currently, reserved for future use).
+            timestamp: Optional ISO timestamp (reserved; unused).
+            retries: Max attempts before giving up.
 
         Returns:
-            True if successful or already exists, False on failure.
+            True if a non-empty file exists at ``filepath`` afterward, else False.
         """
-        if not url or filepath.exists():
+        if not url:
+            return True
+        # A zero-byte stub from a past truncated write is NOT complete.
+        if filepath.exists() and filepath.stat().st_size > 0:
             return True
 
-        try:
-            filepath.parent.mkdir(parents=True, exist_ok=True)
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    async with aiofiles.open(filepath, "wb") as f:
-                        await f.write(await resp.read())
-                    return True
-                else:
-                    logger.warning(f"Download failed {resp.status} for {url}")
-        except Exception as e:
-            logger.error(f"Error downloading {url}: {e}")
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        tmp = filepath.with_name(filepath.name + ".part")
+        last_err: Optional[str] = None
+
+        for attempt in range(retries):
+            try:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        last_err = f"status {resp.status}"
+                        logger.warning("Download failed", status=resp.status, url=url)
+                    else:
+                        data = await resp.read()
+                        declared = resp.headers.get("Content-Length")
+                        if not data:
+                            last_err = "empty body"
+                        elif declared is not None and declared.isdigit() and int(declared) != len(data):
+                            last_err = f"size mismatch got={len(data)} declared={declared}"
+                        else:
+                            async with aiofiles.open(tmp, "wb") as f:
+                                await f.write(data)
+                            os.replace(tmp, filepath)
+                            return True
+            except Exception as e:  # noqa: BLE001 - transient network errors are retried
+                last_err = str(e)
+                logger.warning("Download error (will retry)", url=url, error=str(e), attempt=attempt + 1)
+
+            if attempt < retries - 1:
+                await asyncio.sleep(0.5 * (attempt + 1))
+
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        logger.error("Download ultimately failed", url=url, error=str(last_err))
         return False
 
     async def download_message_media(
