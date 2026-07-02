@@ -217,7 +217,9 @@ class SyncManager:
                 return 0
 
             # Process & Prepare
-            processed, earliest_failed_ts = self.prepare_messages(messages, member_dir, media_queue)
+            processed, earliest_failed_ts, earliest_pending_media_ts = self.prepare_messages(
+                messages, member_dir, media_queue
+            )
 
             # Load existing
             existing_file = member_dir / "messages.json"
@@ -312,6 +314,11 @@ class SyncManager:
             # no timestamp clamps to "" (full re-fetch) — safe over lossy.
             if earliest_failed_ts is not None and newest_ts is not None:
                 newest_ts = min(newest_ts, earliest_failed_ts)
+            # Also hold the cursor behind any message whose media is still queued
+            # (not yet confirmed on disk). If the media phase is interrupted, the
+            # next timestamp-filtered sync re-fetches these messages and re-downloads.
+            if earliest_pending_media_ts is not None and newest_ts is not None:
+                newest_ts = min(newest_ts, earliest_pending_media_ts)
             self.update_sync_state(gid, mid, max_id, len(merged), last_ts=newest_ts)
 
             return len(processed)
@@ -322,7 +329,7 @@ class SyncManager:
 
     def prepare_messages(
         self, messages: list[dict[str, Any]], member_dir: Path, queue: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], Optional[str]]:
+    ) -> tuple[list[dict[str, Any]], Optional[str], Optional[str]]:
         """
         Normalize messages and queue media downloads.
 
@@ -332,16 +339,20 @@ class SyncManager:
             queue: Media download waiting queue.
 
         Returns:
-            A tuple ``(processed, earliest_failed_ts)``. ``processed`` is the list
-            of normalized message dicts. ``earliest_failed_ts`` is the
-            ``published_at`` of the oldest message that failed to normalize (``""``
-            if such a message had no timestamp), or ``None`` if every message
-            processed. The caller must not advance the sync cursor to or past
+            A tuple ``(processed, earliest_failed_ts, earliest_pending_media_ts)``.
+            ``processed`` is the list of normalized message dicts.
+            ``earliest_failed_ts`` is the ``published_at`` of the oldest message that
+            failed to normalize (``""`` if such a message had no timestamp), or ``None``
+            if every message processed. The caller must not advance the sync cursor to or past
             ``earliest_failed_ts`` — doing so would drop the failed message
             permanently on the next timestamp-filtered sync.
+            ``earliest_pending_media_ts`` is the ``published_at`` (or ``""`` if none) of
+            the oldest message whose media was queued for download; ``None`` if no media
+            was queued. The caller must not advance the cursor past it.
         """
         processed = []
         earliest_failed_ts: Optional[str] = None
+        earliest_pending_media_ts: Optional[str] = None
         for msg in messages:
             try:
                 # Normalize core fields
@@ -376,6 +387,11 @@ class SyncManager:
                                 "member_dir": member_dir,
                             }
                         )
+                        # Hold the cursor behind this message until its media is on
+                        # disk, so an interrupted download is re-fetched next run.
+                        pending_ts = msg.get("published_at") or ""
+                        if earliest_pending_media_ts is None or pending_ts < earliest_pending_media_ts:
+                            earliest_pending_media_ts = pending_ts
 
                     p_msg["media_file"] = str(filepath.relative_to(self.output_dir))
 
@@ -401,7 +417,7 @@ class SyncManager:
                 if earliest_failed_ts is None or failed_ts < earliest_failed_ts:
                     earliest_failed_ts = failed_ts
                 logger.error("Prepare error", message_id=mid, error=str(e))
-        return processed, earliest_failed_ts
+        return processed, earliest_failed_ts, earliest_pending_media_ts
 
     async def process_media_queue(
         self,

@@ -238,3 +238,40 @@ async def test_sync_member_prefetched_empty_returns_zero(sync_manager):
 
     assert count == 0
     sync_manager.client.get_messages.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cursor_held_behind_message_with_undownloaded_media(sync_manager):
+    """A queued-but-not-downloaded image must hold the cursor behind it, even
+    when a newer text message exists — so an interrupted media phase self-heals."""
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp"}
+    member = {"id": 10, "name": "Mem"}
+    queue: list = []
+    prefetched = [
+        {"id": 100, "type": "text", "text": "hi", "member_id": 10, "published_at": "2026-01-01T00:00:00Z"},
+        {"id": 101, "type": "image", "file": "http://img.jpg", "member_id": 10, "published_at": "2026-01-02T00:00:00Z"},
+        {"id": 102, "type": "text", "text": "newest", "member_id": 10, "published_at": "2026-01-03T00:00:00Z"},
+    ]
+    await sync_manager.sync_member(session, group, member, queue, prefetched_messages=prefetched)
+    # Image 101 was queued (file absent) -> cursor clamped to its ts, NOT 102's.
+    assert any(item["message_id"] == 101 for item in queue)
+    assert sync_manager.get_last_ts(1, 10) == "2026-01-02T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_cursor_advances_fully_when_all_media_present(sync_manager):
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp"}
+    member = {"id": 10, "name": "Mem"}
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    (member_dir / "picture").mkdir(parents=True)
+    (member_dir / "picture" / "101.jpg").write_bytes(b"IMG")  # already on disk -> not queued
+    queue: list = []
+    prefetched = [
+        {"id": 101, "type": "image", "file": "http://img.jpg", "member_id": 10, "published_at": "2026-01-02T00:00:00Z"},
+        {"id": 102, "type": "text", "text": "later", "member_id": 10, "published_at": "2026-01-03T00:00:00Z"},
+    ]
+    await sync_manager.sync_member(session, group, member, queue, prefetched_messages=prefetched)
+    assert queue == []
+    assert sync_manager.get_last_ts(1, 10) == "2026-01-03T00:00:00Z"  # full advance
