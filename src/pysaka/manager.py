@@ -317,6 +317,9 @@ class SyncManager:
             # Also hold the cursor behind any message whose media is still queued
             # (not yet confirmed on disk). If the media phase is interrupted, the
             # next timestamp-filtered sync re-fetches these messages and re-downloads.
+            # Note: A message whose media URL is permanently unavailable will keep
+            # re-pinning this cursor every sync; a give-up/attempt-cap is a possible
+            # future enhancement.
             if earliest_pending_media_ts is not None and newest_ts is not None:
                 newest_ts = min(newest_ts, earliest_pending_media_ts)
             self.update_sync_state(gid, mid, max_id, len(merged), last_ts=newest_ts)
@@ -375,8 +378,14 @@ class SyncManager:
 
                     filepath = member_dir / subdir / f"{msg['id']}.{ext}"
 
-                    # Logic: If file doesn't exist, queue it.
-                    if not filepath.exists():
+                    # Compute presence the same way scan_member_media does: absent OR zero-byte = missing.
+                    try:
+                        media_present = filepath.exists() and filepath.stat().st_size > 0
+                    except OSError:
+                        media_present = False
+
+                    # Logic: If file doesn't exist or is zero-byte, queue it.
+                    if not media_present:
                         queue.append(
                             {
                                 "url": media_url,
@@ -396,7 +405,7 @@ class SyncManager:
                     p_msg["media_file"] = str(filepath.relative_to(self.output_dir))
 
                     # Extract dimensions if file exists (already downloaded or will be processed)
-                    if filepath.exists():
+                    if media_present:
                         width, height = get_media_dimensions(filepath, msg_type)
                         if width and height:
                             p_msg["width"] = width

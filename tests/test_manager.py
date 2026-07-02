@@ -260,6 +260,28 @@ async def test_cursor_held_behind_message_with_undownloaded_media(sync_manager):
 
 
 @pytest.mark.asyncio
+async def test_cursor_held_behind_zero_byte_media_stub(sync_manager):
+    """A zero-byte stub for an image must be treated as missing and re-queued,
+    holding the cursor behind it — consistent with scan_member_media and download_file."""
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp"}
+    member = {"id": 10, "name": "Mem"}
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    (member_dir / "picture").mkdir(parents=True)
+    (member_dir / "picture" / "101.jpg").write_bytes(b"")  # Zero-byte stub (incomplete download)
+    queue: list = []
+    prefetched = [
+        {"id": 101, "type": "image", "file": "http://img.jpg", "member_id": 10, "published_at": "2026-01-02T00:00:00Z"},
+        {"id": 102, "type": "text", "text": "newer", "member_id": 10, "published_at": "2026-01-03T00:00:00Z"},
+    ]
+    await sync_manager.sync_member(session, group, member, queue, prefetched_messages=prefetched)
+    # Image 101 zero-byte stub is re-queued despite the file existing.
+    assert any(item["message_id"] == 101 for item in queue)
+    # Cursor held behind the 0-byte stub, NOT at 102's timestamp.
+    assert sync_manager.get_last_ts(1, 10) == "2026-01-02T00:00:00Z"
+
+
+@pytest.mark.asyncio
 async def test_cursor_advances_fully_when_all_media_present(sync_manager):
     session = AsyncMock()
     group = {"id": 1, "name": "Grp"}
