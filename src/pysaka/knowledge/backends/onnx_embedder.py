@@ -32,10 +32,13 @@ class OnnxEmbedder:
       the e5 family's documented usage convention.
     """
 
-    def __init__(self, model_dir: Path, prefix_scheme: str = "granite") -> None:
+    def __init__(self, model_dir: Path, prefix_scheme: str = "granite", max_length: int = 512) -> None:
         self._prefix_scheme = prefix_scheme
         self._session = ort.InferenceSession(str(model_dir / "model.onnx"))
         self._tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
+        # Truncate to the model's max sequence length BEFORE padding: encoder models
+        # (Granite/e5, max 512) overflow their position embeddings on longer inputs.
+        self._tokenizer.enable_truncation(max_length=max_length)
         self._tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
         self.dim = _infer_dim(self._session)
 
