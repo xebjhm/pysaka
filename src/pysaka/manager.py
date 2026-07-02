@@ -571,3 +571,65 @@ class SyncManager:
 
         except Exception as e:
             logger.error("Failed to update message metadata", file=str(messages_file), error=str(e))
+
+    async def reconcile_member_media(
+        self,
+        session: aiohttp.ClientSession,
+        member_dir: Path,
+        missing: list[dict[str, Any]],
+        timeline_messages: list[dict[str, Any]],
+        progress_callback: Optional[Any] = None,
+    ) -> dict[str, int]:
+        """
+        Backfill a member's missing media using fresh URLs from a re-fetched
+        timeline. Matches each missing message_id to a ``file``/``thumbnail`` URL,
+        downloads via ``process_media_queue`` (hardened ``download_file``), then
+        re-checks disk truth and writes back dimension metadata.
+
+        Returns ``{"repaired", "failed", "still_missing"}``.
+        """
+        report = {"repaired": 0, "failed": 0, "still_missing": 0}
+        if not missing:
+            return report
+
+        url_by_id: dict[Any, str] = {}
+        for m in timeline_messages:
+            url = m.get("file") or m.get("thumbnail")
+            if url:
+                url_by_id[m.get("id")] = url
+
+        queue: list[dict[str, Any]] = []
+        for d in missing:
+            url = url_by_id.get(d["message_id"])
+            if url:
+                queue.append(
+                    {
+                        "url": url,
+                        "path": d["path"],
+                        "timestamp": d.get("timestamp"),
+                        "message_id": d["message_id"],
+                        "media_type": d["media_type"],
+                        "member_dir": member_dir,
+                    }
+                )
+
+        metadata_by_dir = await self.process_media_queue(session, queue, progress_callback=progress_callback)
+
+        # Re-check disk truth: a queued item counts as repaired only if the file
+        # is now present and non-empty.
+        for item in queue:
+            p = item["path"]
+            try:
+                ok = p.exists() and p.stat().st_size > 0
+            except OSError:
+                ok = False
+            if ok:
+                report["repaired"] += 1
+            else:
+                report["failed"] += 1
+        report["still_missing"] = len(missing) - report["repaired"]
+
+        member_meta = metadata_by_dir.get(member_dir)
+        if member_meta:
+            await self.update_message_metadata(member_dir / "messages.json", member_meta)
+        return report

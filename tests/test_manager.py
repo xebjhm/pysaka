@@ -307,3 +307,42 @@ def test_scan_member_media_missing_file_returns_empty(sync_manager):
     member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
     member_dir.mkdir(parents=True)
     assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": []}
+
+
+@pytest.mark.asyncio
+async def test_reconcile_downloads_missing_from_timeline(sync_manager):
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    (member_dir / "picture").mkdir(parents=True)
+    dest = member_dir / "picture" / "103.jpg"
+    missing = [{"message_id": 103, "media_type": "picture", "path": dest, "timestamp": "2026-01-03T00:00:00Z"}]
+    timeline = [
+        {"id": 103, "file": "https://cdn/fresh-103.jpg", "type": "picture"},
+        {"id": 999, "file": "https://cdn/other.jpg"},
+    ]
+    (member_dir / "messages.json").write_text(
+        json.dumps(
+            {"messages": [{"id": 103, "type": "picture", "media_file": "messages/1 Grp/10 Mem/picture/103.jpg"}]}
+        ),
+        encoding="utf-8",
+    )
+
+    async def fake_dl(session, url, path, timestamp=None, **kw):
+        Path(path).write_bytes(b"FRESHIMG")
+        return True
+
+    sync_manager.client.download_file = AsyncMock(side_effect=fake_dl)
+
+    report = await sync_manager.reconcile_member_media(AsyncMock(), member_dir, missing, timeline)
+    assert report == {"repaired": 1, "failed": 0, "still_missing": 0}
+    assert dest.read_bytes() == b"FRESHIMG"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_no_timeline_match_is_still_missing(sync_manager):
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True)
+    missing = [
+        {"message_id": 103, "media_type": "picture", "path": member_dir / "picture" / "103.jpg", "timestamp": None}
+    ]
+    report = await sync_manager.reconcile_member_media(AsyncMock(), member_dir, missing, timeline_messages=[])
+    assert report == {"repaired": 0, "failed": 0, "still_missing": 1}
