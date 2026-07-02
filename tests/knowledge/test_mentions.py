@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pysaka.knowledge.callnames import CallNameTable
 from pysaka.knowledge.cleaner import SUBSCRIBER_SENTINEL
 from pysaka.knowledge.mentions import MentionDetector
 
@@ -44,6 +45,32 @@ def test_ambiguous_alias_preserves_both_members():
     # two members stores both") — must not be lost to pyahocorasick's last-write-wins.
     entries = [("さくちゃん", "g:46"), ("さくちゃん", "g:99")]
     d = MentionDetector(entries)
+    # Third party (doesn't share the alias): both candidates are genuinely ambiguous mentions.
     assert d.detect("さくちゃんだね", author_id="g:1") == ["g:46", "g:99"]
-    # Self excluded, ambiguous partner still kept.
-    assert d.detect("さくちゃんだね", author_id="g:46") == ["g:99"]
+    # Author shares the alias with a namesake: precision fix — this is self-shadowing, not
+    # a mention of the namesake. Without directional call-name evidence pointing elsewhere,
+    # the whole hit is treated as a self-reference and suppressed (not leaked to g:99).
+    assert d.detect("さくちゃんだね", author_id="g:46") == []
+
+
+def test_self_shadowing_collision_is_suppressed_not_leaked_to_namesake():
+    # Real false-positive class: given-name collisions where two members read the same
+    # (e.g. 蔵盛 妃那乃 and 上村 ひなの both "ひなの"). Without directional evidence, an
+    # author saying her own nickname must NOT be mis-attributed as mentioning the namesake.
+    entries = [("ひなの", "g:H"), ("ひなの", "g:U")]
+    d = MentionDetector(entries)
+    assert d.detect("今日はひなのだよ", author_id="g:H") == []
+    # A third party using the same alias still gets both ambiguous candidates.
+    result = d.detect("今日はひなのだよ", author_id="g:other")
+    assert result == ["g:H", "g:U"]
+
+
+def test_directional_call_name_resolves_ambiguity_for_the_caller():
+    # Curated call_names.json data (who calls whom what) is authoritative: if the author is
+    # known to address a specific person by this alias, that resolves the ambiguity even
+    # though the alias also maps to an unrelated third member.
+    entries = [("まなみん", "g:B"), ("まなみん", "g:C")]
+    edge = {"caller_id": "g:A", "caller_name": "A", "callee_id": "g:B", "callee_name": "B", "names": ["まなみん"]}
+    call_names = CallNameTable.from_json({"edges": [edge]})
+    d = MentionDetector(entries, call_names)
+    assert d.detect("まなみんと会った", author_id="g:A") == ["g:B"]

@@ -25,6 +25,7 @@ PUBLIC_NAMES = [
     # registry / aliases / mentions
     "MemberRegistry",
     "AliasTable",
+    "CallNameTable",
     "MentionDetector",
     # cleaner / ingest / chunking
     "html_to_text",

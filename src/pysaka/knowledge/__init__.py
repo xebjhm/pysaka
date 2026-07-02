@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from pysaka.knowledge.agent import KnowledgeAgent
 from pysaka.knowledge.aliases import AliasTable
+from pysaka.knowledge.callnames import CallNameTable
 from pysaka.knowledge.chunking import chunk_documents
 from pysaka.knowledge.cleaner import SUBSCRIBER_SENTINEL, html_to_text, normalize_text, strip_sentinel
 from pysaka.knowledge.ingest import ingest_blog, ingest_messages
@@ -45,6 +46,7 @@ __all__ = [
     "Answer",
     "AnswerSentence",
     "AliasTable",
+    "CallNameTable",
     "CanonicalId",
     "Chunk",
     "Citation",
