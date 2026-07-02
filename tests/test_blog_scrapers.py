@@ -519,3 +519,96 @@ class TestBlogScraperEdgeCases:
         # Should only have 1 blog even though there were 2 with same ID
         assert len(blogs) == 1
         assert blogs[0].id == "12345"
+
+    @pytest.mark.asyncio
+    async def test_normalize_url_preserves_schemes_and_fragments(self):
+        """PY-M3: normalize_url must not prefix base_url onto special URLs."""
+        mock_session = MagicMock()
+        scraper = HinatazakaBlogScraper(mock_session)
+
+        # Already-schemed URLs are returned untouched
+        assert scraper.normalize_url("http://example.com/x") == "http://example.com/x"
+        assert scraper.normalize_url("https://example.com/x") == "https://example.com/x"
+        assert scraper.normalize_url("data:image/png;base64,AAAA") == "data:image/png;base64,AAAA"
+        assert scraper.normalize_url("mailto:a@b.com") == "mailto:a@b.com"
+        assert scraper.normalize_url("tel:+81312345678") == "tel:+81312345678"
+
+        # Pure fragments are returned untouched
+        assert scraper.normalize_url("#section") == "#section"
+
+        # Genuinely relative / absolute-path URLs are still prefixed
+        assert scraper.normalize_url("/files/test.jpg") == f"{scraper.base_url}/files/test.jpg"
+        assert scraper.normalize_url("files/test.jpg") == f"{scraper.base_url}/files/test.jpg"
+
+        # Protocol-relative URLs still get an https scheme
+        assert scraper.normalize_url("//cdn.example.com/x.jpg") == "https://cdn.example.com/x.jpg"
+
+    @pytest.mark.asyncio
+    async def test_normalize_html_urls_preserves_special_urls(self):
+        """PY-M3: HTML rewriting must not corrupt mailto:/data:/# hrefs."""
+        mock_session = MagicMock()
+        scraper = HinatazakaBlogScraper(mock_session)
+
+        html = (
+            '<a href="mailto:a@b.com">mail</a>'
+            '<a href="#top">top</a>'
+            '<img src="data:image/png;base64,AAAA"/>'
+            '<img src="/files/x.jpg"/>'
+        )
+        result = scraper.normalize_html_urls(html)
+
+        assert 'href="mailto:a@b.com"' in result
+        assert 'href="#top"' in result
+        assert 'src="data:image/png;base64,AAAA"' in result
+        assert f'src="{scraper.base_url}/files/x.jpg"' in result
+
+    @pytest.mark.asyncio
+    async def test_get_blogs_skips_gone_blog(self):
+        """PY-I8: a deleted blog (BlogGoneError) must not abort the generator."""
+        mock_session = MagicMock()
+        scraper = HinatazakaBlogScraper(mock_session)
+
+        list_html = """
+        <html><body>
+            <article class="p-blog-article">
+                <a href="/s/official/diary/detail/111">
+                    <div class="c-blog-article__title">Gone Blog</div>
+                    <div class="c-blog-article__date">2026.1.15 12:00</div>
+                </a>
+            </article>
+            <article class="p-blog-article">
+                <a href="/s/official/diary/detail/222">
+                    <div class="c-blog-article__title">Older Blog</div>
+                    <div class="c-blog-article__date">2026.1.10 12:00</div>
+                </a>
+            </article>
+        </body></html>
+        """
+        detail_html = """
+        <html><body>
+            <div class="c-blog-article__title">Older Blog</div>
+            <div class="c-blog-article__date"><time>2026.1.10 12:00</time></div>
+            <div class="c-blog-article__name">
+                <a href="/s/official/diary/member/list?ct=40">松田好花</a>
+            </div>
+            <div class="c-blog-article__text"><p>Content.</p></div>
+        </body></html>
+        """
+        empty_html = "<html><body></body></html>"
+
+        # 1) list page, 2) detail 111 -> 410 (gone), 3) detail 222 -> 200,
+        # 4) next list page -> empty (terminates)
+        mock_session.get.side_effect = [
+            MockResponse(text=list_html, status=200),
+            MockResponse(text="", status=410, url="https://www.hinatazaka46.com/s/official/diary/detail/111"),
+            MockResponse(text=detail_html, status=200, url="https://www.hinatazaka46.com/s/official/diary/detail/222"),
+            MockResponse(text=empty_html, status=200),
+        ]
+
+        blogs = []
+        async for blog in scraper.get_blogs("40"):
+            blogs.append(blog)
+
+        # The gone blog (111) is skipped; the older blog (222) is still yielded.
+        assert len(blogs) == 1
+        assert blogs[0].id == "222"

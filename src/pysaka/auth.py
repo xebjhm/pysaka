@@ -265,14 +265,19 @@ class BrowserAuth:
                 if "Executable doesn't exist" in str(e) and auto_install:
                     # UX: Explain why we are downloading
                     logger.info("Downloading headless browser for auto-refresh (One-time setup)...")
-                    # Force Playwright to look in global cache, not frozen bundle
-                    import os
-                    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
 
                     try:
+                        import os
                         import sys
 
                         from playwright.__main__ import main
+
+                        # Force Playwright to look in global cache, not frozen bundle.
+                        # Scope this env var to the install call only and restore it
+                        # afterward so it doesn't hijack later Playwright launches
+                        # in the host app.
+                        _prev_browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+                        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
 
                         # In frozen environment, calling subprocess with sys.executable fails
                         # caused by the executable trying to parse '-m' as an argument.
@@ -289,6 +294,10 @@ class BrowserAuth:
                             return None
                         finally:
                             sys.argv = old_argv
+                            if _prev_browsers_path is None:
+                                os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+                            else:
+                                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _prev_browsers_path
                         logger.info("Playwright chromium installed successfully. Retrying...")
 
                         # Retry launch after installation

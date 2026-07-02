@@ -1,4 +1,5 @@
 import asyncio
+import os
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -116,8 +117,10 @@ class Client:
                     saved = self.token_manager.load_session(self.group.value)
                     if saved:
                         access_token = saved.get("access_token")
-                        refresh_token = saved.get("refresh_token") or refresh_token
-                        cookies = saved.get("cookies") or cookies
+                        # Explicitly-passed args take precedence over stored values;
+                        # only fall back to storage when the caller didn't provide one.
+                        refresh_token = refresh_token or saved.get("refresh_token")
+                        cookies = cookies or saved.get("cookies")
                         logger.info(f"Loaded credentials for {self.group.value} from storage.")
             except Exception as e:
                 logger.warning(f"Failed to initialize token storage: {e}")
@@ -126,6 +129,10 @@ class Client:
         self.refresh_token = refresh_token
         self.cookies = cookies
         self.auth_dir = Path(auth_dir) if auth_dir else None
+
+        # Single-flight guard for token refresh: concurrent 401s must not each
+        # POST /update_token with the same (soon-to-be-rotated) cookie.
+        self._refresh_lock = asyncio.Lock()
 
         # Platform profile: "web" (default) mimics the browser client;
         # "android" mimics the Flutter/Dart app (different UA, host, headers).
@@ -235,6 +242,8 @@ class Client:
 
         Raises:
             ApiError: If the API returns a server error (5xx) or other unhandled status.
+            SessionExpiredError: If the session was invalidated server-side (re-login required).
+            RefreshFailedError: If token refresh was attempted and failed unexpectedly.
         """
         url = f"{self.api_base}{endpoint}"
         logger.debug("API GET request", endpoint=endpoint, params=params)
@@ -265,8 +274,10 @@ class Client:
                     return None
         except ApiError:
             raise
-        except SessionExpiredError as e:
-            logger.debug(f"Session expired during request to {endpoint}: {e}")
+        except (SessionExpiredError, RefreshFailedError) as e:
+            # Auth failures must surface to the caller (re-login required),
+            # not be swallowed into a "no data" None.
+            logger.debug(f"Auth failure during request to {endpoint}: {e}")
             raise
         except aiohttp.ClientError as e:
             logger.error(f"Network error fetching {url}: {e}")
@@ -277,10 +288,44 @@ class Client:
 
     async def refresh_access_token(self, session: aiohttp.ClientSession) -> bool:
         """
-        Attempt to refresh the access token using stored cookies.
+        Attempt to refresh the access token (refresh_token → cookies → headless).
+
+        Guarded by an ``asyncio.Lock`` so concurrent 401s do not race and rotate
+        the session cookie under each other (single-flight). After acquiring the
+        lock, re-checks whether another caller already refreshed the token and
+        returns early if so.
 
         Returns:
-            True if refresh was successful, False otherwise.
+            True if a refresh was performed (or another caller already refreshed
+            the token while this call waited on the lock).
+
+        Raises:
+            SessionExpiredError: The server invalidated the session (e.g. the
+                user logged in from another browser). Re-login is required.
+            RefreshFailedError: All refresh plans were exhausted unexpectedly.
+        """
+        # Snapshot the token before we contend for the lock. If it changes while
+        # we wait, another concurrent caller already refreshed → skip our attempt.
+        token_before_wait = self.access_token
+        async with self._refresh_lock:
+            if self.access_token != token_before_wait and self.access_token:
+                logger.debug("Token already refreshed by another caller; skipping redundant refresh.")
+                return True
+            # Also skip if the token became valid again (another caller refreshed
+            # to a token that isn't expiring within the danger window).
+            remaining = self.get_token_expiry_seconds()
+            if token_before_wait is not None and remaining is not None and remaining > 300:
+                logger.debug(
+                    "Token valid after acquiring refresh lock; skipping redundant refresh.",
+                    remaining_seconds=remaining
+                )
+                return True
+            return await self._perform_refresh(session)
+
+    async def _perform_refresh(self, session: aiohttp.ClientSession) -> bool:
+        """Run the actual token refresh flow. Must be called with the refresh lock held.
+
+        See :meth:`refresh_access_token` for the return/raise contract.
         """
         has_refresh_token = bool(self.refresh_token)
         has_cookies = bool(self.cookies)
@@ -357,11 +402,12 @@ class Client:
                         new_token = data.get('access_token')
                         if new_token:
                             old_expiry = self.get_token_expiry_seconds()
-                            await self.update_token(new_token)
-                            new_expiry = self.get_token_expiry_seconds()
 
-                            # CRITICAL: Capture new session cookies from response
-                            # The server rotates the session cookie on each update_token call
+                            # CRITICAL: Capture rotated session cookies from the
+                            # response BEFORE persisting. The server rotates the
+                            # session cookie on each update_token call; persisting
+                            # before capture would store the already-consumed
+                            # cookie (forcing a re-login on next restart).
                             cookies_updated = []
                             if resp.cookies:
                                 for key, cookie in resp.cookies.items():
@@ -372,6 +418,10 @@ class Client:
                                     updated_cookies=cookies_updated,
                                     new_cookie_count=len(self.cookies)
                                 )
+
+                            # Persist token + freshly-rotated cookies together.
+                            await self.update_token(new_token)
+                            new_expiry = self.get_token_expiry_seconds()
 
                             logger.info(
                                 "Token refreshed successfully via session cookies",
@@ -609,6 +659,11 @@ class Client:
         effective_ts: Optional[str] = since_ts
         need_discover_ts = since_id is not None and since_ts is None
 
+        # Allow at most one refresh-and-retry on the first page. Without this
+        # guard, any non-401 failure (404 for a closed group, empty body, etc.)
+        # makes fetch_json return None → refresh succeeds → retry forever.
+        refreshed_once = False
+
         while True:
             params: dict[str, Any] = {
                 "count": 200,
@@ -621,13 +676,19 @@ class Client:
                 params["max_id"] = max_id
 
             data = await self.fetch_json(session, f"/groups/{group_id}/timeline", params)
-            if not data:
-                if page == 0 and await self.refresh_access_token(session):
+            if data is None:
+                # A None result is a failure (fetch_json already retried on 401).
+                # A refresh cannot fix a 404/403, so only try it once on page 0
+                # and treat a still-None result as terminal.
+                if page == 0 and not refreshed_once and await self.refresh_access_token(session):
+                    refreshed_once = True
                     continue
                 break
 
             messages = data.get('messages', [])
             if not messages:
+                # Empty-but-valid response (e.g. {} or {"messages": []}): no more
+                # messages to fetch. This is a normal terminal state, not a failure.
                 break
 
             for m in messages:
@@ -686,17 +747,29 @@ class Client:
         if not url or filepath.exists():
             return True
 
+        # Download to a sibling temp path and atomically move it onto the final
+        # path only after a fully-successful read. This avoids leaving a 0-byte
+        # or truncated file that the exists() guard above would then permanently
+        # skip on retry.
+        tmp_path = filepath.with_suffix(filepath.suffix + '.part')
         try:
             filepath.parent.mkdir(parents=True, exist_ok=True)
             async with session.get(url) as resp:
                 if resp.status == 200:
-                    async with aiofiles.open(filepath, 'wb') as f:
+                    async with aiofiles.open(tmp_path, 'wb') as f:
                         await f.write(await resp.read())
+                    os.replace(tmp_path, filepath)
                     return True
                 else:
                     logger.warning(f"Download failed {resp.status} for {url}")
         except Exception as e:
             logger.error(f"Error downloading {url}: {e}")
+        # Clean up any partial file so a subsequent call can re-download.
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError as e:
+            logger.warning(f"Failed to clean up partial download {tmp_path}: {e}")
         return False
 
     async def download_message_media(self, session: aiohttp.ClientSession, message: dict[str, Any], output_dir: Path) -> Optional[Path]:
@@ -895,6 +968,10 @@ class Client:
 
         Returns:
             True if successful (2xx), False otherwise.
+
+        Raises:
+            SessionExpiredError: If the session was invalidated server-side (re-login required).
+            RefreshFailedError: If token refresh was attempted and failed unexpectedly.
         """
         url = f"{self.api_base}{endpoint}"
         try:
@@ -909,6 +986,9 @@ class Client:
                 else:
                     logger.warning(f"DELETE {endpoint} returned {resp.status}")
                     return False
+        except (SessionExpiredError, RefreshFailedError):
+            # Auth failures must surface to the caller (re-login required).
+            raise
         except Exception as e:
             logger.error(f"Error deleting {url}: {e}")
             return False

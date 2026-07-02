@@ -8,7 +8,22 @@ from pysaka.utils import (
     is_jwt_expired,
     normalize_message,
     parse_jwt_expiry,
+    sanitize_name,
 )
+
+
+def test_sanitize_name_windows_invalid_chars():
+    """PY-M6: strip the full Windows-invalid set, not just '/'."""
+    # All reserved characters get replaced with '_'.
+    assert sanitize_name('a/b\\c:d*e?f"g<h>i|j') == "a_b_c_d_e_f_g_h_i_j"
+    # Control characters are stripped too.
+    assert sanitize_name("name\x00\x1f") == "name__"
+    # Trailing dots and spaces (silently dropped by Windows) are removed.
+    assert sanitize_name("member name... ") == "member name"
+    assert sanitize_name("group.") == "group"
+    # Interior spaces and dots are preserved for readability.
+    assert sanitize_name("Kobayashi Yui") == "Kobayashi Yui"
+    assert sanitize_name("v2.5 update") == "v2.5 update"
 
 
 def test_get_media_extension():
@@ -77,6 +92,29 @@ class TestParseJwtExpiry:
     def test_malformed_payload(self):
         # Invalid base64 in payload
         assert parse_jwt_expiry("header.not_valid_base64!@#.signature") is None
+
+    def test_base64url_payload_with_special_chars(self):
+        """Real JWT payloads use base64url ('-'/'_'); must decode correctly.
+
+        Regression test for PY-I6: previously decoded with base64.b64decode,
+        which fails on '-'/'_' → parse_jwt_expiry returned None for real tokens.
+        """
+        exp_time = int(time.time()) + 3600
+        # Find a filler value whose base64url-encoded JSON contains a
+        # base64url-only char ('-' or '_' — i.e. the '+'/'/' substitutions).
+        # These bytes are exactly what base64.b64decode chokes on.
+        for i in range(500):
+            payload = {"exp": exp_time, "pad": "?" * i}
+            payload_b64 = base64.urlsafe_b64encode(
+                json.dumps(payload).encode()
+            ).rstrip(b"=").decode()
+            if "-" in payload_b64 or "_" in payload_b64:
+                break
+        else:  # pragma: no cover - sanity guard
+            raise AssertionError("Could not construct a base64url payload for the test")
+
+        token = f"header.{payload_b64}.signature"
+        assert parse_jwt_expiry(token) == exp_time
 
 
 class TestGetJwtRemainingSeconds:

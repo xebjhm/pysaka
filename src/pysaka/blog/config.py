@@ -8,6 +8,10 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 # Japan Standard Time - used by all scrapers
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -25,11 +29,10 @@ DATE_FORMATS = [
 def parse_jst_datetime(
     date_text: str,
     formats: list[str] | None = None,
-) -> datetime:
+) -> datetime | None:
     """Parse a date string into a JST datetime.
 
     Tries multiple formats in order until one succeeds.
-    Falls back to current time if all formats fail.
 
     Args:
         date_text: The date string to parse.
@@ -37,7 +40,10 @@ def parse_jst_datetime(
                  Defaults to DATE_FORMATS if not provided.
 
     Returns:
-        Parsed datetime with JST timezone, or current JST time on failure.
+        Parsed datetime with JST timezone, or None if the text could not be
+        parsed with any known format. Callers must handle None gracefully
+        (e.g. skip since_date filtering / leave published_at unset) rather
+        than fabricating a timestamp.
     """
     if formats is None:
         formats = DATE_FORMATS
@@ -49,8 +55,8 @@ def parse_jst_datetime(
         except ValueError:
             continue
 
-    # Fallback to current time
-    return datetime.now(JST)
+    logger.warning("failed_to_parse_datetime", date_text=date_text)
+    return None
 
 
 # Pagination safety cap - prevents infinite loops if server behaves unexpectedly

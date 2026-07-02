@@ -1,8 +1,13 @@
 import base64
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlparse
+
+# Characters that are invalid in Windows file/directory names, plus control
+# characters (0x00-0x1F). Kept as a module-level pattern for reuse.
+_WINDOWS_INVALID_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 MEDIA_EXTENSIONS: dict[str, str] = {
     'image': 'jpg', 'picture': 'jpg',
@@ -12,15 +17,23 @@ MEDIA_EXTENSIONS: dict[str, str] = {
 
 def sanitize_name(name: str) -> str:
     """
-    Sanitize directory names to be filesystem-safe.
+    Sanitize directory names to be filesystem-safe (including on Windows).
+
+    Replaces the full set of Windows-invalid characters (\\ / : * ? " < > |
+    and control chars) with '_', and strips trailing dots/spaces (which
+    Windows silently drops, breaking mkdir). Interior spaces are preserved
+    for readability.
 
     Args:
         name: The raw input string.
 
     Returns:
-        Safe string with '/' replaced by '_', but preserving spaces for readability.
+        Safe string usable as a directory/file name on all platforms.
     """
-    return name.replace('/', '_').strip()
+    sanitized = _WINDOWS_INVALID_CHARS.sub('_', name)
+    # Strip leading/trailing whitespace, then trailing dots/spaces
+    # (Windows disallows names ending in '.' or ' ').
+    return sanitized.strip().rstrip('. ')
 
 def get_media_extension(url: Optional[str], msg_type: str) -> str:
     """
@@ -70,11 +83,11 @@ def parse_jwt_expiry(token: str) -> Optional[int]:
         if len(parts) < 2:
             return None
 
-        # JWT payload is base64url encoded
+        # JWT payload is base64url encoded (uses '-'/'_', not '+'/'/')
         payload = parts[1]
         # Add padding for base64 decode
-        payload += '=' * (4 - len(payload) % 4)
-        decoded = base64.b64decode(payload)
+        payload += '=' * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(payload)
         data = json.loads(decoded)
 
         if 'exp' in data:

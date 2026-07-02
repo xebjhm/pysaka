@@ -20,9 +20,12 @@ async def test_client_download_file_success(client, mock_session):
 
     # Needs a Path object
     dest = Path("/tmp/file.jpg")
+    # Download now writes to a sibling temp file and atomically renames it.
+    tmp_dest = dest.with_suffix(dest.suffix + ".part")
 
     with patch("aiofiles.open", new_callable=MagicMock) as mock_file_open_ctx, \
          patch("pathlib.Path.exists", return_value=False), \
+         patch("os.replace") as mock_replace, \
          patch("pathlib.Path.mkdir"): # Mock mkdir to avoid file ops
 
         # aiofiles.open returns an AsyncContextManager
@@ -30,12 +33,13 @@ async def test_client_download_file_success(client, mock_session):
         mock_file_handle = AsyncMock()
         mock_file_open_ctx.return_value.__aenter__.return_value = mock_file_handle
 
-        await client.download_file(mock_session, "http://example.com/file.jpg", dest)
+        result = await client.download_file(mock_session, "http://example.com/file.jpg", dest)
 
-        # We can't assert_called_with on the ContextManager easily if it's async?
-        # Actually aiofiles.open(...) returns the CM.
-        mock_file_open_ctx.assert_called_with(dest, "wb")
+        assert result is True
+        # Writes to the temp path, then atomically replaces the final path.
+        mock_file_open_ctx.assert_called_with(tmp_dest, "wb")
         mock_file_handle.write.assert_called_with(b"file_content")
+        mock_replace.assert_called_once_with(tmp_dest, dest)
 
 @pytest.mark.asyncio
 async def test_client_download_message_media(client, mock_session):

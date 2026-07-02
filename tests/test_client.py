@@ -178,6 +178,8 @@ async def test_fetch_json_auto_refresh_success(client, mock_session):
 
 @pytest.mark.asyncio
 async def test_fetch_json_auto_refresh_fail(client, mock_session):
+    from pysaka.exceptions import RefreshFailedError
+
     resp_401 = AsyncMock()
     resp_401.status = 401
 
@@ -189,8 +191,10 @@ async def test_fetch_json_auto_refresh_fail(client, mock_session):
 
     client.refresh_token = "valid_rt"
 
-    result = await client.fetch_json(mock_session, "/test")
+    # When all refresh plans are exhausted, the auth failure must surface to the
+    # caller (re-login required) rather than being swallowed into None.
+    with pytest.raises(RefreshFailedError):
+        await client.fetch_json(mock_session, "/test")
 
-    assert result is None
     mock_session.get.assert_called_once()
     mock_session.post.assert_called_once()

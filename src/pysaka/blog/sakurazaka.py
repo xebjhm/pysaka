@@ -236,7 +236,9 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                     date_text = date_elem.get_text(strip=True) if date_elem else ""
                     published_at = parse_jst_datetime(date_text)
 
-                    if since_date and published_at < since_date:
+                    # Skip the early-return if the date could not be parsed
+                    # (published_at is None) so we don't drop the entry.
+                    if since_date and published_at is not None and published_at < since_date:
                         return
 
                     # Parse title from list
@@ -340,10 +342,11 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                     date_elem = box.select_one(".date")
                     date_text = date_elem.get_text(strip=True) if date_elem else ""
 
-                    # Check date filter early (from preview)
+                    # Check date filter early (from preview). Skip if the
+                    # preview date could not be parsed (returns None).
                     if since_date and date_text:
                         preview_date = parse_jst_datetime(date_text)
-                        if preview_date < since_date:
+                        if preview_date is not None and preview_date < since_date:
                             return
 
                     # Fetch full blog detail
@@ -351,14 +354,27 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                         entry = await self.get_blog_detail(blog_id)
                         entry.member_id = member_id
 
-                        # Check date filter again with actual date
-                        if since_date and entry.published_at < since_date:
+                        # Check date filter again with actual date (skip if
+                        # the date could not be parsed)
+                        if (
+                            since_date
+                            and entry.published_at is not None
+                            and entry.published_at < since_date
+                        ):
                             return
 
                         yield entry
 
                         # Polite delay between requests
                         await asyncio.sleep(DETAIL_DELAY)
+                    except BlogGoneError as e:
+                        # Blog was deleted between list and detail fetch.
+                        # Skip it and continue yielding remaining older blogs.
+                        logger.info(
+                            "blog_detail_gone",
+                            blog_id=blog_id,
+                            error=str(e),
+                        )
                     except ValueError as e:
                         logger.warning(
                             "blog_detail_fetch_failed",

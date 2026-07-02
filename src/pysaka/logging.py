@@ -156,16 +156,20 @@ def _redact_secrets(
         "access_token", "refresh_token", "token", "password", "secret", "cookie", "cookies", "authorization"
     }
 
-    # Redact top-level keys
-    for key in event_dict.copy():
+    # Build a new dict so the caller's original object is never mutated
+    # (e.g. a live client.headers/cookies passed as a log kwarg).
+    redacted: dict[str, Any] = {}
+    for key, value in event_dict.items():
         if key.lower() in sensitive_keys:
-            event_dict[key] = "***REDACTED***"
+            redacted[key] = "***REDACTED***"
+        elif isinstance(value, dict):
+            # Shallow-copy nested dicts (handling headers/cookies dicts)
+            # before redacting so the original nested object is untouched.
+            redacted[key] = {
+                sub_key: ("***REDACTED***" if sub_key.lower() in sensitive_keys else sub_value)
+                for sub_key, sub_value in value.items()
+            }
+        else:
+            redacted[key] = value
 
-    # Shallow redaction for dictionary values (handling headers/cookies dicts)
-    for _, value in event_dict.items():
-        if isinstance(value, dict):
-            for sub_key in value:
-                if sub_key.lower() in sensitive_keys:
-                    value[sub_key] = "***REDACTED***"
-
-    return event_dict
+    return redacted

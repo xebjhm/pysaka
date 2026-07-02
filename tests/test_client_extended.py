@@ -1,5 +1,6 @@
 """Extended tests for pysaka.client module to improve coverage."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -326,7 +327,10 @@ class TestClientDownloadFile:
 
         filepath = tmp_path / "nested" / "dirs" / "file.jpg"
 
-        with patch("aiofiles.open", new_callable=MagicMock) as mock_open:
+        # aiofiles.open is mocked so no real temp file is written; patch os.replace
+        # so the atomic-rename step succeeds without a real .part file on disk.
+        with patch("aiofiles.open", new_callable=MagicMock) as mock_open, \
+             patch("os.replace") as mock_replace:
             mock_file = AsyncMock()
             mock_open.return_value.__aenter__.return_value = mock_file
 
@@ -334,6 +338,47 @@ class TestClientDownloadFile:
 
             assert result is True
             assert filepath.parent.exists()
+            # Renames the temp file onto the final destination.
+            expected_tmp = filepath.with_suffix(filepath.suffix + ".part")
+            mock_replace.assert_called_once_with(expected_tmp, filepath)
+
+    @pytest.mark.asyncio
+    async def test_download_file_failure_leaves_no_partial(self, client, mock_session, tmp_path):
+        """PY-I2: a mid-download failure must not leave a file behind.
+
+        A leftover 0-byte/truncated file would be skipped forever by the
+        exists() guard. The final path must remain absent so a retry can
+        succeed, and no orphan .part file should be left either.
+        """
+        # Body read raises partway through the download.
+        mock_resp = mock_session.get.return_value.__aenter__.return_value
+        mock_resp.status = 200
+        mock_resp.read = AsyncMock(side_effect=OSError("connection reset mid-body"))
+
+        filepath = tmp_path / "media" / "789.jpg"
+
+        result = await client.download_file(mock_session, "http://example.com/789.jpg", filepath)
+
+        assert result is False
+        # Neither the final file nor the temp file may exist after a failure.
+        assert not filepath.exists()
+        assert not filepath.with_suffix(filepath.suffix + ".part").exists()
+
+    @pytest.mark.asyncio
+    async def test_download_file_success_writes_real_file(self, client, mock_session, tmp_path):
+        """PY-I2: successful download writes the full body to the final path."""
+        mock_resp = mock_session.get.return_value.__aenter__.return_value
+        mock_resp.status = 200
+        mock_resp.read = AsyncMock(return_value=b"real-bytes")
+
+        filepath = tmp_path / "media" / "123.jpg"
+
+        result = await client.download_file(mock_session, "http://example.com/123.jpg", filepath)
+
+        assert result is True
+        assert filepath.read_bytes() == b"real-bytes"
+        # No leftover temp file.
+        assert not filepath.with_suffix(filepath.suffix + ".part").exists()
 
 
 class TestClientGetMessages:
@@ -409,6 +454,38 @@ class TestClientGetMessages:
         await client.get_messages(mock_session, group_id=1, progress_callback=async_progress_cb)
 
         assert len(callback_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_get_messages_no_infinite_refresh_loop(self, client, mock_session):
+        """PY-C1: a persistent non-401 failure must not loop forever.
+
+        The timeline always returns a failure (e.g. 404 for a closed group →
+        fetch_json returns None). Even if the refresh succeeds, get_messages
+        must retry at most once and then terminate, rather than hammering
+        /update_token forever.
+        """
+        # Timeline GET always fails with a non-401 status → fetch_json -> None.
+        mock_resp = mock_session.get.return_value.__aenter__.return_value
+        mock_resp.status = 404
+        mock_resp.json = AsyncMock(return_value={})
+
+        # Refresh via refresh_token succeeds every time it's attempted.
+        client.refresh_token = "valid_rt"
+        refresh_resp = mock_session.post.return_value.__aenter__.return_value
+        refresh_resp.status = 200
+        refresh_resp.json = AsyncMock(return_value={"access_token": "new_token"})
+
+        # Bound execution: if the loop is unbounded this would spin forever.
+        result = await asyncio.wait_for(
+            client.get_messages(mock_session, group_id=1),
+            timeout=5.0,
+        )
+
+        assert result == []
+        # At most one refresh-and-retry: two GETs total (initial + single retry).
+        assert mock_session.get.call_count == 2
+        # Refresh attempted exactly once.
+        assert mock_session.post.call_count == 1
 
 
 class TestClientGetNews:

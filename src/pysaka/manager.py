@@ -12,6 +12,7 @@ import aiohttp
 import structlog
 
 from .client import Client
+from .exceptions import RefreshFailedError, SessionExpiredError
 from .media import get_audio_metadata, get_media_dimensions
 from .utils import get_media_extension, normalize_message, sanitize_name
 
@@ -77,6 +78,15 @@ class SyncManager:
             except OSError:
                 pass
 
+    async def save_sync_state_async(self) -> None:
+        """Save sync state without blocking the event loop.
+
+        Runs the blocking, retrying write of :meth:`save_sync_state` in a worker
+        thread so async callers don't stall on ``time.sleep`` during Windows
+        file-lock contention.
+        """
+        await asyncio.to_thread(self.save_sync_state)
+
     def update_sync_state(self, group_id: int, member_id: int, last_msg_id: int, count: int,
                           last_ts: Optional[str] = None) -> None:
         """
@@ -89,14 +99,25 @@ class SyncManager:
             count: Total message count after merge.
             last_ts: The newest message's published_at timestamp (primary cursor).
         """
+        self._set_sync_state(group_id, member_id, last_msg_id, count, last_ts=last_ts)
+        self.save_sync_state()
+
+    async def update_sync_state_async(self, group_id: int, member_id: int, last_msg_id: int,
+                                      count: int, last_ts: Optional[str] = None) -> None:
+        """Async variant of :meth:`update_sync_state` for use from async paths."""
+        self._set_sync_state(group_id, member_id, last_msg_id, count, last_ts=last_ts)
+        await self.save_sync_state_async()
+
+    def _set_sync_state(self, group_id: int, member_id: int, last_msg_id: int, count: int,
+                        last_ts: Optional[str] = None) -> None:
+        """Update the in-memory sync state entry for a member (no persistence)."""
         key = f"{group_id}_{member_id}"
         self.sync_state[key] = {
             "last_message_id": last_msg_id,
             "last_sync_ts": last_ts,
             "total_messages": count,
-            "last_sync": datetime.now(timezone.utc).isoformat() + "Z"
+            "last_sync": datetime.now(timezone.utc).isoformat()
         }
-        self.save_sync_state()
 
     def get_last_ts(self, group_id: int, member_id: int) -> Optional[str]:
         """
@@ -172,65 +193,84 @@ class SyncManager:
         last_ts = self.get_last_ts(gid, mid)
         logger.info("Syncing member", member=mname, member_id=mid, last_ts=last_ts)
 
-        try:
+        state_key = f"{gid}_{mid}"
+        existing_file = member_dir / "messages.json"
+
+        async def fetch_for_member(since_ts: Optional[str]) -> list[dict[str, Any]]:
+            """Fetch this member's messages, filtered by ``since_ts`` cursor."""
             if prefetched_messages is not None:
                 # Pre-fetched: filter by member_id AND this member's timestamp cursor
-                messages = [
+                fetched = [
                     x for x in prefetched_messages
                     if x.get('member_id') == mid
-                    and (last_ts is None or (x.get('published_at') or '') >= last_ts)
+                    and (since_ts is None or (x.get('published_at') or '') >= since_ts)
                 ]
                 logger.info("Filtered prefetched messages for member",
-                            count=len(messages), member=mname)
-            else:
-                messages = await self.client.get_messages(
-                    session, gid, since_ts=last_ts, progress_callback=progress_callback
-                )
-                logger.info("Fetched messages", count=len(messages), group_id=gid)
+                            count=len(fetched), member=mname)
+                return fetched
 
-                # Filter for member
-                messages = [x for x in messages if x.get('member_id') == mid]
-                logger.info("Filtered messages for member", count=len(messages), member=mname)
+            fetched = await self.client.get_messages(
+                session, gid, since_ts=since_ts, progress_callback=progress_callback
+            )
+            logger.info("Fetched messages", count=len(fetched), group_id=gid)
 
-            if not messages:
-                return 0
+            # Filter for member
+            fetched = [x for x in fetched if x.get('member_id') == mid]
+            logger.info("Filtered messages for member", count=len(fetched), member=mname)
+            return fetched
 
-            # Process & Prepare
-            processed = self.prepare_messages(messages, member_dir, media_queue)
+        try:
+            messages = await fetch_for_member(last_ts)
 
-            # Load existing
-            existing_file = member_dir / "messages.json"
+            # Load existing (may be corrupt / truncated — see recovery below)
             existing_msgs: list[dict[str, Any]] = []
+            corrupt = False
             if existing_file.exists():
                 try:
                     async with aiofiles.open(existing_file, encoding='utf-8') as f:
                         data = json.loads(await f.read())
                         existing_msgs = data.get('messages', [])
                 except Exception:
-                    # Corrupt file (e.g. force-close during write).
-                    # Reset this member's last_id so the next sync
-                    # re-fetches from the beginning to recover.
+                    # Corrupt file (e.g. force-close during write). The existing
+                    # history is unreadable, so a full re-fetch is required.
                     logger.warning(
                         "corrupt_messages_file",
                         member=mname, member_id=mid, group_id=gid,
                     )
-                    self.sync_state.pop(f"{gid}_{mid}", None)
-                    self.save_sync_state()
+                    corrupt = True
 
             # Integrity check: if the file has fewer messages than sync_state
             # recorded, data was lost (e.g. past force-close overwrote the
-            # file with only new messages).  Reset last_id so the next sync
-            # does a full re-fetch to recover.
-            state_key = f"{gid}_{mid}"
+            # file with only new messages).
             expected = (self.sync_state.get(state_key) or {}).get("total_messages", 0)
-            if expected > 0 and len(existing_msgs) < expected:
+            mismatch = expected > 0 and len(existing_msgs) < expected
+            if mismatch:
                 logger.warning(
                     "message_count_mismatch",
                     member=mname, member_id=mid, group_id=gid,
                     expected=expected, actual=len(existing_msgs),
                 )
-                self.sync_state.pop(state_key, None)
-                self.save_sync_state()
+
+            # Recovery: on corruption or count mismatch, the incremental fetch
+            # above (bounded by last_ts) only returned NEW messages, which would
+            # overwrite the file with a truncated history. Re-fetch the FULL
+            # history (since_ts=None) and treat existing as empty so the merged
+            # result is complete rather than truncated.
+            recovering = corrupt or mismatch
+            if recovering:
+                logger.info(
+                    "recovering_full_history",
+                    member=mname, member_id=mid, group_id=gid,
+                )
+                existing_msgs = []
+                messages = await fetch_for_member(None)
+
+            # No new messages and nothing to recover: nothing to write.
+            if not messages and not recovering:
+                return 0
+
+            # Process & Prepare
+            processed = self.prepare_messages(messages, member_dir, media_queue)
 
             # Dedupe (Upsert: Prefer new data)
             merged_dict = {x['id']: x for x in existing_msgs}
@@ -249,7 +289,7 @@ class SyncManager:
 
             # Save
             export_data = {
-                "exported_at": datetime.now(timezone.utc).isoformat() + "Z",
+                "exported_at": datetime.now(timezone.utc).isoformat(),
                 "member": {
                     "id": mid,
                     "name": mname,
@@ -272,10 +312,14 @@ class SyncManager:
             # Update State
             max_id = max(x['id'] for x in merged) if merged else 0
             newest_ts = max((x.get('timestamp') or '' for x in merged), default=None)
-            self.update_sync_state(gid, mid, max_id, len(merged), last_ts=newest_ts)
+            await self.update_sync_state_async(gid, mid, max_id, len(merged), last_ts=newest_ts)
 
             return len(processed)
 
+        except (SessionExpiredError, RefreshFailedError):
+            # Auth failure is not "no new messages" — propagate so the caller
+            # can prompt re-login instead of reporting a successful empty sync.
+            raise
         except Exception as e:
             logger.error("Error syncing member", member=mname, error=str(e), exc_info=True)
             return 0
@@ -362,15 +406,17 @@ class SyncManager:
         """
         Downloads files in the queue.
 
-        Concurrency is managed by the caller's session wrapper (PooledSession)
-        which acquires/releases pool slots per HTTP request. The ``concurrency``
-        parameter is kept for backward compatibility but is no longer used
-        internally.
+        Concurrency is bounded by a local :class:`asyncio.Semaphore` of size
+        ``concurrency`` so that plain ``aiohttp`` sessions don't fire the whole
+        queue at once (which risks rate-limit bans). When the caller passes a
+        pooled/throttling session wrapper (e.g. SakaDesk's PooledSession) it
+        adds its own per-request pool limit on top; the local semaphore is
+        harmless in that case.
 
         Args:
             session: Active aiohttp session (or PooledSession wrapper).
             queue: List of media items to download.
-            concurrency: Deprecated — kept for backward compatibility.
+            concurrency: Max simultaneous downloads (local bound).
             progress_callback: Optional callback.
 
         Returns:
@@ -380,9 +426,10 @@ class SyncManager:
         if not queue:
             return {}
 
-        # Concurrency is managed by the caller's PooledSession / AdaptivePool.
-        # No local semaphore needed — each HTTP request in download_file
-        # acquires a pool slot via the session wrapper.
+        # Bound simultaneous downloads locally. Plain aiohttp sessions have no
+        # throttling of their own, so an unbounded gather would launch the
+        # entire queue at once.
+        semaphore = asyncio.Semaphore(max(1, concurrency))
         total = len(queue)
         completed = 0
         # Group metadata by member_dir for efficient batch updates
@@ -390,12 +437,13 @@ class SyncManager:
 
         async def worker(item: dict[str, Any]) -> None:
             nonlocal completed
-            res = await self.client.download_file(
-                session,
-                item['url'],
-                item['path'],
-                item['timestamp']
-            )
+            async with semaphore:
+                res = await self.client.download_file(
+                    session,
+                    item['url'],
+                    item['path'],
+                    item['timestamp']
+                )
             if res:
                 media_type = item.get('media_type', '')
                 member_dir = item.get('member_dir')
@@ -463,8 +511,12 @@ class SyncManager:
                             updated = True
 
             if updated:
-                async with aiofiles.open(messages_file, 'w', encoding='utf-8') as f:
+                # Atomic write: temp file + os.replace, mirroring sync_member,
+                # so a crash mid-write can't truncate the existing file.
+                tmp_file = messages_file.with_suffix(".json.tmp")
+                async with aiofiles.open(tmp_file, 'w', encoding='utf-8') as f:
                     await f.write(json.dumps(data, ensure_ascii=False, indent=2))
+                os.replace(tmp_file, messages_file)
 
         except Exception as e:
             logger.error("Failed to update message metadata", file=str(messages_file), error=str(e))

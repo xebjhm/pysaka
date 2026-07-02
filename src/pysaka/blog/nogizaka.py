@@ -212,7 +212,9 @@ class NogizakaBlogScraper(BaseBlogScraper):
                     date_str = blog.get("date", "")
                     published_at = parse_jst_datetime(date_str)
 
-                    if since_date and published_at < since_date:
+                    # Skip the early-return if the date could not be parsed
+                    # (published_at is None) so we don't drop the entry.
+                    if since_date and published_at is not None and published_at < since_date:
                         return
 
                     # Use main image as thumbnail - skip content image parsing
@@ -307,8 +309,12 @@ class NogizakaBlogScraper(BaseBlogScraper):
                     try:
                         entry = self._parse_blog_from_api(blog)
 
-                        # Check date filter
-                        if since_date and entry.published_at < since_date:
+                        # Check date filter (skip if date could not be parsed)
+                        if (
+                            since_date
+                            and entry.published_at is not None
+                            and entry.published_at < since_date
+                        ):
                             return
 
                         yield entry
@@ -415,10 +421,13 @@ class NogizakaBlogScraper(BaseBlogScraper):
             if src:
                 images.append(self.normalize_url(src))
 
-        # Also add the main image if present
+        # Also add the main image if present (normalized, to match the
+        # metadata path and the content images above so dedupe is accurate)
         main_img = blog.get("img", "")
-        if main_img and main_img not in images:
-            images.insert(0, main_img)
+        if main_img:
+            normalized_main_img = self.normalize_url(main_img)
+            if normalized_main_img not in images:
+                images.insert(0, normalized_main_img)
 
         return BlogEntry(
             id=blog_id,

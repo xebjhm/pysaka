@@ -302,8 +302,10 @@ class HinatazakaBlogScraper(BaseBlogScraper):
                     date_text = date_elem.get_text(strip=True) if date_elem else ""
                     published_at = parse_jst_datetime(date_text)
 
-                    # Check date filter
-                    if since_date and published_at < since_date:
+                    # Check date filter. If the date could not be parsed
+                    # (published_at is None), don't treat it as "old" - skip the
+                    # early-return and still yield the entry.
+                    if since_date and published_at is not None and published_at < since_date:
                         return
 
                     # Extract first image if present
@@ -397,14 +399,26 @@ class HinatazakaBlogScraper(BaseBlogScraper):
                         entry = await self.get_blog_detail(blog_id)
                         entry.member_id = member_id
 
-                        # Check date filter
-                        if since_date and entry.published_at < since_date:
+                        # Check date filter (skip if date could not be parsed)
+                        if (
+                            since_date
+                            and entry.published_at is not None
+                            and entry.published_at < since_date
+                        ):
                             return
 
                         yield entry
 
                         # Polite delay between requests
                         await asyncio.sleep(DETAIL_DELAY)
+                    except BlogGoneError as e:
+                        # Blog was deleted between list and detail fetch.
+                        # Skip it and continue yielding remaining older blogs.
+                        logger.info(
+                            "blog_detail_gone",
+                            blog_id=blog_id,
+                            error=str(e),
+                        )
                     except ValueError as e:
                         logger.warning(
                             "blog_detail_fetch_failed",

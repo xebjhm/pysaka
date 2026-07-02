@@ -174,3 +174,29 @@ class TestRedactSecrets:
         result = _redact_secrets(None, "info", event_dict)
         assert result["items"] == ["a", "b", "c"]
         assert result["count"] == 42
+
+    def test_redact_does_not_mutate_original(self):
+        """PY-M7: redaction must not mutate the caller's dict or nested dicts.
+
+        A live client.headers/cookies could be passed as a log kwarg; mutating
+        it in place would set ***REDACTED*** on the real object and cause 401s.
+        """
+        headers = {"authorization": "Bearer real-token", "content-type": "application/json"}
+        event_dict = {
+            "access_token": "top-level-secret",
+            "headers": headers,
+            "message": "request made",
+        }
+
+        result = _redact_secrets(None, "info", event_dict)
+
+        # Redaction still applied in the returned copy.
+        assert result["access_token"] == "***REDACTED***"
+        assert result["headers"]["authorization"] == "***REDACTED***"
+        assert result["headers"]["content-type"] == "application/json"
+
+        # Originals are untouched.
+        assert event_dict["access_token"] == "top-level-secret"
+        assert headers["authorization"] == "Bearer real-token"
+        assert result is not event_dict
+        assert result["headers"] is not headers

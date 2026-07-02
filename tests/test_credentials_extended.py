@@ -5,7 +5,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pysaka.credentials import (
+    PLAINTEXT_FALLBACK_ENV,
     KeyringStore,
+    NoSecureKeyringError,
     TokenManager,
     _compress_data,
     _decompress_data,
@@ -140,30 +142,116 @@ class TestKeyringStore:
             store = KeyringStore()
             assert store._keyring is not None
 
-    def test_keyring_store_init_fallback_to_plaintext(self):
-        """Test fallback to PlaintextKeyring when default fails."""
+    def test_keyring_store_init_refuses_plaintext_by_default(self, monkeypatch):
+        """Without opt-in, a broken backend must raise NoSecureKeyringError.
+
+        This enforces the opt-in contract (PY-I7/SEC-3): we no longer silently
+        downgrade to the insecure PlaintextKeyring on disk.
+        """
+        monkeypatch.delenv(PLAINTEXT_FALLBACK_ENV, raising=False)
+        set_keyring_called = {"count": 0}
+
+        def broken_set(service, key, val):
+            raise Exception("Default keyring broken")
+
+        def track_set_keyring(_kr):
+            set_keyring_called["count"] += 1
+
+        with patch("keyring.set_password", side_effect=broken_set), \
+             patch("keyring.delete_password"), \
+             patch("keyring.set_keyring", side_effect=track_set_keyring):
+            with pytest.raises(NoSecureKeyringError) as exc:
+                KeyringStore()
+
+        # Guidance on how to opt in is included in the message.
+        assert PLAINTEXT_FALLBACK_ENV in str(exc.value)
+        assert "allow_plaintext_fallback" in str(exc.value)
+        # The insecure fallback backend was never installed.
+        assert set_keyring_called["count"] == 0
+
+    def test_keyring_store_init_fallback_opt_in_flag(self, monkeypatch):
+        """With allow_plaintext_fallback=True, a broken backend uses the fallback."""
+        monkeypatch.delenv(PLAINTEXT_FALLBACK_ENV, raising=False)
         call_count = {"set": 0}
 
         def mock_set(service, key, val):
             call_count["set"] += 1
             if call_count["set"] == 1:
                 raise Exception("Default keyring broken")
-            # Second call (after fallback) succeeds
+            # Subsequent calls (probing the fallback) succeed.
 
-        # Mock the keyring module and fallback path
+        mock_plaintext = MagicMock()
+        mock_plaintext.file_path = None  # skip permission tightening in test
+
         with patch("keyring.set_password", side_effect=mock_set), \
              patch("keyring.delete_password"), \
-             patch("keyring.set_keyring"):
-            # This should attempt fallback - may fail but we're testing the path
-            try:
-                KeyringStore()
-            except Exception:
-                # The fallback may not work without the actual module,
-                # but we've tested the fallback attempt path
-                pass
+             patch("keyring.set_keyring") as mock_set_keyring, \
+             patch.dict(
+                 "sys.modules",
+                 {"keyrings.alt.file": MagicMock(PlaintextKeyring=lambda: mock_plaintext)},
+             ):
+            store = KeyringStore(allow_plaintext_fallback=True)
 
-            # Verify at least one set attempt was made
-            assert call_count["set"] >= 1
+        # Fallback backend was installed and verified.
+        mock_set_keyring.assert_called_once()
+        assert call_count["set"] >= 2
+        assert store._plaintext_kr is mock_plaintext
+
+    def test_keyring_store_init_fallback_opt_in_env(self, monkeypatch):
+        """The PYSAKA_ALLOW_PLAINTEXT_KEYRING env var also enables the fallback."""
+        monkeypatch.setenv(PLAINTEXT_FALLBACK_ENV, "1")
+        call_count = {"set": 0}
+
+        def mock_set(service, key, val):
+            call_count["set"] += 1
+            if call_count["set"] == 1:
+                raise Exception("Default keyring broken")
+
+        mock_plaintext = MagicMock()
+        mock_plaintext.file_path = None
+
+        with patch("keyring.set_password", side_effect=mock_set), \
+             patch("keyring.delete_password"), \
+             patch("keyring.set_keyring") as mock_set_keyring, \
+             patch.dict(
+                 "sys.modules",
+                 {"keyrings.alt.file": MagicMock(PlaintextKeyring=lambda: mock_plaintext)},
+             ):
+            KeyringStore()  # no flag; env var opts in
+
+        mock_set_keyring.assert_called_once()
+
+    def test_keyring_store_fallback_sets_posix_permissions(self, monkeypatch, tmp_path):
+        """On POSIX, the plaintext store file gets 0600 permissions when used."""
+        import os as _os
+
+        monkeypatch.setenv(PLAINTEXT_FALLBACK_ENV, "1")
+        store_file = tmp_path / "plaintext.keyring"
+        store_file.write_text("dummy")
+        _os.chmod(store_file, 0o644)
+
+        call_count = {"set": 0}
+
+        def mock_set(service, key, val):
+            call_count["set"] += 1
+            if call_count["set"] == 1:
+                raise Exception("Default keyring broken")
+
+        mock_plaintext = MagicMock()
+        mock_plaintext.file_path = str(store_file)
+
+        with patch("keyring.set_password", side_effect=mock_set), \
+             patch("keyring.delete_password"), \
+             patch("keyring.set_keyring"), \
+             patch("pysaka.credentials.is_windows", return_value=False), \
+             patch.dict(
+                 "sys.modules",
+                 {"keyrings.alt.file": MagicMock(PlaintextKeyring=lambda: mock_plaintext)},
+             ):
+            KeyringStore()
+
+        mode = store_file.stat().st_mode & 0o777
+        assert mode == 0o600
 
     def test_keyring_store_save_compresses_data(self):
         """Test that save compresses data before storing."""
@@ -238,6 +326,23 @@ class TestTokenManager:
             with pytest.raises(SakaError) as exc:
                 TokenManager()
             assert "Secure storage" in str(exc.value)
+
+    def test_token_manager_propagates_no_secure_keyring_error(self):
+        """NoSecureKeyringError must propagate unwrapped so opt-in guidance survives."""
+        with patch(
+            "pysaka.credentials.KeyringStore",
+            side_effect=NoSecureKeyringError("no secure backend; opt in via flag"),
+        ):
+            with pytest.raises(NoSecureKeyringError) as exc:
+                TokenManager()
+            # Original guidance preserved (not wrapped in a generic message).
+            assert "opt in" in str(exc.value)
+
+    def test_token_manager_passes_fallback_flag(self):
+        """allow_plaintext_fallback is forwarded to KeyringStore."""
+        with patch("pysaka.credentials.KeyringStore") as mock_store_cls:
+            TokenManager(allow_plaintext_fallback=True)
+            mock_store_cls.assert_called_once_with(allow_plaintext_fallback=True)
 
     def test_token_manager_save_session(self):
         """Test save_session method."""

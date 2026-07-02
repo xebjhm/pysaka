@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
 
 import aiohttp
+
+# Matches a URL that already carries a scheme (e.g. "http:", "data:", "mailto:",
+# "tel:"). Such URLs must never be prefixed with base_url.
+_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
 
 
 class BlogGoneError(Exception):
@@ -41,7 +46,8 @@ class BlogEntry:
         id: Unique identifier for the blog post.
         title: Title of the blog post.
         content: HTML content of the blog post.
-        published_at: Publication timestamp.
+        published_at: Publication timestamp, or None if the source date could
+            not be parsed.
         url: Full URL to the original blog post.
         images: List of image URLs found in the content.
         member_id: ID of the member who wrote the post.
@@ -51,7 +57,7 @@ class BlogEntry:
     id: str
     title: str
     content: str
-    published_at: datetime
+    published_at: datetime | None
     url: str
     images: list[str] = field(default_factory=list)
     member_id: str = ""
@@ -83,6 +89,9 @@ class BaseBlogScraper(ABC):
         """Normalize a URL to be absolute.
 
         Handles relative URLs, protocol-relative URLs, and absolute URLs.
+        URLs that already carry a scheme (``http:``, ``https:``, ``data:``,
+        ``mailto:``, ``tel:``, etc.) and pure fragments (``#anchor``) are left
+        untouched so they are not corrupted by prefixing base_url.
 
         Args:
             url: The URL to normalize.
@@ -92,13 +101,18 @@ class BaseBlogScraper(ABC):
         """
         if not url:
             return ""
+        # Protocol-relative URLs: add the https scheme only.
         if url.startswith("//"):
             return f"https:{url}"
+        # Pure fragments and already-schemed URLs (data:, mailto:, tel:, http:,
+        # https:, ...) must be returned as-is.
+        if url.startswith("#") or _SCHEME_RE.match(url):
+            return url
+        # Absolute-path URL rooted at the site.
         if url.startswith("/"):
             return f"{self.base_url}{url}"
-        if not url.startswith("http"):
-            return f"{self.base_url}/{url}"
-        return url
+        # Genuinely relative path.
+        return f"{self.base_url}/{url}"
 
     def normalize_html_urls(self, html: str) -> str:
         """Normalize all URLs within HTML content to be absolute.
@@ -113,7 +127,6 @@ class BaseBlogScraper(ABC):
         Returns:
             HTML with all URLs normalized to absolute URLs.
         """
-        import re
 
         def replace_url(match: re.Match) -> str:
             attr = match.group(1)  # 'src' or 'href'
