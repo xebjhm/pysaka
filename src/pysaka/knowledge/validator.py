@@ -59,14 +59,20 @@ def _has_cjk(s: str) -> bool:
     return any(any(lo <= ord(ch) <= hi for lo, hi in _CJK_RANGES) for ch in s)
 
 
-def validate(answer: Answer, surfaced_doc_ids: set[str], store: DocumentStore, threshold: float = 0.9) -> Answer:
+def validate(answer: Answer, surfaced_doc_ids: set[str], store: DocumentStore, threshold: float = 0.15) -> Answer:
     """Drop ungrounded sentences/citations from `answer`; see module docstring for the rules.
 
     For each sentence: citations are pruned to those actually surfaced this turn
-    and still present in `store` (gate 1). If nothing survives, the sentence is
-    dropped. If the sentence text contains CJK, its best trigram-containment
-    ratio against its (now-valid) cited docs must reach `threshold`, or it is
-    dropped too (gate 2). Surviving sentences keep only their valid citation
+    and still present in `store` (gate 1 -- the HARD grounding guarantee: no
+    fabricated/unsurfaced citation can reach the user). If nothing survives, the
+    sentence is dropped. If the sentence text contains CJK, its best trigram-
+    containment ratio against its (now-valid) cited docs must reach `threshold`
+    (gate 2 -- a LENIENT mischaracterization guard). NOTE: the agent emits
+    *synthesized/summarized* prose, not verbatim quotes, so a summary is never
+    fully trigram-contained in one source; the default `threshold` is therefore
+    low (validated on real LLM answers -- 0.9 withheld every real answer). Strict
+    verbatim-quote verification would require the agent to emit per-citation
+    quotes (a v1.1 change). Surviving sentences keep only their valid citation
     ids; a deduped, doc_id-sorted `Citation` list is built from them. If no
     sentence survives, returns `Answer(sentences=[], citations=[], no_evidence=True)`.
     """

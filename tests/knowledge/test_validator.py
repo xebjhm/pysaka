@@ -175,7 +175,10 @@ def test_validate_drops_cjk_sentence_whose_content_is_not_in_the_cited_doc():
         citations=[],
     )
 
-    result = validate(answer, surfaced_doc_ids={_JP_DOC.doc_id}, store=store)
+    # Strict gate: at a HIGH threshold, a sentence only partially overlapping the doc is
+    # dropped. (The DEFAULT threshold is intentionally lenient -- synthesized answers are
+    # never verbatim-contained in one source; see validate()'s docstring.)
+    result = validate(answer, surfaced_doc_ids={_JP_DOC.doc_id}, store=store, threshold=0.9)
 
     assert result.sentences == []
     assert result.no_evidence is True
