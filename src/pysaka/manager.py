@@ -419,6 +419,52 @@ class SyncManager:
                 logger.error("Prepare error", message_id=mid, error=str(e))
         return processed, earliest_failed_ts, earliest_pending_media_ts
 
+    def scan_member_media(self, member_dir: Path) -> dict[str, Any]:
+        """
+        Offline scan of a member's messages.json for missing media.
+
+        A media file is 'missing' if it does not exist OR has zero bytes.
+        Expected paths are resolved as ``self.output_dir / msg["media_file"]``.
+
+        Returns:
+            ``{"checked": int, "missing": list[dict]}`` where each missing
+            descriptor is ``{"message_id", "media_type", "path": Path,
+            "timestamp"}``. Returns zero/empty if messages.json is absent or
+            unreadable.
+        """
+        result: dict[str, Any] = {"checked": 0, "missing": []}
+        messages_file = member_dir / "messages.json"
+        if not messages_file.exists():
+            return result
+        try:
+            with open(messages_file, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("scan: unreadable messages.json", file=str(messages_file), error=str(e))
+            return result
+
+        for msg in data.get("messages", []):
+            media_file = msg.get("media_file")
+            mtype = msg.get("type")
+            if not media_file or mtype not in ("picture", "video", "voice"):
+                continue
+            result["checked"] += 1
+            path = self.output_dir / media_file
+            try:
+                present = path.exists() and path.stat().st_size > 0
+            except OSError:
+                present = False
+            if not present:
+                result["missing"].append(
+                    {
+                        "message_id": msg.get("id"),
+                        "media_type": mtype,
+                        "path": path,
+                        "timestamp": msg.get("timestamp") or msg.get("published_at"),
+                    }
+                )
+        return result
+
     async def process_media_queue(
         self,
         session: aiohttp.ClientSession,

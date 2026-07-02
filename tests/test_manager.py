@@ -275,3 +275,35 @@ async def test_cursor_advances_fully_when_all_media_present(sync_manager):
     await sync_manager.sync_member(session, group, member, queue, prefetched_messages=prefetched)
     assert queue == []
     assert sync_manager.get_last_ts(1, 10) == "2026-01-03T00:00:00Z"  # full advance
+
+
+def test_scan_member_media_finds_absent_and_zero_byte(sync_manager):
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    (member_dir / "picture").mkdir(parents=True)
+    # 101 present & non-empty; 102 zero-byte; 103 absent; 104 text (ignored)
+    (member_dir / "picture" / "101.jpg").write_bytes(b"IMG")
+    (member_dir / "picture" / "102.jpg").write_bytes(b"")
+    (member_dir / "messages.json").write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"id": 101, "type": "picture", "media_file": "messages/1 Grp/10 Mem/picture/101.jpg"},
+                    {"id": 102, "type": "picture", "media_file": "messages/1 Grp/10 Mem/picture/102.jpg"},
+                    {"id": 103, "type": "picture", "media_file": "messages/1 Grp/10 Mem/picture/103.jpg"},
+                    {"id": 104, "type": "text", "content": "hi"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = sync_manager.scan_member_media(member_dir)
+    assert result["checked"] == 3
+    assert sorted(d["message_id"] for d in result["missing"]) == [102, 103]
+    assert all(isinstance(d["path"], Path) for d in result["missing"])
+
+
+def test_scan_member_media_missing_file_returns_empty(sync_manager):
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True)
+    assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": []}
