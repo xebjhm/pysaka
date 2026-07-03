@@ -13,9 +13,14 @@ from __future__ import annotations
 
 import json
 
-from .llm import LLMClient
+from .llm import LLMClient, ToolCall
 from .models import Answer, AnswerSentence, Scope
 from .tools import TOOL_SCHEMAS, ToolRunner
+
+# How many invalid (unparseable-arguments) tool calls one `ask()` tolerates
+# before giving up on the model entirely, rather than burning the rest of
+# `max_steps` on a model that keeps emitting malformed JSON.
+_MAX_INVALID_TOOL_CALLS = 3
 
 SYSTEM_PROMPT = """\
 You are a grounded research assistant over a group member's blog posts and messages.
@@ -41,6 +46,18 @@ evidence to answer the question, respond with exactly:
 """
 
 
+class ToolCallingUnreliableError(RuntimeError):
+    """Raised when the model can't reliably drive the knowledge tools.
+
+    `KnowledgeAgent.ask` aborts with this after `_MAX_INVALID_TOOL_CALLS`
+    invalid (unparseable-arguments) tool calls in one ask -- rather than
+    burning the rest of `max_steps` on a model that keeps emitting malformed
+    JSON. Pure/UI-agnostic like the rest of `pysaka.knowledge`: callers (e.g.
+    SakaDesk's `KnowledgeService`) are expected to catch this and translate it
+    into whatever typed, actionable error their own UI layer uses.
+    """
+
+
 class KnowledgeAgent:
     """Bounded tool-calling planner loop that answers a question via `LLMClient` + `ToolRunner`."""
 
@@ -55,12 +72,18 @@ class KnowledgeAgent:
         `surfaced_doc_ids` accumulates every `doc_id` any tool call surfaced this
         conversation (from `search` hits and successful `get_document` calls), for
         Task 15's grounding validator to check citations against.
+
+        Raises `ToolCallingUnreliableError` if `_MAX_INVALID_TOOL_CALLS` tool
+        calls in this ask come back with `invalid_reason` set (see
+        `_dispatch_tool_call`) -- a model that keeps failing to emit valid tool
+        arguments won't reliably produce a usable answer either.
         """
         messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(history or [])
         messages.append({"role": "user", "content": question})
 
         surfaced: set[str] = set()
+        invalid_call_count = 0
 
         for _step in range(self._max_steps):
             resp = await self._llm.chat(messages, tools=TOOL_SCHEMAS)
@@ -75,7 +98,7 @@ class KnowledgeAgent:
                     }
                 )
                 for call in resp.tool_calls:
-                    result = self._tools.run(call, scope)
+                    result = self._dispatch_tool_call(call, scope)
                     messages.append(
                         {
                             "role": "tool",
@@ -85,11 +108,32 @@ class KnowledgeAgent:
                         }
                     )
                     surfaced |= _surfaced_doc_ids(result)
+                    if call.invalid_reason is not None:
+                        invalid_call_count += 1
+                        if invalid_call_count >= _MAX_INVALID_TOOL_CALLS:
+                            raise ToolCallingUnreliableError(
+                                "model cannot drive the knowledge tools reliably "
+                                f"({invalid_call_count} invalid tool call arguments in one ask)"
+                            )
                 continue
 
             return _parse_answer(resp.text), surfaced
 
         return Answer(sentences=[], citations=[], no_evidence=True), surfaced
+
+    def _dispatch_tool_call(self, call: ToolCall, scope: Scope) -> dict:
+        """Run `call` against `ToolRunner`, UNLESS it's flagged `invalid_reason`.
+
+        An invalid call's `arguments` are just a placeholder (the `LLMClient`
+        couldn't parse what the model actually sent) -- dispatching it to
+        `ToolRunner` would either run a real tool with bogus/empty arguments
+        (silently wrong, for tools with no required args) or raise. Neither
+        gives the model an actionable error to self-correct from, so it's
+        short-circuited into an explicit `{"error": invalid_reason}` instead.
+        """
+        if call.invalid_reason is not None:
+            return {"error": call.invalid_reason}
+        return self._tools.run(call, scope)
 
     async def answer(self, question: str, scope: Scope, history: list[dict] | None = None) -> Answer:
         """Ask `question` and return a grounding-VALIDATED `Answer` -- the recommended entry point.

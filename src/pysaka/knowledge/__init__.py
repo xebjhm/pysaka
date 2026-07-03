@@ -13,7 +13,7 @@ imported explicitly from ``pysaka.knowledge.backends``.
 
 from __future__ import annotations
 
-from pysaka.knowledge.agent import KnowledgeAgent
+from pysaka.knowledge.agent import KnowledgeAgent, ToolCallingUnreliableError
 from pysaka.knowledge.aliases import AliasTable
 from pysaka.knowledge.callnames import CallNameTable
 from pysaka.knowledge.chunking import chunk_documents
@@ -69,6 +69,7 @@ __all__ = [
     "SourceRef",
     "TOOL_SCHEMAS",
     "ToolCall",
+    "ToolCallingUnreliableError",
     "ToolRunner",
     "VectorStore",
     "chunk_documents",

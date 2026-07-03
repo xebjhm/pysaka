@@ -12,7 +12,9 @@ import json
 import math
 from datetime import datetime, timezone
 
-from pysaka.knowledge.agent import KnowledgeAgent
+import pytest
+
+from pysaka.knowledge.agent import KnowledgeAgent, ToolCallingUnreliableError
 from pysaka.knowledge.aliases import AliasTable
 from pysaka.knowledge.lexical import PureLexicalIndex
 from pysaka.knowledge.llm import FakeLLMClient, LLMResponse, ToolCall
@@ -290,6 +292,71 @@ async def test_ask_stops_after_max_steps_without_exhausting_script():
     assert answer.no_evidence is True
     assert answer.sentences == []
     assert isinstance(surfaced, set)
+
+
+# --- invalid tool calls (malformed LLM tool-call arguments) ---------------------
+
+
+async def test_ask_feeds_invalid_tool_call_back_as_error_without_dispatching_to_runner():
+    """A `ToolCall` flagged `invalid_reason` (the LLM client's arguments couldn't be
+    parsed) must never reach `ToolRunner.run` -- it should be turned directly into
+    an `{"error": ...}` tool result carrying that reason, giving the model a
+    self-correction round instead of crashing or running a bogus tool call."""
+    tools, doc = _build_tools()
+    script = [
+        LLMResponse(
+            tool_calls=[
+                ToolCall("search", {}, id="call_1", invalid_reason="invalid arguments for tool 'search': bad json")
+            ]
+        ),
+        LLMResponse(tool_calls=[ToolCall("get_document", {"doc_id": doc.doc_id}, id="call_2")]),
+        LLMResponse(text=json.dumps({"sentences": [{"text": "corrected", "citation_ids": [doc.doc_id]}]})),
+    ]
+    fake = FakeLLMClient(script)
+    agent = KnowledgeAgent(fake, tools)
+
+    answer, surfaced = await agent.ask("question that gets a malformed tool call first", _SCOPE)
+
+    # The model got a 3rd chance (self-corrected on step 2) rather than the ask dying.
+    assert len(fake.calls) == 3
+    assert answer.no_evidence is False
+    assert doc.doc_id in surfaced
+
+    # The tool message fed back for the invalid call is the error, not a real search result.
+    second_messages, _tools_schema = fake.calls[1]
+    tool_turn = next(m for m in second_messages if m.get("role") == "tool" and m.get("id") == "call_1")
+    assert json.loads(tool_turn["content"]) == {"error": "invalid arguments for tool 'search': bad json"}
+
+
+async def test_ask_aborts_with_tool_calling_unreliable_after_three_invalid_calls():
+    tools, _doc = _build_tools()
+    script = [
+        LLMResponse(tool_calls=[ToolCall("search", {}, id=f"call_{i}", invalid_reason="bad json")]) for i in range(5)
+    ]
+    fake = FakeLLMClient(script)
+    agent = KnowledgeAgent(fake, tools)
+
+    with pytest.raises(ToolCallingUnreliableError, match="3"):
+        await agent.ask("model that keeps emitting malformed tool calls", _SCOPE)
+
+    # Aborted as soon as the 3rd invalid call was seen -- not all 5 scripted steps ran.
+    assert len(fake.calls) == 3
+
+
+async def test_ask_does_not_abort_on_two_invalid_calls_followed_by_success():
+    tools, doc = _build_tools()
+    script = [
+        LLMResponse(tool_calls=[ToolCall("search", {}, id="call_1", invalid_reason="bad json")]),
+        LLMResponse(tool_calls=[ToolCall("search", {}, id="call_2", invalid_reason="bad json")]),
+        LLMResponse(text=json.dumps({"sentences": [{"text": "ok", "citation_ids": [doc.doc_id]}]})),
+    ]
+    fake = FakeLLMClient(script)
+    agent = KnowledgeAgent(fake, tools)
+
+    answer, _surfaced = await agent.ask("two strikes then a valid final answer", _SCOPE)
+
+    assert answer.no_evidence is False
+    assert answer.sentences[0].text == "ok"
 
 
 # --- surfaced doc_id extraction -------------------------------------------------

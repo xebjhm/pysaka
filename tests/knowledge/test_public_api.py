@@ -50,6 +50,7 @@ PUBLIC_NAMES = [
     "TOOL_SCHEMAS",
     "ToolRunner",
     "KnowledgeAgent",
+    "ToolCallingUnreliableError",
     "validate",
 ]
 

@@ -9,6 +9,15 @@ class ToolCall:
     name: str
     arguments: dict
     id: str = ""
+    # Set by an `LLMClient` implementation when it could not parse this call's
+    # arguments (e.g. a weak model emitted truncated/invalid JSON) into a usable
+    # `dict` -- `arguments` is then just a placeholder (typically `{}`). A
+    # non-`None` value here is a short, model-facing explanation of what went
+    # wrong; `KnowledgeAgent` feeds it back as a tool-error result instead of
+    # dispatching the call to `ToolRunner`, so a malformed call can never
+    # execute a real tool with bogus arguments -- it always surfaces as an
+    # explicit error the model can self-correct from.
+    invalid_reason: str | None = None
 
 
 @dataclass
