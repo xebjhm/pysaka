@@ -22,9 +22,11 @@ from pysaka.knowledge.backends.onnx_embedder import (
     OnnxEmbedder,
     _apply_prefix,
     _build_feed,
+    _create_session,
     _infer_dim,
     _l2_normalize_rows,
     _masked_mean_pool,
+    select_providers,
 )
 
 # --------------------------------------------------------------------------
@@ -231,6 +233,9 @@ class _FakeTokenizer:
     def enable_padding(self, pad_id: int = 0, pad_token: str = "[PAD]") -> None:
         self.padding_enabled = True
 
+    def enable_truncation(self, max_length: int = 512) -> None:
+        self.truncation_max_length = max_length
+
     def encode_batch(self, texts: list[str]) -> list[_FakeEncoding]:
         self.seen_texts = list(texts)
         # 3 tokens per text, last one padding for the (shorter) second text
@@ -300,6 +305,150 @@ def test_embed_empty_texts_returns_empty_list() -> None:
     tokenizer = _FakeTokenizer()
     embedder = _make_embedder("granite", session, tokenizer)
     assert embedder.embed([]) == []
+
+
+# --------------------------------------------------------------------------
+# OnnxEmbedder -- execution-provider auto-selection (Product-wave Task 4)
+# --------------------------------------------------------------------------
+
+
+def test_select_providers_prefers_cuda_over_dml_and_coreml() -> None:
+    available = ["CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"]
+    assert select_providers(available) == ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+
+def test_select_providers_prefers_dml_when_no_cuda() -> None:
+    available = ["DmlExecutionProvider", "CPUExecutionProvider"]
+    assert select_providers(available) == ["DmlExecutionProvider", "CPUExecutionProvider"]
+
+
+def test_select_providers_prefers_coreml_when_no_cuda_or_dml() -> None:
+    available = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    assert select_providers(available) == ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+
+
+def test_select_providers_falls_back_to_cpu_only_when_no_gpu_provider() -> None:
+    available = ["CPUExecutionProvider", "AzureExecutionProvider"]
+    assert select_providers(available) == ["CPUExecutionProvider"]
+
+
+def test_select_providers_reads_real_ort_when_available_arg_omitted(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pysaka.knowledge.backends.onnx_embedder as mod
+
+    monkeypatch.setattr(mod.ort, "get_available_providers", lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"])
+    assert select_providers() == ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+
+class _FailThenSucceedSession:
+    """Fake `ort.InferenceSession`: raises for the first (GPU) providers list, succeeds for CPU-only."""
+
+    calls: list[list[str]] = []
+
+    def __init__(self, path: str, providers: list[str] | None = None, **kwargs: object) -> None:
+        _FailThenSucceedSession.calls.append(list(providers or []))
+        if providers != ["CPUExecutionProvider"]:
+            raise RuntimeError("simulated CUDA provider init failure")
+        self._providers = providers
+
+    def get_providers(self) -> list[str]:
+        return self._providers
+
+    def get_outputs(self) -> list[_FakeOutputInfo]:
+        return [_FakeOutputInfo(["batch", "sequence", 4])]
+
+    def get_inputs(self) -> list[_FakeInputInfo]:
+        return [_FakeInputInfo("input_ids")]
+
+
+def test_create_session_falls_back_to_cpu_on_preferred_provider_failure() -> None:
+    _FailThenSucceedSession.calls = []
+    session, active = _create_session(
+        "model.onnx", ["CUDAExecutionProvider", "CPUExecutionProvider"], _FailThenSucceedSession
+    )
+    assert active == "CPUExecutionProvider"
+    assert _FailThenSucceedSession.calls == [
+        ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        ["CPUExecutionProvider"],
+    ]
+
+
+class _AlwaysSucceedsSession:
+    def __init__(self, path: str, providers: list[str] | None = None, **kwargs: object) -> None:
+        self._providers = providers or ["CPUExecutionProvider"]
+
+    def get_providers(self) -> list[str]:
+        return self._providers
+
+    def get_outputs(self) -> list[_FakeOutputInfo]:
+        return [_FakeOutputInfo(["batch", "sequence", 4])]
+
+    def get_inputs(self) -> list[_FakeInputInfo]:
+        return [_FakeInputInfo("input_ids")]
+
+
+class _AlwaysFailsSession:
+    def __init__(self, path: str, providers: list[str] | None = None, **kwargs: object) -> None:
+        raise RuntimeError("simulated CPU provider init failure")
+
+
+def test_create_session_reraises_when_cpu_only_fallback_also_fails() -> None:
+    """An unrecoverable failure (even CPU-only can't init a session) must
+    propagate, not swallow the error and pretend embedding is usable."""
+    with pytest.raises(RuntimeError, match="simulated CPU provider init failure"):
+        _create_session("model.onnx", ["CPUExecutionProvider"], _AlwaysFailsSession)
+
+
+def test_create_session_honors_first_successful_provider_list() -> None:
+    session, active = _create_session(
+        "model.onnx", ["CUDAExecutionProvider", "CPUExecutionProvider"], _AlwaysSucceedsSession
+    )
+    assert active == "CUDAExecutionProvider"
+
+
+def test_onnx_embedder_auto_selects_providers_when_none_given(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import pysaka.knowledge.backends.onnx_embedder as mod
+
+    monkeypatch.setattr(mod.ort, "get_available_providers", lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"])
+    monkeypatch.setattr(mod.ort, "InferenceSession", _AlwaysSucceedsSession)
+    monkeypatch.setattr(mod.Tokenizer, "from_file", staticmethod(lambda path: _FakeTokenizer()))
+
+    embedder = OnnxEmbedder(tmp_path)
+
+    assert embedder.active_provider == "CUDAExecutionProvider"
+
+
+def test_onnx_embedder_honors_explicit_providers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import pysaka.knowledge.backends.onnx_embedder as mod
+
+    calls: list[list[str]] = []
+
+    class _RecordingSession(_AlwaysSucceedsSession):
+        def __init__(self, path: str, providers: list[str] | None = None, **kwargs: object) -> None:
+            calls.append(list(providers or []))
+            super().__init__(path, providers, **kwargs)
+
+    monkeypatch.setattr(mod.ort, "InferenceSession", _RecordingSession)
+    monkeypatch.setattr(mod.Tokenizer, "from_file", staticmethod(lambda path: _FakeTokenizer()))
+
+    embedder = OnnxEmbedder(tmp_path, providers=["DmlExecutionProvider"])
+
+    assert calls == [["DmlExecutionProvider"]]
+    assert embedder.active_provider == "DmlExecutionProvider"
+
+
+def test_onnx_embedder_falls_back_to_cpu_when_preferred_provider_session_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import pysaka.knowledge.backends.onnx_embedder as mod
+
+    _FailThenSucceedSession.calls = []
+    monkeypatch.setattr(mod.ort, "get_available_providers", lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"])
+    monkeypatch.setattr(mod.ort, "InferenceSession", _FailThenSucceedSession)
+    monkeypatch.setattr(mod.Tokenizer, "from_file", staticmethod(lambda path: _FakeTokenizer()))
+
+    embedder = OnnxEmbedder(tmp_path)
+
+    assert embedder.active_provider == "CPUExecutionProvider"
 
 
 # --------------------------------------------------------------------------

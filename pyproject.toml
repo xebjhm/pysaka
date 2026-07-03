@@ -45,6 +45,18 @@ embeddings = [
     "onnxruntime>=1.17",
     "tokenizers>=0.15",
 ]
+# GPU-accelerated variant of `embeddings`: `onnxruntime-gpu` (CUDA) instead of the
+# plain CPU-only `onnxruntime` wheel -- the two packages occupy the same `onnxruntime`
+# import namespace and must not both be installed in one environment. Install this
+# extra INSTEAD OF `embeddings` on a machine with a working NVIDIA CUDA/cuDNN runtime
+# to let `OnnxEmbedder`'s auto-selection (`select_providers()`) actually pick
+# `CUDAExecutionProvider` -- otherwise `get_available_providers()` only ever reports
+# `CPUExecutionProvider` and it silently runs on CPU (correct, just slower).
+embeddings-gpu = [
+    "numpy>=1.24",
+    "onnxruntime-gpu>=1.17",
+    "tokenizers>=0.15",
+]
 
 [project.urls]
 Homepage = "https://github.com/xebjhm/pysaka"
