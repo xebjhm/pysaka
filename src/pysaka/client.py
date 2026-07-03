@@ -688,7 +688,11 @@ class Client:
         """
         Download a file to disk safely: write to a ``*.part`` temp then atomically
         rename. Validates the body is non-empty and (when the server sends
-        ``Content-Length``) matches the declared size. Retries transient failures
+        ``Content-Length`` and no ``Content-Encoding``) matches the declared size.
+        The length check is skipped when the response carries a
+        ``Content-Encoding`` header (e.g. gzip/deflate/br), since aiohttp
+        transparently decompresses the body while ``Content-Length`` still
+        reflects the compressed wire size. Retries transient failures
         with a short backoff. On ultimate failure leaves NO file behind — a prior
         truncated/0-byte stub is treated as missing and re-downloaded.
 
@@ -721,9 +725,15 @@ class Client:
                     else:
                         data = await resp.read()
                         declared = resp.headers.get("Content-Length")
+                        encoding = resp.headers.get("Content-Encoding")
                         if not data:
                             last_err = "empty body"
-                        elif declared is not None and declared.isdigit() and int(declared) != len(data):
+                        elif (
+                            encoding is None
+                            and declared is not None
+                            and declared.isdigit()
+                            and int(declared) != len(data)
+                        ):
                             last_err = f"size mismatch got={len(data)} declared={declared}"
                         else:
                             async with aiofiles.open(tmp, "wb") as f:

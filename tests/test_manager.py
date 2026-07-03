@@ -331,6 +331,16 @@ def test_scan_member_media_missing_file_returns_empty(sync_manager):
     assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": []}
 
 
+def test_scan_member_media_non_dict_json_returns_empty(sync_manager):
+    # A valid-but-non-dict messages.json (e.g. "[]" or "null") must degrade to
+    # the empty result rather than raising AttributeError on data.get(...).
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True)
+    (member_dir / "messages.json").write_text(json.dumps([]), encoding="utf-8")
+
+    assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": []}
+
+
 @pytest.mark.asyncio
 async def test_reconcile_downloads_missing_from_timeline(sync_manager):
     member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"

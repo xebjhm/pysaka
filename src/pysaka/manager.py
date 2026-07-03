@@ -449,6 +449,10 @@ class SyncManager:
             logger.warning("scan: unreadable messages.json", file=str(messages_file), error=str(e))
             return result
 
+        if not isinstance(data, dict):
+            logger.warning("scan: messages.json is not a JSON object", file=str(messages_file))
+            return result
+
         for msg in data.get("messages", []):
             media_file = msg.get("media_file")
             mtype = msg.get("type")

@@ -279,6 +279,21 @@ async def test_download_file_content_length_mismatch_leaves_no_stub(tmp_path, cl
 
 
 @pytest.mark.asyncio
+async def test_download_file_skips_length_check_when_encoded(tmp_path, client, mock_session):
+    # aiohttp auto-decompresses the body, but Content-Length reflects the
+    # compressed wire size. When Content-Encoding is present, the declared
+    # length must not be compared against the decompressed body size.
+    dest = tmp_path / "picture" / "4.jpg"
+    resp = mock_session.get.return_value.__aenter__.return_value
+    resp.status = 200
+    resp.read = AsyncMock(return_value=b"DECOMPRESSED_BYTES")
+    resp.headers = {"Content-Encoding": "gzip", "Content-Length": "999"}
+    ok = await client.download_file(mock_session, "https://cdn/4.jpg", dest)
+    assert ok is True
+    assert dest.read_bytes() == b"DECOMPRESSED_BYTES"
+
+
+@pytest.mark.asyncio
 async def test_download_file_retries_then_succeeds(tmp_path, client, mock_session):
     dest = tmp_path / "picture" / "3.jpg"
     resp_500 = AsyncMock()
