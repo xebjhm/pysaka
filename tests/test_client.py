@@ -248,3 +248,61 @@ async def test_fetch_json_auto_refresh_fail(client, mock_session):
         await client.fetch_json(mock_session, "/test")
     mock_session.get.assert_called_once()
     mock_session.post.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_download_file_zero_byte_stub_is_redownloaded(tmp_path, client, mock_session):
+    # A pre-existing 0-byte file must NOT count as "already downloaded".
+    dest = tmp_path / "picture" / "1.jpg"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"")
+    resp = mock_session.get.return_value.__aenter__.return_value
+    resp.status = 200
+    resp.read = AsyncMock(return_value=b"REALBYTES")
+    resp.headers = {}
+    ok = await client.download_file(mock_session, "https://cdn/1.jpg", dest)
+    assert ok is True
+    assert dest.read_bytes() == b"REALBYTES"
+
+
+@pytest.mark.asyncio
+async def test_download_file_content_length_mismatch_leaves_no_stub(tmp_path, client, mock_session):
+    dest = tmp_path / "picture" / "2.jpg"
+    resp = mock_session.get.return_value.__aenter__.return_value
+    resp.status = 200
+    resp.read = AsyncMock(return_value=b"AB")
+    resp.headers = {"Content-Length": "999"}
+    ok = await client.download_file(mock_session, "https://cdn/2.jpg", dest, retries=1)
+    assert ok is False
+    assert not dest.exists()  # no truncated stub
+    assert not (dest.parent / "2.jpg.part").exists()
+
+
+@pytest.mark.asyncio
+async def test_download_file_skips_length_check_when_encoded(tmp_path, client, mock_session):
+    # aiohttp auto-decompresses the body, but Content-Length reflects the
+    # compressed wire size. When Content-Encoding is present, the declared
+    # length must not be compared against the decompressed body size.
+    dest = tmp_path / "picture" / "4.jpg"
+    resp = mock_session.get.return_value.__aenter__.return_value
+    resp.status = 200
+    resp.read = AsyncMock(return_value=b"DECOMPRESSED_BYTES")
+    resp.headers = {"Content-Encoding": "gzip", "Content-Length": "999"}
+    ok = await client.download_file(mock_session, "https://cdn/4.jpg", dest)
+    assert ok is True
+    assert dest.read_bytes() == b"DECOMPRESSED_BYTES"
+
+
+@pytest.mark.asyncio
+async def test_download_file_retries_then_succeeds(tmp_path, client, mock_session):
+    dest = tmp_path / "picture" / "3.jpg"
+    resp_500 = AsyncMock()
+    resp_500.status = 500
+    resp_ok = AsyncMock()
+    resp_ok.status = 200
+    resp_ok.read = AsyncMock(return_value=b"OK")
+    resp_ok.headers = {}
+    mock_session.get.return_value.__aenter__.side_effect = [resp_500, resp_ok]
+    ok = await client.download_file(mock_session, "https://cdn/3.jpg", dest, retries=3)
+    assert ok is True
+    assert dest.read_bytes() == b"OK"

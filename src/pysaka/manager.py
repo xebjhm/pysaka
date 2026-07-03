@@ -13,7 +13,7 @@ import structlog
 
 from .client import Client
 from .media import get_audio_metadata, get_media_dimensions
-from .utils import get_media_extension, normalize_message, sanitize_name
+from .utils import get_media_extension, media_file_is_present, normalize_message, sanitize_name
 
 logger = structlog.get_logger()
 
@@ -217,7 +217,9 @@ class SyncManager:
                 return 0
 
             # Process & Prepare
-            processed, earliest_failed_ts = self.prepare_messages(messages, member_dir, media_queue)
+            processed, earliest_failed_ts, earliest_pending_media_ts = self.prepare_messages(
+                messages, member_dir, media_queue
+            )
 
             # Load existing
             existing_file = member_dir / "messages.json"
@@ -312,6 +314,14 @@ class SyncManager:
             # no timestamp clamps to "" (full re-fetch) — safe over lossy.
             if earliest_failed_ts is not None and newest_ts is not None:
                 newest_ts = min(newest_ts, earliest_failed_ts)
+            # Also hold the cursor behind any message whose media is still queued
+            # (not yet confirmed on disk). If the media phase is interrupted, the
+            # next timestamp-filtered sync re-fetches these messages and re-downloads.
+            # Note: A message whose media URL is permanently unavailable will keep
+            # re-pinning this cursor every sync; a give-up/attempt-cap is a possible
+            # future enhancement.
+            if earliest_pending_media_ts is not None and newest_ts is not None:
+                newest_ts = min(newest_ts, earliest_pending_media_ts)
             self.update_sync_state(gid, mid, max_id, len(merged), last_ts=newest_ts)
 
             return len(processed)
@@ -322,7 +332,7 @@ class SyncManager:
 
     def prepare_messages(
         self, messages: list[dict[str, Any]], member_dir: Path, queue: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], Optional[str]]:
+    ) -> tuple[list[dict[str, Any]], Optional[str], Optional[str]]:
         """
         Normalize messages and queue media downloads.
 
@@ -332,16 +342,20 @@ class SyncManager:
             queue: Media download waiting queue.
 
         Returns:
-            A tuple ``(processed, earliest_failed_ts)``. ``processed`` is the list
-            of normalized message dicts. ``earliest_failed_ts`` is the
-            ``published_at`` of the oldest message that failed to normalize (``""``
-            if such a message had no timestamp), or ``None`` if every message
-            processed. The caller must not advance the sync cursor to or past
+            A tuple ``(processed, earliest_failed_ts, earliest_pending_media_ts)``.
+            ``processed`` is the list of normalized message dicts.
+            ``earliest_failed_ts`` is the ``published_at`` of the oldest message that
+            failed to normalize (``""`` if such a message had no timestamp), or ``None``
+            if every message processed. The caller must not advance the sync cursor to or past
             ``earliest_failed_ts`` — doing so would drop the failed message
             permanently on the next timestamp-filtered sync.
+            ``earliest_pending_media_ts`` is the ``published_at`` (or ``""`` if none) of
+            the oldest message whose media was queued for download; ``None`` if no media
+            was queued. The caller must not advance the cursor past it.
         """
         processed = []
         earliest_failed_ts: Optional[str] = None
+        earliest_pending_media_ts: Optional[str] = None
         for msg in messages:
             try:
                 # Normalize core fields
@@ -364,8 +378,11 @@ class SyncManager:
 
                     filepath = member_dir / subdir / f"{msg['id']}.{ext}"
 
-                    # Logic: If file doesn't exist, queue it.
-                    if not filepath.exists():
+                    # Compute presence the same way scan_member_media does: absent OR zero-byte = missing.
+                    media_present = media_file_is_present(filepath)
+
+                    # Logic: If file doesn't exist or is zero-byte, queue it.
+                    if not media_present:
                         queue.append(
                             {
                                 "url": media_url,
@@ -376,11 +393,16 @@ class SyncManager:
                                 "member_dir": member_dir,
                             }
                         )
+                        # Hold the cursor behind this message until its media is on
+                        # disk, so an interrupted download is re-fetched next run.
+                        pending_ts = msg.get("published_at") or ""
+                        if earliest_pending_media_ts is None or pending_ts < earliest_pending_media_ts:
+                            earliest_pending_media_ts = pending_ts
 
                     p_msg["media_file"] = str(filepath.relative_to(self.output_dir))
 
                     # Extract dimensions if file exists (already downloaded or will be processed)
-                    if filepath.exists():
+                    if media_present:
                         width, height = get_media_dimensions(filepath, msg_type)
                         if width and height:
                             p_msg["width"] = width
@@ -401,7 +423,54 @@ class SyncManager:
                 if earliest_failed_ts is None or failed_ts < earliest_failed_ts:
                     earliest_failed_ts = failed_ts
                 logger.error("Prepare error", message_id=mid, error=str(e))
-        return processed, earliest_failed_ts
+        return processed, earliest_failed_ts, earliest_pending_media_ts
+
+    def scan_member_media(self, member_dir: Path) -> dict[str, Any]:
+        """
+        Offline scan of a member's messages.json for missing media.
+
+        A media file is 'missing' if it does not exist OR has zero bytes.
+        Expected paths are resolved as ``self.output_dir / msg["media_file"]``.
+
+        Returns:
+            ``{"checked": int, "missing": list[dict]}`` where each missing
+            descriptor is ``{"message_id", "media_type", "path": Path,
+            "timestamp"}``. Returns zero/empty if messages.json is absent or
+            unreadable.
+        """
+        result: dict[str, Any] = {"checked": 0, "missing": []}
+        messages_file = member_dir / "messages.json"
+        if not messages_file.exists():
+            return result
+        try:
+            with open(messages_file, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("scan: unreadable messages.json", file=str(messages_file), error=str(e))
+            return result
+
+        if not isinstance(data, dict):
+            logger.warning("scan: messages.json is not a JSON object", file=str(messages_file))
+            return result
+
+        for msg in data.get("messages", []):
+            media_file = msg.get("media_file")
+            mtype = msg.get("type")
+            if not media_file or mtype not in ("picture", "video", "voice"):
+                continue
+            result["checked"] += 1
+            path = self.output_dir / media_file
+            present = media_file_is_present(path)
+            if not present:
+                result["missing"].append(
+                    {
+                        "message_id": msg.get("id"),
+                        "media_type": mtype,
+                        "path": path,
+                        "timestamp": msg.get("timestamp") or msg.get("published_at"),
+                    }
+                )
+        return result
 
     async def process_media_queue(
         self,
@@ -509,3 +578,62 @@ class SyncManager:
 
         except Exception as e:
             logger.error("Failed to update message metadata", file=str(messages_file), error=str(e))
+
+    async def reconcile_member_media(
+        self,
+        session: aiohttp.ClientSession,
+        member_dir: Path,
+        missing: list[dict[str, Any]],
+        timeline_messages: list[dict[str, Any]],
+        progress_callback: Optional[Any] = None,
+    ) -> dict[str, int]:
+        """
+        Backfill a member's missing media using fresh URLs from a re-fetched
+        timeline. Matches each missing message_id to a ``file``/``thumbnail`` URL,
+        downloads via ``process_media_queue`` (hardened ``download_file``), then
+        re-checks disk truth and writes back dimension metadata.
+
+        Returns ``{"repaired", "failed", "still_missing"}``.
+        """
+        report = {"repaired": 0, "failed": 0, "still_missing": 0}
+        if not missing:
+            return report
+
+        url_by_id: dict[Any, str] = {}
+        for m in timeline_messages:
+            url = m.get("file") or m.get("thumbnail")
+            if url:
+                url_by_id[m.get("id")] = url
+
+        queue: list[dict[str, Any]] = []
+        for d in missing:
+            url = url_by_id.get(d["message_id"])
+            if url:
+                queue.append(
+                    {
+                        "url": url,
+                        "path": d["path"],
+                        "timestamp": d.get("timestamp"),
+                        "message_id": d["message_id"],
+                        "media_type": d["media_type"],
+                        "member_dir": member_dir,
+                    }
+                )
+
+        metadata_by_dir = await self.process_media_queue(session, queue, progress_callback=progress_callback)
+
+        # Re-check disk truth: a queued item counts as repaired only if the file
+        # is now present and non-empty.
+        for item in queue:
+            p = item["path"]
+            ok = media_file_is_present(p)
+            if ok:
+                report["repaired"] += 1
+            else:
+                report["failed"] += 1
+        report["still_missing"] = len(missing) - report["repaired"]
+
+        member_meta = metadata_by_dir.get(member_dir)
+        if member_meta:
+            await self.update_message_metadata(member_dir / "messages.json", member_meta)
+        return report
