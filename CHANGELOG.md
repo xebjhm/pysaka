@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-03
+
 ### Fixed
 - Sync no longer strands message media when a media download is interrupted: the
   per-member cursor is held behind any message whose media is not yet on disk, and
