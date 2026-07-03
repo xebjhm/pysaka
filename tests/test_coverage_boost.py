@@ -13,31 +13,17 @@ from pysaka.credentials import KeyringStore, TokenManager
 
 
 @pytest.mark.asyncio
-async def test_client_download_file_success(client, mock_session):
-    """Test file download with aiofiles mocking."""
-    mock_resp = mock_session.get.return_value.__aenter__.return_value
-    mock_resp.status = 200
-    mock_resp.read = AsyncMock(return_value=b"file_content")
-
-    # Needs a Path object
-    dest = Path("/tmp/file.jpg")
-
-    with (
-        patch("aiofiles.open", new_callable=MagicMock) as mock_file_open_ctx,
-        patch("pathlib.Path.exists", return_value=False),
-        patch("pathlib.Path.mkdir"),
-    ):  # Mock mkdir to avoid file ops
-        # aiofiles.open returns an AsyncContextManager
-        # So calling it returns a context manager whose __aenter__ returns the file handle
-        mock_file_handle = AsyncMock()
-        mock_file_open_ctx.return_value.__aenter__.return_value = mock_file_handle
-
-        await client.download_file(mock_session, "http://example.com/file.jpg", dest)
-
-        # We can't assert_called_with on the ContextManager easily if it's async?
-        # Actually aiofiles.open(...) returns the CM.
-        mock_file_open_ctx.assert_called_with(dest, "wb")
-        mock_file_handle.write.assert_called_with(b"file_content")
+async def test_client_download_file_success(client, mock_session, tmp_path):
+    """Download writes the body via atomic .part rename."""
+    resp = mock_session.get.return_value.__aenter__.return_value
+    resp.status = 200
+    resp.read = AsyncMock(return_value=b"file_content")
+    resp.headers = {}
+    dest = tmp_path / "file.jpg"
+    ok = await client.download_file(mock_session, "http://example.com/file.jpg", dest)
+    assert ok is True
+    assert dest.read_bytes() == b"file_content"
+    assert not (tmp_path / "file.jpg.part").exists()
 
 
 @pytest.mark.asyncio

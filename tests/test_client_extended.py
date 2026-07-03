@@ -312,17 +312,15 @@ class TestClientDownloadFile:
         mock_resp = mock_session.get.return_value.__aenter__.return_value
         mock_resp.status = 200
         mock_resp.read = AsyncMock(return_value=b"file_content")
+        mock_resp.headers = {}
 
         filepath = tmp_path / "nested" / "dirs" / "file.jpg"
 
-        with patch("aiofiles.open", new_callable=MagicMock) as mock_open:
-            mock_file = AsyncMock()
-            mock_open.return_value.__aenter__.return_value = mock_file
+        result = await client.download_file(mock_session, "http://example.com/file.jpg", filepath)
 
-            result = await client.download_file(mock_session, "http://example.com/file.jpg", filepath)
-
-            assert result is True
-            assert filepath.parent.exists()
+        assert result is True
+        assert filepath.parent.exists()
+        assert filepath.read_bytes() == b"file_content"
 
 
 class TestClientGetMessages:

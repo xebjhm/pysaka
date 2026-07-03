@@ -238,3 +238,143 @@ async def test_sync_member_prefetched_empty_returns_zero(sync_manager):
 
     assert count == 0
     sync_manager.client.get_messages.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cursor_held_behind_message_with_undownloaded_media(sync_manager):
+    """A queued-but-not-downloaded image must hold the cursor behind it, even
+    when a newer text message exists — so an interrupted media phase self-heals."""
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp"}
+    member = {"id": 10, "name": "Mem"}
+    queue: list = []
+    prefetched = [
+        {"id": 100, "type": "text", "text": "hi", "member_id": 10, "published_at": "2026-01-01T00:00:00Z"},
+        {"id": 101, "type": "image", "file": "http://img.jpg", "member_id": 10, "published_at": "2026-01-02T00:00:00Z"},
+        {"id": 102, "type": "text", "text": "newest", "member_id": 10, "published_at": "2026-01-03T00:00:00Z"},
+    ]
+    await sync_manager.sync_member(session, group, member, queue, prefetched_messages=prefetched)
+    # Image 101 was queued (file absent) -> cursor clamped to its ts, NOT 102's.
+    assert any(item["message_id"] == 101 for item in queue)
+    assert sync_manager.get_last_ts(1, 10) == "2026-01-02T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_cursor_held_behind_zero_byte_media_stub(sync_manager):
+    """A zero-byte stub for an image must be treated as missing and re-queued,
+    holding the cursor behind it — consistent with scan_member_media and download_file."""
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp"}
+    member = {"id": 10, "name": "Mem"}
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    (member_dir / "picture").mkdir(parents=True)
+    (member_dir / "picture" / "101.jpg").write_bytes(b"")  # Zero-byte stub (incomplete download)
+    queue: list = []
+    prefetched = [
+        {"id": 101, "type": "image", "file": "http://img.jpg", "member_id": 10, "published_at": "2026-01-02T00:00:00Z"},
+        {"id": 102, "type": "text", "text": "newer", "member_id": 10, "published_at": "2026-01-03T00:00:00Z"},
+    ]
+    await sync_manager.sync_member(session, group, member, queue, prefetched_messages=prefetched)
+    # Image 101 zero-byte stub is re-queued despite the file existing.
+    assert any(item["message_id"] == 101 for item in queue)
+    # Cursor held behind the 0-byte stub, NOT at 102's timestamp.
+    assert sync_manager.get_last_ts(1, 10) == "2026-01-02T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_cursor_advances_fully_when_all_media_present(sync_manager):
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp"}
+    member = {"id": 10, "name": "Mem"}
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    (member_dir / "picture").mkdir(parents=True)
+    (member_dir / "picture" / "101.jpg").write_bytes(b"IMG")  # already on disk -> not queued
+    queue: list = []
+    prefetched = [
+        {"id": 101, "type": "image", "file": "http://img.jpg", "member_id": 10, "published_at": "2026-01-02T00:00:00Z"},
+        {"id": 102, "type": "text", "text": "later", "member_id": 10, "published_at": "2026-01-03T00:00:00Z"},
+    ]
+    await sync_manager.sync_member(session, group, member, queue, prefetched_messages=prefetched)
+    assert queue == []
+    assert sync_manager.get_last_ts(1, 10) == "2026-01-03T00:00:00Z"  # full advance
+
+
+def test_scan_member_media_finds_absent_and_zero_byte(sync_manager):
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    (member_dir / "picture").mkdir(parents=True)
+    # 101 present & non-empty; 102 zero-byte; 103 absent; 104 text (ignored)
+    (member_dir / "picture" / "101.jpg").write_bytes(b"IMG")
+    (member_dir / "picture" / "102.jpg").write_bytes(b"")
+    (member_dir / "messages.json").write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"id": 101, "type": "picture", "media_file": "messages/1 Grp/10 Mem/picture/101.jpg"},
+                    {"id": 102, "type": "picture", "media_file": "messages/1 Grp/10 Mem/picture/102.jpg"},
+                    {"id": 103, "type": "picture", "media_file": "messages/1 Grp/10 Mem/picture/103.jpg"},
+                    {"id": 104, "type": "text", "content": "hi"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = sync_manager.scan_member_media(member_dir)
+    assert result["checked"] == 3
+    assert sorted(d["message_id"] for d in result["missing"]) == [102, 103]
+    assert all(isinstance(d["path"], Path) for d in result["missing"])
+
+
+def test_scan_member_media_missing_file_returns_empty(sync_manager):
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True)
+    assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": []}
+
+
+def test_scan_member_media_non_dict_json_returns_empty(sync_manager):
+    # A valid-but-non-dict messages.json (e.g. "[]" or "null") must degrade to
+    # the empty result rather than raising AttributeError on data.get(...).
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True)
+    (member_dir / "messages.json").write_text(json.dumps([]), encoding="utf-8")
+
+    assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": []}
+
+
+@pytest.mark.asyncio
+async def test_reconcile_downloads_missing_from_timeline(sync_manager):
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    (member_dir / "picture").mkdir(parents=True)
+    dest = member_dir / "picture" / "103.jpg"
+    missing = [{"message_id": 103, "media_type": "picture", "path": dest, "timestamp": "2026-01-03T00:00:00Z"}]
+    timeline = [
+        {"id": 103, "file": "https://cdn/fresh-103.jpg", "type": "picture"},
+        {"id": 999, "file": "https://cdn/other.jpg"},
+    ]
+    (member_dir / "messages.json").write_text(
+        json.dumps(
+            {"messages": [{"id": 103, "type": "picture", "media_file": "messages/1 Grp/10 Mem/picture/103.jpg"}]}
+        ),
+        encoding="utf-8",
+    )
+
+    async def fake_dl(session, url, path, timestamp=None, **kw):
+        Path(path).write_bytes(b"FRESHIMG")
+        return True
+
+    sync_manager.client.download_file = AsyncMock(side_effect=fake_dl)
+
+    report = await sync_manager.reconcile_member_media(AsyncMock(), member_dir, missing, timeline)
+    assert report == {"repaired": 1, "failed": 0, "still_missing": 0}
+    assert dest.read_bytes() == b"FRESHIMG"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_no_timeline_match_is_still_missing(sync_manager):
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True)
+    missing = [
+        {"message_id": 103, "media_type": "picture", "path": member_dir / "picture" / "103.jpg", "timestamp": None}
+    ]
+    report = await sync_manager.reconcile_member_media(AsyncMock(), member_dir, missing, timeline_messages=[])
+    assert report == {"repaired": 0, "failed": 0, "still_missing": 1}

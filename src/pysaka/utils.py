@@ -1,6 +1,7 @@
 import base64
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -55,6 +56,15 @@ def get_media_extension(url: Optional[str], msg_type: str) -> str:
             if ext in ["jpg", "jpeg", "png", "gif", "webp", "m4a", "mp3", "wav", "mp4", "mov", "webm"]:
                 return ext
     return MEDIA_EXTENSIONS.get(msg_type, "bin")
+
+
+def media_file_is_present(path: Path) -> bool:
+    """True if a media file exists and is non-empty. A 0-byte stub counts as
+    missing (absent path, permission error, or zero size -> False)."""
+    try:
+        return path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def parse_jwt_expiry(token: str) -> Optional[int]:
