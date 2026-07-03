@@ -23,18 +23,32 @@ class NumpyVectorStore:
 
     def __init__(self) -> None:
         self._ids: list[str] = []
+        self._index: dict[str, int] = {}  # id -> row index in `_matrix` (mirror of `_ids`)
         self._matrix: np.ndarray | None = None  # shape (n, dim), float32, L2-normalized rows
 
     def add(self, ids: list[str], vectors: list[list[float]]) -> None:
-        """Add `vectors` under `ids`; an id that already exists REPLACES its row."""
+        """Add `vectors` under `ids`; an id that already exists REPLACES its row.
+
+        Batched: membership checks go through an id->row dict (O(1) per id, not a
+        list scan) and all new rows are appended with a SINGLE `vstack` per call —
+        a per-row vstack would copy the whole growing matrix each time, turning a
+        large batch load (e.g. rehydrating a persisted store) quadratic.
+        """
+        new_ids: list[str] = []
+        new_rows: list[np.ndarray] = []
         for id_, vector in zip(ids, vectors):
             normalized = _normalize(np.asarray(vector, dtype=np.float32))
-            if id_ in self._ids:
-                self._matrix[self._ids.index(id_)] = normalized  # type: ignore[index]
+            existing = self._index.get(id_)
+            if existing is not None:
+                self._matrix[existing] = normalized  # type: ignore[index]
             else:
-                self._ids.append(id_)
-                row = normalized.reshape(1, -1)
-                self._matrix = row if self._matrix is None else np.vstack([self._matrix, row])
+                self._index[id_] = len(self._ids) + len(new_ids)
+                new_ids.append(id_)
+                new_rows.append(normalized)
+        if new_rows:
+            block = np.stack(new_rows)
+            self._matrix = block if self._matrix is None else np.vstack([self._matrix, block])
+            self._ids.extend(new_ids)
 
     def remove(self, ids: list[str]) -> None:
         """Drop the rows for `ids` (silently ignores unknown ids)."""
@@ -42,6 +56,7 @@ class NumpyVectorStore:
         keep_idx = [i for i, id_ in enumerate(self._ids) if id_ not in drop]
         self._ids = [self._ids[i] for i in keep_idx]
         self._matrix = self._matrix[keep_idx] if keep_idx and self._matrix is not None else None
+        self._index = {id_: i for i, id_ in enumerate(self._ids)}
 
     def search(self, vector: list[float], k: int, allowed_ids: set[str] | None = None) -> list[tuple[str, float]]:
         """Return up to `k` `(id, cosine_score)` pairs, highest score first.
