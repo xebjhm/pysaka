@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -146,6 +147,61 @@ async def test_ask_runs_scripted_resolve_then_search_then_returns_cited_answer()
     assert len(answer.sentences) == 1
     assert doc.doc_id in answer.sentences[0].citation_ids
     assert doc.doc_id in surfaced
+
+
+async def test_ask_injects_current_datetime_and_zone_into_system_prompt():
+    """Fix 2 (pwave-2): the agent must anchor relative-date questions ("last
+    month") against a real clock in the user's zone, not the model's
+    training-era guess -- via a `Current date/time: ... (<zone>)` line injected
+    into the system message. Uses an injected `clock` (not time-machine) to
+    keep this a pure/deterministic unit test of the seam itself."""
+    tools, _doc = _build_tools()
+    script = [LLMResponse(text=json.dumps({"no_evidence": True}))]
+    fake = FakeLLMClient(script)
+    fixed_now = datetime(2026, 7, 3, 21, 15, tzinfo=timezone.utc)
+    agent = KnowledgeAgent(fake, tools, clock=lambda: fixed_now, tz=ZoneInfo("Asia/Taipei"))
+
+    await agent.ask("what did she do last month", _SCOPE)
+
+    messages, _tools_schema = fake.calls[0]
+    system_content = messages[0]["content"]
+    # 21:15 UTC + 8h (Asia/Taipei, no DST) = 2026-07-04T05:15:00+08:00.
+    assert "2026-07-04T05:15:00+08:00" in system_content
+    assert "Asia/Taipei" in system_content
+    assert "Current date/time:" in system_content
+
+
+async def test_ask_injects_utc_zone_name_when_no_tz_given():
+    """Default `tz` (none injected) is UTC -- the zone name in the prompt line
+    must say "UTC", not some other stringified tzinfo repr."""
+    tools, _doc = _build_tools()
+    script = [LLMResponse(text=json.dumps({"no_evidence": True}))]
+    fake = FakeLLMClient(script)
+    agent = KnowledgeAgent(fake, tools, clock=lambda: datetime(2026, 7, 3, 21, 15, tzinfo=timezone.utc))
+
+    await agent.ask("what did she do last month", _SCOPE)
+
+    system_content = fake.calls[0][0][0]["content"]
+    assert "2026-07-03T21:15:00+00:00" in system_content
+    assert "UTC" in system_content
+
+
+async def test_ask_treats_naive_clock_result_as_utc_in_system_prompt():
+    """A test-supplied `clock` returning a NAIVE `datetime` (no tzinfo) must be
+    treated as UTC before converting to `tz`, mirroring `_parse_datetime`'s
+    naive-input handling in `tools.py` -- not raise when `.astimezone()` is
+    called on it."""
+    tools, _doc = _build_tools()
+    script = [LLMResponse(text=json.dumps({"no_evidence": True}))]
+    fake = FakeLLMClient(script)
+    naive_now = datetime(2026, 7, 3, 21, 15)  # no tzinfo
+    agent = KnowledgeAgent(fake, tools, clock=lambda: naive_now, tz=ZoneInfo("Asia/Taipei"))
+
+    await agent.ask("what did she do last month", _SCOPE)
+
+    system_content = fake.calls[0][0][0]["content"]
+    # Treated as 21:15 UTC, then converted to +8h Asia/Taipei.
+    assert "2026-07-04T05:15:00+08:00" in system_content
 
 
 async def test_ask_builds_system_then_history_then_user_messages():

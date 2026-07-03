@@ -11,8 +11,9 @@ exact source document.
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone, tzinfo
 
 from .aliases import AliasTable
 from .cleaner import normalize_text, strip_sentinel
@@ -108,12 +109,24 @@ class ToolRunner:
     """
 
     def __init__(
-        self, aliases: AliasTable, registry: MemberRegistry, retriever: HybridRetriever, store: DocumentStore
+        self,
+        aliases: AliasTable,
+        registry: MemberRegistry,
+        retriever: HybridRetriever,
+        store: DocumentStore,
+        *,
+        tz: tzinfo | None = None,
     ) -> None:
         self._aliases = aliases
         self._registry = registry
         self._retriever = retriever
         self._store = store
+        # Localizes naive `date_from`/`date_to` tool args (see `_parse_datetime`)
+        # and converts `aggregate`'s day/month bucket keys (see `_bucket_key`) --
+        # the request's timezone once threaded through from `KnowledgeService.ask`,
+        # else UTC (matches every indexed `Document.timestamp`, which is always
+        # tz-aware UTC -- see `ingest.py`).
+        self._tz = tz if tz is not None else timezone.utc
 
     @property
     def store(self) -> DocumentStore:
@@ -127,11 +140,18 @@ class ToolRunner:
     def run(self, call: ToolCall, scope: Scope) -> dict:
         """Dispatch `call` (by `call.name`, args in `call.arguments`) and return a JSON-serializable dict.
 
-        Malformed args -- a missing required key (`KeyError`) or an unparseable ISO date
-        (`ValueError` from `datetime.fromisoformat`) -- are caught and turned into an
-        `{"error": ...}` dict rather than propagating, so a bad LLM tool call can't crash
-        the agent loop (Task 14). The explicit error shapes below (unknown tool,
-        `get_document` not-found) are unaffected since they return rather than raise.
+        Malformed args -- a missing required key (`KeyError`), an unparseable ISO
+        date (`ValueError` from `datetime.fromisoformat`), or a wrong-typed
+        argument the model passed where a string/int was expected (`TypeError`,
+        e.g. `author: 123` instead of a name/canonical-id string) -- are caught
+        and turned into an `{"error": ...}` dict rather than propagating, so a
+        bad LLM tool call can't crash the agent loop (Task 14). `TypeError` is a
+        belt-and-braces guard: it's also the exception `DocumentStore._matches`
+        used to raise comparing an offset-naive `date_from`/`date_to` against
+        tz-aware document timestamps before `_parse_datetime` started localizing
+        naive input (see that function). The explicit error shapes below
+        (unknown tool, `get_document` not-found) are unaffected since they
+        return rather than raise.
         """
         try:
             if call.name == "resolve_member":
@@ -143,7 +163,7 @@ class ToolRunner:
             if call.name == "aggregate":
                 return self._aggregate(call.arguments, scope)
             return {"error": f"unknown tool: {call.name}"}
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, TypeError) as exc:
             return {"error": str(exc) or f"invalid arguments for tool: {call.name}"}
 
     def _resolve_member(self, args: dict, scope: Scope) -> dict:
@@ -180,8 +200,8 @@ class ToolRunner:
             author_id=self._resolve_person_arg(args.get("author"), scope),
             mentions_id=self._resolve_person_arg(args.get("mentions"), scope),
             query=args.get("query"),
-            date_from=_parse_datetime(args.get("date_from")),
-            date_to=_parse_datetime(args.get("date_to")),
+            date_from=_parse_datetime(args.get("date_from"), self._tz),
+            date_to=_parse_datetime(args.get("date_to"), self._tz, end_of_day=True),
             type=args.get("type"),
             sort=args.get("sort", "relevant"),
             limit=args.get("limit", 10),
@@ -210,8 +230,8 @@ class ToolRunner:
             scope=scope,
             author_id=self._resolve_person_arg(args.get("author"), scope),
             query=query,
-            date_from=_parse_datetime(args.get("date_from")),
-            date_to=_parse_datetime(args.get("date_to")),
+            date_from=_parse_datetime(args.get("date_from"), self._tz),
+            date_to=_parse_datetime(args.get("date_to"), self._tz, end_of_day=True),
             type=args.get("type"),
         )
         docs = self._store.filter(filters)
@@ -220,33 +240,67 @@ class ToolRunner:
             # normalized substring match so `aggregate`'s advertised `query` filter isn't a no-op.
             normalized_query = normalize_text(query)
             docs = [doc for doc in docs if normalized_query in normalize_text(doc.text)]
-        return {"count": len(docs), "by_bucket": _bucket_counts(docs, args.get("group_by"))}
+        return {"count": len(docs), "by_bucket": _bucket_counts(docs, args.get("group_by"), self._tz)}
 
 
-def _parse_datetime(value: str | None) -> datetime | None:
-    """Parse an ISO 8601 string to a tz-aware `datetime`, accepting a trailing `Z`."""
+# A bare ISO date with no time component, e.g. "2026-06-30" -- the shape a model
+# emits for a "date" argument despite the schema saying "ISO 8601 date/time"
+# (see TOOL_SCHEMAS). `datetime.fromisoformat` happily parses this as midnight,
+# indistinguishable from an explicit midnight timestamp -- so `_parse_datetime`
+# checks the ORIGINAL string against this pattern before parsing, to know
+# whether "extend to end of day" applies.
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _parse_datetime(value: str | None, tz: tzinfo, *, end_of_day: bool = False) -> datetime | None:
+    """Parse an ISO 8601 string to a tz-aware `datetime`, accepting a trailing `Z`.
+
+    Every indexed `Document.timestamp` is tz-aware UTC (`ingest.py`'s `_to_utc`),
+    so a NAIVE result here (the common shape a model emits for `date_from`/
+    `date_to` -- a plain `"2026-06-01"` or `"2026-06-01T00:00:00"` with no
+    offset) would make `DocumentStore._matches`'s `doc.timestamp < filters.date_from`
+    raise `TypeError: can't compare offset-naive and offset-aware datetimes` and
+    crash the whole ask. A naive parse is therefore localized to `tz` -- the
+    caller's request timezone (threaded from `KnowledgeService.ask` down to
+    `ToolRunner`), falling back to UTC if none was given -- rather than left
+    naive.
+
+    A bare date (`end_of_day=True`, used for `date_to`) is extended to the last
+    microsecond of that calendar day so an "ISO 8601 date, inclusive" `date_to`
+    of `"2026-06-30"` actually includes June 30, instead of excluding everything
+    past midnight at the start of it.
+    """
     if value is None:
         return None
-    if value.endswith("Z"):
-        value = value[:-1] + "+00:00"
-    return datetime.fromisoformat(value)
+    is_date_only = _DATE_ONLY_RE.match(value) is not None
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    dt = datetime.fromisoformat(normalized)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=tz)
+    if is_date_only and end_of_day:
+        dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return dt
 
 
-def _bucket_counts(docs: list[Document], group_by: str | None) -> dict[str, int]:
+def _bucket_counts(docs: list[Document], group_by: str | None, tz: tzinfo) -> dict[str, int]:
     if group_by not in ("day", "month", "type"):
         return {}
     buckets: dict[str, int] = {}
     for doc in docs:
-        key = _bucket_key(doc, group_by)
+        key = _bucket_key(doc, group_by, tz)
         buckets[key] = buckets.get(key, 0) + 1
     return buckets
 
 
-def _bucket_key(doc: Document, group_by: str) -> str:
+def _bucket_key(doc: Document, group_by: str, tz: tzinfo) -> str:
+    # `doc.timestamp` is always tz-aware UTC; convert to the request's local
+    # timezone BEFORE taking the calendar day/month, so e.g. a post made at
+    # 08:00 JST (23:00 UTC the previous day) buckets under its actual JST date
+    # rather than the UTC one.
     if group_by == "day":
-        return doc.timestamp.date().isoformat()
+        return doc.timestamp.astimezone(tz).date().isoformat()
     if group_by == "month":
-        return doc.timestamp.strftime("%Y-%m")
+        return doc.timestamp.astimezone(tz).strftime("%Y-%m")
     return doc.type
 
 

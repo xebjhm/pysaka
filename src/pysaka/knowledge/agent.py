@@ -12,6 +12,8 @@ model's final JSON into an `Answer` and tracks which `doc_id`s were surfaced.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone, tzinfo
+from typing import Callable
 
 from .llm import LLMClient, ToolCall
 from .models import Answer, AnswerSentence, Scope
@@ -59,12 +61,33 @@ class ToolCallingUnreliableError(RuntimeError):
 
 
 class KnowledgeAgent:
-    """Bounded tool-calling planner loop that answers a question via `LLMClient` + `ToolRunner`."""
+    """Bounded tool-calling planner loop that answers a question via `LLMClient` + `ToolRunner`.
 
-    def __init__(self, llm: LLMClient, tools: ToolRunner, max_steps: int = 6) -> None:
+    `clock`/`tz` are the agent's "what time is it right now, and in what
+    timezone" seam: `ask()` injects a `Current date/time: <local iso> (<zone>)`
+    line into the system prompt (see `_now_prompt_line`) so relative-date
+    questions ("last month", "先月") resolve against the real clock in the
+    user's zone instead of the model's training-era guess. `clock` defaults to
+    `datetime.now(timezone.utc)` -- callers that use `time-machine` to freeze
+    time need no special wiring, since that patches `datetime.now()` itself;
+    `clock` is still injectable for tests that want a fixed instant without
+    freezing the whole process clock. `tz` defaults to UTC.
+    """
+
+    def __init__(
+        self,
+        llm: LLMClient,
+        tools: ToolRunner,
+        max_steps: int = 6,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        tz: tzinfo | None = None,
+    ) -> None:
         self._llm = llm
         self._tools = tools
         self._max_steps = max_steps
+        self._clock = clock if clock is not None else lambda: datetime.now(timezone.utc)
+        self._tz = tz if tz is not None else timezone.utc
 
     async def ask(self, question: str, scope: Scope, history: list[dict] | None = None) -> tuple[Answer, set[str]]:
         """Run the bounded planner loop for `question` and return `(answer, surfaced_doc_ids)`.
@@ -78,7 +101,7 @@ class KnowledgeAgent:
         `_dispatch_tool_call`) -- a model that keeps failing to emit valid tool
         arguments won't reliably produce a usable answer either.
         """
-        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages: list[dict] = [{"role": "system", "content": self._system_prompt()}]
         messages.extend(history or [])
         messages.append({"role": "user", "content": question})
 
@@ -120,6 +143,28 @@ class KnowledgeAgent:
             return _parse_answer(resp.text), surfaced
 
         return Answer(sentences=[], citations=[], no_evidence=True), surfaced
+
+    def _system_prompt(self) -> str:
+        """`SYSTEM_PROMPT` plus the injected "current date/time" anchor line."""
+        return f"{SYSTEM_PROMPT}\n{self._now_prompt_line()}\n"
+
+    def _now_prompt_line(self) -> str:
+        """`Current date/time: <local ISO> (<zone name>). Resolve relative dates ...`
+
+        `self._clock()` may return a naive `datetime` (a test-supplied `clock`
+        with no tzinfo of its own) -- treated as UTC before converting to
+        `self._tz`, mirroring `_parse_datetime`'s naive-input handling in
+        `tools.py`.
+        """
+        now = self._clock()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        local_now = now.astimezone(self._tz)
+        zone_name = getattr(self._tz, "key", None) or str(self._tz)
+        return (
+            f"Current date/time: {local_now.isoformat()} ({zone_name}). "
+            "Resolve relative dates like 'last month' or 'last week' against this."
+        )
 
     def _dispatch_tool_call(self, call: ToolCall, scope: Scope) -> dict:
         """Run `call` against `ToolRunner`, UNLESS it's flagged `invalid_reason`.

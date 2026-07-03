@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from pysaka.knowledge.aliases import AliasTable
 from pysaka.knowledge.cleaner import SUBSCRIBER_SENTINEL, normalize_text
@@ -129,7 +130,9 @@ def _chunk(doc: Document) -> Chunk:
     return Chunk(chunk_id=f"{doc.doc_id}#0", doc_id=doc.doc_id, text=doc.text, context_text=doc.text)
 
 
-def _build_fixture() -> tuple[ToolRunner, MemberRegistry, AliasTable, DocumentStore, Document, Document, Document]:
+def _build_fixture(
+    *, tz=None, extra_docs: list[Document] | None = None
+) -> tuple[ToolRunner, MemberRegistry, AliasTable, DocumentStore, Document, Document, Document]:
     reg = _registry()
     aliases = AliasTable.seed_from_registry(reg)
     aliases.load_curated({"members": {"hinatazaka46:12": {"aliases": ["みくちゃん"]}}})
@@ -141,7 +144,8 @@ def _build_fixture() -> tuple[ToolRunner, MemberRegistry, AliasTable, DocumentSt
     other = _doc(
         "blog:hinatazaka46:3", author_id="hinatazaka46:20", timestamp=_NOW, text="今日は元気です", type_="text_msg"
     )
-    store.upsert([old, new, other])
+    docs = [old, new, other, *(extra_docs or [])]
+    store.upsert(docs)
 
     vectors = {
         old.text: [1.0, 0.0],
@@ -149,10 +153,12 @@ def _build_fixture() -> tuple[ToolRunner, MemberRegistry, AliasTable, DocumentSt
         other.text: [0.0, 1.0],
         "ライブ": [1.0, 0.0],
     }
+    for doc in extra_docs or []:
+        vectors.setdefault(doc.text, [1.0, 0.0])
     retriever = HybridRetriever(store, PureLexicalIndex(), FakeVectorStore(), FakeEmbedder(vectors))
-    retriever.index([_chunk(old), _chunk(new), _chunk(other)])
+    retriever.index([_chunk(doc) for doc in docs])
 
-    runner = ToolRunner(aliases, reg, retriever, store)
+    runner = ToolRunner(aliases, reg, retriever, store, tz=tz)
     return runner, reg, aliases, store, old, new, other
 
 
@@ -430,3 +436,81 @@ def test_run_search_malformed_date_from_returns_error_dict():
     result = runner.run(ToolCall("search", {"date_from": "not-a-date"}), _SCOPE)
 
     assert "error" in result
+
+
+def test_run_search_non_string_author_returns_error_dict_not_typeerror():
+    """A model that emits a wrong-typed `author` (e.g. a bare number instead of
+    a name/canonical-id string) must not crash the ask: `_resolve_person_arg`'s
+    `":" in value` raises `TypeError` for a non-str `value`, and `ToolRunner.run`'s
+    catch was broadened to `(KeyError, ValueError, TypeError)` for exactly this
+    belt-and-braces reason."""
+    runner, *_ = _build_fixture()
+
+    result = runner.run(ToolCall("search", {"author": 12}), _SCOPE)
+
+    assert "error" in result
+
+
+# --- date filters: naive-vs-aware TypeError + bare-date_to end-of-day (pwave-2) ---
+
+
+def test_aggregate_naive_date_from_localizes_to_default_utc_no_typeerror():
+    """Previously: a `date_from` with no tz suffix (the shape a model emits for
+    an "ISO 8601 date") parsed to a NAIVE datetime, then crashed
+    `DocumentStore._matches`'s `doc.timestamp < filters.date_from` comparison
+    with `TypeError: can't compare offset-naive and offset-aware datetimes` --
+    the P1 'what did she post in June' crash. Fixed by localizing the naive
+    parse to the runner's tz (UTC here, the default when none is threaded in)."""
+    runner, *_ = _build_fixture()
+
+    result = runner.run(ToolCall("aggregate", {"date_from": "2026-06-24T00:00:00"}), _SCOPE)
+
+    assert "error" not in result
+    assert result["count"] == 3  # old (06-26) + new + other (07-01), all >= date_from
+
+
+def test_aggregate_bare_date_to_extends_to_end_of_that_day():
+    """A bare `date_to` (no time component) is documented as "ISO 8601 ...,
+    inclusive" -- it must include every document on that calendar day, not just
+    up to midnight at its start."""
+    runner, *_ = _build_fixture()
+
+    result = runner.run(ToolCall("aggregate", {"date_to": "2026-07-01"}), _SCOPE)
+
+    # Without the end-of-day extension, "2026-07-01" parses as midnight and
+    # would exclude `new`/`other` (both at 2026-07-01T12:00 UTC, AFTER midnight
+    # of that same day) -- only `old` (2026-06-26) would match.
+    assert result["count"] == 3
+
+
+def test_search_date_filters_localize_naive_input_to_runner_tz():
+    """The naive-datetime localization must use the THREADED request tz, not
+    always fall back to UTC -- a naive `date_from` means something different
+    for a JST caller than a UTC one."""
+    runner, *_ = _build_fixture(tz=ZoneInfo("Asia/Tokyo"))
+
+    # Naive "2026-07-01T00:00:00" localized to JST (+9) is 2026-06-30T15:00 UTC,
+    # so `old` (2026-06-26T12:00 UTC) is excluded and `new`/`other`
+    # (2026-07-01T12:00 UTC) are included.
+    result = runner.run(ToolCall("search", {"date_from": "2026-07-01T00:00:00", "sort": "recent"}), _SCOPE)
+
+    assert {hit["doc_id"] for hit in result["hits"]} == {"blog:hinatazaka46:2", "blog:hinatazaka46:3"}
+
+
+def test_aggregate_group_by_day_converts_to_runner_tz_before_bucketing():
+    """A post at 23:30 UTC (08:30 JST the NEXT calendar day) must bucket under
+    its JST date when the runner has a non-UTC tz, not the UTC date -- today a
+    late-evening-UTC/early-morning-JST post silently buckets under the wrong day."""
+    late_utc_doc = _doc(
+        "blog:hinatazaka46:9",
+        timestamp=datetime(2026, 6, 30, 23, 30, tzinfo=timezone.utc),
+        text="夜更かし",
+    )
+    runner, *_ = _build_fixture(tz=ZoneInfo("Asia/Tokyo"), extra_docs=[late_utc_doc])
+
+    result = runner.run(ToolCall("aggregate", {"author": "hinatazaka46:12", "group_by": "day"}), _SCOPE)
+
+    # old (06-26T12:00 UTC) -> JST same calendar day "2026-06-26".
+    # new (07-01T12:00 UTC) -> JST same calendar day "2026-07-01".
+    # late_utc_doc (06-30T23:30 UTC) -> JST "2026-07-01" (NOT "2026-06-30").
+    assert result["by_bucket"] == {"2026-06-26": 1, "2026-07-01": 2}
