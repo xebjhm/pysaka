@@ -51,6 +51,7 @@ PUBLIC_NAMES = [
     "ToolRunner",
     "KnowledgeAgent",
     "ToolCallingUnreliableError",
+    "AskCancelled",
     "validate",
 ]
 

@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from pysaka.knowledge.agent import KnowledgeAgent, ToolCallingUnreliableError
+from pysaka.knowledge.agent import AskCancelled, KnowledgeAgent, ToolCallingUnreliableError
 from pysaka.knowledge.aliases import AliasTable
 from pysaka.knowledge.lexical import PureLexicalIndex
 from pysaka.knowledge.llm import FakeLLMClient, LLMResponse, ToolCall
@@ -472,6 +472,86 @@ async def test_ask_appends_assistant_tool_calls_and_tool_result_messages():
     assert tool_turn["id"] == "call_1"
     parsed = json.loads(tool_turn["content"])
     assert parsed["hits"][0]["doc_id"] == doc.doc_id
+
+
+# --- should_abort: cooperative-cancel seam --------------------------------------
+
+
+async def test_ask_raises_ask_cancelled_when_should_abort_flips_after_tool_batch():
+    """`should_abort` is checked right after step 1's tool-call batch -- so when
+    it flips there, step 2's LLM call must never happen."""
+    tools, doc = _build_tools()
+    script = [
+        LLMResponse(tool_calls=[ToolCall("get_document", {"doc_id": doc.doc_id}, id="call_1")]),
+        LLMResponse(text=json.dumps({"sentences": [{"text": "never reached", "citation_ids": [doc.doc_id]}]})),
+    ]
+    fake = FakeLLMClient(script)
+    agent = KnowledgeAgent(fake, tools)
+    checks: list[int] = []
+
+    def should_abort() -> bool:
+        checks.append(1)
+        return len(checks) >= 2  # False on the pre-step-1 check, True on the post-tool-batch check
+
+    with pytest.raises(AskCancelled, match="after tool-call batch"):
+        await agent.ask("question", _SCOPE, should_abort=should_abort)
+
+    assert len(fake.calls) == 1  # step 2's LLM call never fired
+
+
+async def test_ask_raises_ask_cancelled_when_should_abort_flips_before_next_llm_call():
+    """`should_abort` also gets a fresh check before EVERY step's LLM call -- not
+    just right after a tool batch. Flip it only on the 3rd check (step 2's
+    pre-call check, having passed both of step 1's checks) and confirm exactly
+    one LLM call happened before the loop unwound."""
+    tools, doc = _build_tools()
+    script = [
+        LLMResponse(tool_calls=[ToolCall("get_document", {"doc_id": doc.doc_id}, id="call_1")]),
+        LLMResponse(tool_calls=[ToolCall("get_document", {"doc_id": doc.doc_id}, id="call_2")]),
+        LLMResponse(text=json.dumps({"sentences": [{"text": "never reached", "citation_ids": [doc.doc_id]}]})),
+    ]
+    fake = FakeLLMClient(script)
+    agent = KnowledgeAgent(fake, tools)
+    checks: list[int] = []
+
+    def should_abort() -> bool:
+        checks.append(1)
+        return len(checks) >= 3  # False on step 1's two checks, True on step 2's pre-call check
+
+    with pytest.raises(AskCancelled, match="before LLM call"):
+        await agent.ask("question", _SCOPE, should_abort=should_abort)
+
+    assert len(fake.calls) == 1
+
+
+async def test_ask_does_not_abort_when_should_abort_stays_false() -> None:
+    tools, doc = _build_tools()
+    script = [
+        LLMResponse(tool_calls=[ToolCall("get_document", {"doc_id": doc.doc_id}, id="call_1")]),
+        LLMResponse(text=json.dumps({"sentences": [{"text": "reached", "citation_ids": [doc.doc_id]}]})),
+    ]
+    fake = FakeLLMClient(script)
+    agent = KnowledgeAgent(fake, tools)
+
+    answer, _surfaced = await agent.ask("question", _SCOPE, should_abort=lambda: False)
+
+    assert answer.sentences[0].text == "reached"
+    assert len(fake.calls) == 2
+
+
+async def test_answer_propagates_ask_cancelled_from_should_abort():
+    """`answer()` threads `should_abort` straight through to `ask()`; a raised
+    `AskCancelled` propagates uncaught -- there is no partial answer to
+    validate when the ask itself never completed."""
+    tools, _doc = _build_tools()
+    script = [LLMResponse(text=json.dumps({"no_evidence": True}))]
+    fake = FakeLLMClient(script)
+    agent = KnowledgeAgent(fake, tools)
+
+    with pytest.raises(AskCancelled):
+        await agent.answer("question", _SCOPE, should_abort=lambda: True)
+
+    assert len(fake.calls) == 0  # cancelled before the first LLM call
 
 
 # --- answer(): grounded facade (ask() + validate() atomically) -----------------

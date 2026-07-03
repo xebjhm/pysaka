@@ -117,6 +117,37 @@ def test_zero_norm_vector_does_not_crash_and_scores_zero() -> None:
     assert results == [("z", pytest.approx(0.0))]
 
 
+def test_add_duplicate_id_within_one_call_last_write_wins() -> None:
+    """Regression (61931e5): a fresh store's FIRST `add()` call with the same id
+    twice used to crash -- the second occurrence's `existing` index pointed at a
+    "pending" row not yet flushed into `_matrix` (still `None` on a fresh
+    store), so `self._matrix[existing] = ...` raised. Last write for the
+    duplicated id must win, with exactly one row for it and a correct search."""
+    store = NumpyVectorStore()
+    store.add(["a", "a", "b"], [[1.0, 0.0], [0.0, 1.0], [0.0, 1.0]])
+    results = store.search([0.0, 1.0], k=2)
+    scores = dict(results)
+    assert scores["a"] == pytest.approx(1.0)  # last write ("a" -> [0, 1]) won
+    assert scores["b"] == pytest.approx(1.0)
+    assert len(results) == 2  # no duplicate/ghost row for "a"
+
+
+def test_add_duplicate_id_spanning_matrix_and_pending_rows() -> None:
+    """One `add()` call mixing a MATRIX-row update (id already persisted from a
+    prior call, so `base != 0`) with a brand-new id that is ALSO duplicated
+    within this same call (landing in `new_rows`/pending). Exercises that the
+    pending-row `base` offset is computed relative to the pre-call matrix size,
+    not just correct for a fresh (empty) store."""
+    store = NumpyVectorStore()
+    store.add(["x"], [[1.0, 0.0]])  # "x" lives in `_matrix`; base == 1 for the next call
+    store.add(["y", "y", "x"], [[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]])
+    results = store.search([0.0, 1.0], k=2)
+    scores = dict(results)
+    assert scores["x"] == pytest.approx(1.0)  # matrix-row update took effect
+    assert scores["y"] == pytest.approx(1.0)  # last write for the pending duplicate won
+    assert len(results) == 2
+
+
 def test_search_tie_break_deterministic_by_id() -> None:
     store = NumpyVectorStore()
     store.add(["b", "a"], [[1.0, 0.0], [1.0, 0.0]])

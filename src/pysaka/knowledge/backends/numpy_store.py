@@ -33,16 +33,28 @@ class NumpyVectorStore:
         list scan) and all new rows are appended with a SINGLE `vstack` per call —
         a per-row vstack would copy the whole growing matrix each time, turning a
         large batch load (e.g. rehydrating a persisted store) quadratic.
+
+        An id repeated within the SAME call is last-write-wins. The first
+        occurrence of a brand-new id lands in `new_rows` (not yet in `_matrix` --
+        it's only flushed after this loop), so `_index` maps it to a "pending"
+        row number (`>= len(self._ids)`, the pre-call matrix length). A later
+        occurrence in this same call must overwrite that pending row in
+        `new_rows`, NOT index into `_matrix` -- `_matrix` doesn't have that row
+        yet (or, for a duplicate that spans a fresh store's first call, is still
+        `None`), so indexing it would crash.
         """
         new_ids: list[str] = []
         new_rows: list[np.ndarray] = []
+        base = len(self._ids)
         for id_, vector in zip(ids, vectors):
             normalized = _normalize(np.asarray(vector, dtype=np.float32))
             existing = self._index.get(id_)
-            if existing is not None:
+            if existing is not None and existing >= base:
+                new_rows[existing - base] = normalized
+            elif existing is not None:
                 self._matrix[existing] = normalized  # type: ignore[index]
             else:
-                self._index[id_] = len(self._ids) + len(new_ids)
+                self._index[id_] = base + len(new_ids)
                 new_ids.append(id_)
                 new_rows.append(normalized)
         if new_rows:

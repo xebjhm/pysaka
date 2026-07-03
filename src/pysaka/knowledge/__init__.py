@@ -13,7 +13,7 @@ imported explicitly from ``pysaka.knowledge.backends``.
 
 from __future__ import annotations
 
-from pysaka.knowledge.agent import KnowledgeAgent, ToolCallingUnreliableError
+from pysaka.knowledge.agent import AskCancelled, KnowledgeAgent, ToolCallingUnreliableError
 from pysaka.knowledge.aliases import AliasTable
 from pysaka.knowledge.callnames import CallNameTable
 from pysaka.knowledge.chunking import chunk_documents
@@ -46,6 +46,7 @@ __all__ = [
     "Answer",
     "AnswerSentence",
     "AliasTable",
+    "AskCancelled",
     "CallNameTable",
     "CanonicalId",
     "Chunk",
