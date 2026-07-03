@@ -1,0 +1,97 @@
+[
+  {
+    "id": "last_mention_miku_nao",
+    "question": "金村美玖が最後に小坂菜緒について話したのはいつ？",
+    "scope": {"service": "hinatazaka46"},
+    "plan": [
+      {
+        "name": "search",
+        "arguments": {"author": "hinatazaka46:12", "mentions": "hinatazaka46:14", "sort": "recent", "limit": 1}
+      }
+    ],
+    "expected_doc_ids": ["msg:hinatazaka46:hinatazaka46:12:302"],
+    "expect_no_evidence": false
+  },
+  {
+    "id": "food_past_month_miku",
+    "question": "金村美玖はこの1ヶ月で何を食べましたか？",
+    "scope": {"service": "hinatazaka46"},
+    "plan": [
+      {
+        "name": "search",
+        "arguments": {
+          "author": "hinatazaka46:12",
+          "query": "焼肉",
+          "date_from": "2026-06-01T00:00:00Z",
+          "sort": "relevant",
+          "limit": 5
+        }
+      }
+    ],
+    "expected_doc_ids": ["blog:hinatazaka46:102"],
+    "expect_no_evidence": false
+  },
+  {
+    "id": "no_evidence_hina_ski",
+    "question": "河田陽菜はスキーについて話したことがありますか？",
+    "scope": {"service": "hinatazaka46"},
+    "plan": [
+      {"name": "search", "arguments": {"author": "hinatazaka46:13", "query": "スキー", "sort": "relevant", "limit": 5}}
+    ],
+    "expected_doc_ids": [],
+    "expect_no_evidence": true
+  },
+  {
+    "id": "en_cross_lingual_ramen_nao",
+    "question": "What ramen did Nao eat recently?",
+    "scope": {"service": "hinatazaka46"},
+    "plan": [
+      {"name": "search", "arguments": {"author": "hinatazaka46:14", "query": "ramen", "sort": "relevant", "limit": 5}}
+    ],
+    "expected_doc_ids": ["blog:hinatazaka46:103"],
+    "expect_no_evidence": false
+  },
+  {
+    "id": "last_mention_hina_miku",
+    "question": "河田陽菜が最後に金村美玖について話したのはいつ？",
+    "scope": {"service": "hinatazaka46"},
+    "plan": [
+      {
+        "name": "search",
+        "arguments": {"author": "hinatazaka46:13", "mentions": "hinatazaka46:12", "sort": "recent", "limit": 1}
+      }
+    ],
+    "expected_doc_ids": ["blog:hinatazaka46:104"],
+    "expect_no_evidence": false
+  },
+  {
+    "id": "food_past_month_hina",
+    "question": "河田陽菜はこの1ヶ月で何を食べましたか？",
+    "scope": {"service": "hinatazaka46"},
+    "plan": [
+      {
+        "name": "search",
+        "arguments": {
+          "author": "hinatazaka46:13",
+          "query": "ラーメン",
+          "date_from": "2026-06-01T00:00:00Z",
+          "sort": "relevant",
+          "limit": 5
+        }
+      }
+    ],
+    "expected_doc_ids": ["msg:hinatazaka46:hinatazaka46:13:501"],
+    "expect_no_evidence": false
+  },
+  {
+    "id": "quote_miku_live_blog",
+    "question": "Quote what Miku said about her recent live performance.",
+    "scope": {"service": "hinatazaka46"},
+    "plan": [
+      {"name": "search", "arguments": {"author": "hinatazaka46:12", "query": "ライブ", "sort": "relevant", "limit": 1}},
+      {"name": "get_document", "arguments": {"doc_id": "blog:hinatazaka46:106"}}
+    ],
+    "expected_doc_ids": ["blog:hinatazaka46:106"],
+    "expect_no_evidence": false
+  }
+]
