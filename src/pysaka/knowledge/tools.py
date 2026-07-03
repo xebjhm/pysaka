@@ -15,6 +15,8 @@ import re
 from dataclasses import asdict
 from datetime import datetime, timezone, tzinfo
 
+import structlog
+
 from .aliases import AliasTable
 from .cleaner import normalize_text, strip_sentinel
 from .llm import ToolCall
@@ -22,6 +24,8 @@ from .models import Document, Hit, Scope, SearchFilters
 from .registry import MemberRegistry
 from .retrieve import HybridRetriever
 from .store import DocumentStore
+
+logger = structlog.get_logger(__name__)
 
 TOOL_SCHEMAS: list[dict] = [
     {
@@ -164,6 +168,16 @@ class ToolRunner:
                 return self._aggregate(call.arguments, scope)
             return {"error": f"unknown tool: {call.name}"}
         except (KeyError, ValueError, TypeError) as exc:
+            # Degrading to a structured tool-error keeps the ask alive (the agent
+            # feeds it back to the model), but must leave a breadcrumb: without
+            # this log line a programming bug in a handler would silently
+            # masquerade as bad model arguments forever.
+            logger.warning(
+                "tool_runner.invalid_call",
+                tool=call.name,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return {"error": str(exc) or f"invalid arguments for tool: {call.name}"}
 
     def _resolve_member(self, args: dict, scope: Scope) -> dict:

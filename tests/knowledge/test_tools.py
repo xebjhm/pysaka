@@ -514,3 +514,33 @@ def test_aggregate_group_by_day_converts_to_runner_tz_before_bucketing():
     # new (07-01T12:00 UTC) -> JST same calendar day "2026-07-01".
     # late_utc_doc (06-30T23:30 UTC) -> JST "2026-07-01" (NOT "2026-06-30").
     assert result["by_bucket"] == {"2026-06-26": 1, "2026-07-01": 2}
+
+
+def test_search_aware_date_string_offset_is_preserved_not_clobbered_by_runner_tz():
+    """An AWARE date string carries its own offset -- the runner tz must NOT
+    overwrite it. Discriminating setup: `date_to=...+09:00` (= 2026-06-30T15:00
+    UTC, excludes the 07-01T12:00Z docs) under a runner tz of Etc/GMT+12; if the
+    code clobbered the offset with the runner tz, date_to would become
+    07-01T12:00Z and wrongly include them."""
+    runner, *_ = _build_fixture(tz=ZoneInfo("Etc/GMT+12"))
+
+    result = runner.run(ToolCall("aggregate", {"date_to": "2026-07-01T00:00:00+09:00"}), _SCOPE)
+
+    assert result["count"] == 1  # only `old` (2026-06-26T12:00Z)
+
+
+def test_aggregate_bare_date_to_end_of_day_is_computed_in_runner_tz_not_utc():
+    """`date_to: "2026-06-30"` for an Asia/Taipei caller means end-of-day
+    TAIPEI time (06-30T15:59:59Z) -- a doc at 06-30T20:00Z is already July 1st
+    in Taipei and must be excluded. If end-of-day were computed in UTC the doc
+    would wrongly match."""
+    boundary_doc = _doc(
+        "blog:hinatazaka46:9",
+        timestamp=datetime(2026, 6, 30, 20, 0, tzinfo=timezone.utc),
+        text="深夜投稿",
+    )
+    runner, *_ = _build_fixture(tz=ZoneInfo("Asia/Taipei"), extra_docs=[boundary_doc])
+
+    result = runner.run(ToolCall("aggregate", {"date_to": "2026-06-30"}), _SCOPE)
+
+    assert result["count"] == 1  # only `old`; the 20:00Z doc is 07-01 04:00 Taipei
