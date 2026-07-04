@@ -377,9 +377,9 @@ def test_scan_member_media_counts_media_without_media_file_as_unresolved(sync_ma
 
 
 def test_scan_member_media_excludes_canceled_from_unresolved(sync_manager):
-    """A withdrawn post (state != 'published', e.g. 'canceled') legitimately has no
-    media, so it must NOT be reported as unresolved — only genuinely-missing
-    published media should be. The state stays recorded on disk."""
+    """A withdrawn post (state 'canceled') legitimately has no media, so it must NOT
+    be reported as unresolved — only genuinely-missing published media should be.
+    The state stays recorded on disk."""
     member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
     member_dir.mkdir(parents=True)
     (member_dir / "messages.json").write_text(
@@ -397,6 +397,29 @@ def test_scan_member_media_excludes_canceled_from_unresolved(sync_manager):
 
     result = sync_manager.scan_member_media(member_dir)
     assert [u["message_id"] for u in result["unresolved"]] == [301]
+
+
+def test_scan_member_media_surfaces_unexpected_state_as_unresolved(sync_manager):
+    """Only a genuinely-withdrawn state ('canceled') strips media legitimately. Any
+    OTHER non-published state (e.g. a transient 'processing') on a media message with
+    no media_file must STILL be surfaced as unresolved — otherwise an unexpected
+    state would silently hide a real gap, overclaiming completeness."""
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True)
+    (member_dir / "messages.json").write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"id": 401, "type": "video", "state": "processing"},  # unexpected -> surfaced
+                    {"id": 402, "type": "picture", "state": "canceled"},  # withdrawn -> excluded
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = sync_manager.scan_member_media(member_dir)
+    assert [u["message_id"] for u in result["unresolved"]] == [401]
 
 
 def test_scan_member_media_missing_file_returns_empty(sync_manager):

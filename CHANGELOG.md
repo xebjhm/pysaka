@@ -19,17 +19,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now isolated under its own service (`pysaka:<group>`), and existing credentials
   are transparently migrated on first read so upgrades keep sessions and keys.
 - `get_messages` now fails closed on an incomplete timeline pagination. If a
-  continuation page fails to fetch (a non-raising error path) before the cursor or
+  continuation page fails to fetch (a non-raising error path), or the server
+  returns an empty page that still carries a continuation, before the cursor or
   the end of the timeline is reached, it raises instead of returning the partial
   newest-only set — otherwise the caller would advance its timestamp cursor past
-  the un-fetched older-but-still-new messages, silently losing them.
+  the un-fetched older-but-still-new messages, silently losing them. (An empty
+  page with no continuation remains a normal end-of-timeline.)
 
 ### Changed
 - Messages now record a non-"published" server `state` (e.g. `canceled` — the
   member withdrew the post, which strips its media). `normalize_message` keeps it
-  on disk; `scan_member_media` excludes canceled messages from `unresolved` since
-  a withdrawn post has no media by design (not a completeness gap). Published
-  messages stay lean (no `state` field).
+  on disk; `scan_member_media` excludes only genuinely-withdrawn states
+  (`canceled`) from `unresolved` since a withdrawn post has no media by design
+  (not a completeness gap). Any other unexpected non-published state (e.g. a
+  transient `processing`) is still surfaced in `unresolved`, so it can't silently
+  hide a real gap. Published messages stay lean (no `state` field).
 - `SyncManager.scan_member_media` now also reports `unresolved` — a list of
   media-type messages (each `{message_id, media_type, timestamp}`) that have no
   recorded media file because the media URL was absent at sync time (e.g. media

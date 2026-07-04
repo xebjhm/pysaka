@@ -160,6 +160,51 @@ async def test_get_messages_raises_on_incomplete_pagination(client, mock_session
 
 
 @pytest.mark.asyncio
+async def test_get_messages_raises_on_empty_page_with_continuation(client, mock_session):
+    """An EMPTY page mid-pagination that STILL carries a continuation (the server
+    claims more data but returned nothing) must RAISE, not break and return the
+    partial newest set — same silent-gap risk as a failed continuation fetch."""
+    from pysaka.exceptions import ApiError
+
+    client.fetch_json = AsyncMock(
+        side_effect=[
+            {
+                "messages": [
+                    {"id": 100, "published_at": "2026-01-10T00:00:00Z"},
+                    {"id": 99, "published_at": "2026-01-09T00:00:00Z"},
+                ],
+                "continuation": "next",
+            },
+            {"messages": [], "continuation": "still_more"},
+        ]
+    )
+
+    with pytest.raises(ApiError):
+        await client.get_messages(mock_session, group_id=1, since_ts="2026-01-01T00:00:00Z")
+
+
+@pytest.mark.asyncio
+async def test_get_messages_empty_page_without_continuation_is_clean_end(client, mock_session):
+    """An empty page with NO continuation is a legitimate end-of-timeline: return
+    what was collected so far, do not raise."""
+    client.fetch_json = AsyncMock(
+        side_effect=[
+            {
+                "messages": [
+                    {"id": 100, "published_at": "2026-01-10T00:00:00Z"},
+                    {"id": 99, "published_at": "2026-01-09T00:00:00Z"},
+                ],
+                "continuation": "next",
+            },
+            {"messages": [], "continuation": None},
+        ]
+    )
+
+    msgs = await client.get_messages(mock_session, group_id=1, since_ts="2026-01-01T00:00:00Z")
+    assert [m["id"] for m in msgs] == [99, 100]
+
+
+@pytest.mark.asyncio
 async def test_get_messages_does_not_clear_unread_by_default(client, mock_session):
     """Syncing must NOT clear the user's unread badge on the official mobile app.
 

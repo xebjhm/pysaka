@@ -17,6 +17,12 @@ from .utils import get_media_extension, media_file_is_present, normalize_message
 
 logger = structlog.get_logger()
 
+# Server states where the member withdrew the post, which legitimately strips its
+# media (confirmed via the live timeline probe). ANY OTHER non-"published" state is
+# treated as a potential real gap and surfaced in `unresolved`, so completeness is
+# never overclaimed on an unexpected/transient state (e.g. "processing").
+_MEDIA_STRIPPING_STATES = frozenset({"canceled", "cancelled"})
+
 
 class SyncManager:
     """
@@ -465,12 +471,14 @@ class SyncManager:
                 continue
             media_file = msg.get("media_file")
             if not media_file:
-                # A non-"published" message (e.g. state="canceled" — the member
-                # withdrew the post, which strips its media) legitimately has no
-                # media and is NOT a completeness gap. The state is recorded on
-                # disk; skip it silently.
+                # A withdrawn post (state in _MEDIA_STRIPPING_STATES, e.g.
+                # "canceled" — the member withdrew it, which strips its media)
+                # legitimately has no media and is NOT a completeness gap. The state
+                # is recorded on disk; skip it silently. Any OTHER non-published
+                # state falls through and is surfaced below, so an unexpected or
+                # transient state can't silently hide a real gap.
                 state = msg.get("state")
-                if state and state != "published":
+                if state in _MEDIA_STRIPPING_STATES:
                     continue
                 # Otherwise: a published media-type message with no recorded media
                 # path — genuinely unaccounted. Surface it so completeness is never

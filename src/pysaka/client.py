@@ -649,6 +649,18 @@ class Client:
 
             messages = data.get("messages", [])
             if not messages:
+                # An empty page mid-pagination (earlier/newer pages already
+                # collected) that STILL carries a continuation means the server
+                # claims more data exists but returned nothing — breaking here and
+                # returning the partial newest set would advance the cursor past the
+                # un-fetched gap. Fail closed, mirroring the None-page guard above.
+                # An empty page with no continuation is a legitimate end-of-timeline.
+                if all_messages and data.get("continuation"):
+                    raise ApiError(
+                        f"Timeline pagination for group {group_id} returned an empty "
+                        f"page with a continuation after {len(all_messages)} "
+                        "message(s); refusing to skip a possible gap."
+                    )
                 break
 
             for m in messages:
