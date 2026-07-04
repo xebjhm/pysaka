@@ -120,6 +120,26 @@ async def test_sync_member_write_failure_does_not_advance_cursor(sync_manager, m
 
 
 @pytest.mark.asyncio
+async def test_sync_member_get_messages_error_does_not_advance_cursor(sync_manager):
+    """If get_messages raises (e.g. it fails closed on an incomplete pagination),
+    the member sync must abort without advancing the cursor, so the next run
+    re-fetches from the last good point instead of skipping the un-fetched gap."""
+    from pysaka.exceptions import ApiError
+
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp", "subscription": {"state": "active"}}
+    member = {"id": 10, "name": "Mem", "portrait": "url"}
+
+    sync_manager.client.get_messages.side_effect = ApiError("pagination aborted before cursor")
+
+    count = await sync_manager.sync_member(session, group, member, [])
+
+    assert count == 0  # aborted, not reported as success
+    assert "1_10" not in sync_manager.sync_state  # cursor was NOT advanced
+    assert sync_manager.get_last_ts(1, 10) is None
+
+
+@pytest.mark.asyncio
 async def test_sync_member_prepare_failure_holds_cursor(sync_manager):
     """A message that fails to normalize must NOT let the cursor advance past it.
     The next sync fetches published_at >= cursor, so an un-clamped cursor would

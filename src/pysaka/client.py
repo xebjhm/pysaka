@@ -633,6 +633,18 @@ class Client:
                 if page == 0 and not first_page_retried and await self.refresh_access_token(session):
                     first_page_retried = True
                     continue
+                # fetch_json returns None only on a genuine error (auth/unexpected
+                # status). If we have already collected earlier (newer) pages and
+                # have NOT reached the cursor/end, returning that partial newest-only
+                # set would let the caller advance its timestamp cursor PAST the
+                # un-fetched older-but-still-new messages — silent data loss. Fail
+                # closed so the sync is retried and the cursor is left untouched.
+                if all_messages:
+                    raise ApiError(
+                        f"Timeline pagination for group {group_id} aborted before "
+                        f"reaching the cursor after {len(all_messages)} message(s); "
+                        "refusing to return a partial page that would skip a gap."
+                    )
                 break
 
             messages = data.get("messages", [])

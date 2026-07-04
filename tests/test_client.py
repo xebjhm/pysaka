@@ -132,6 +132,34 @@ async def test_get_messages_pagination(client, mock_session):
 
 
 @pytest.mark.asyncio
+async def test_get_messages_raises_on_incomplete_pagination(client, mock_session):
+    """A continuation-page fetch that fails mid-pagination (fetch_json returns None
+    before the cursor/end is reached) must RAISE, not return the partial newest-only
+    set. Returning the partial set would let the caller advance its timestamp cursor
+    past the un-fetched older-but-still-new messages, losing them silently."""
+    from pysaka.exceptions import ApiError
+
+    # Page 0: newest messages + a continuation (cursor not yet reached).
+    # Page 1: the continuation fetch fails (fetch_json returns None on a non-network
+    # error path — e.g. an unexpected status or a still-401 after refresh).
+    client.fetch_json = AsyncMock(
+        side_effect=[
+            {
+                "messages": [
+                    {"id": 100, "published_at": "2026-01-10T00:00:00Z"},
+                    {"id": 99, "published_at": "2026-01-09T00:00:00Z"},
+                ],
+                "continuation": "next",
+            },
+            None,
+        ]
+    )
+
+    with pytest.raises(ApiError):
+        await client.get_messages(mock_session, group_id=1, since_ts="2026-01-01T00:00:00Z")
+
+
+@pytest.mark.asyncio
 async def test_get_messages_does_not_clear_unread_by_default(client, mock_session):
     """Syncing must NOT clear the user's unread badge on the official mobile app.
 

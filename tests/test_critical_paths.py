@@ -113,8 +113,13 @@ class TestGetMessagesRetryGuard:
         assert mock_fetch.call_count == 1
 
     async def test_first_page_none_no_retry_on_later_pages(self, client, mock_session):
-        """The retry guard only applies to page 0. If a later page returns None,
-        we simply break out of the loop without attempting refresh."""
+        """The retry guard only applies to page 0: a LATER page returning None does
+        NOT trigger a refresh. And because stopping there would leave a gap below the
+        pages already collected, get_messages fails closed (raises) rather than
+        returning the partial newest-only set (which would advance the cursor past
+        the un-fetched messages)."""
+        from pysaka.exceptions import ApiError
+
         call_count = 0
 
         async def fake_fetch(session, endpoint, params=None):
@@ -131,11 +136,9 @@ class TestGetMessagesRetryGuard:
 
         with patch.object(client, "fetch_json", side_effect=fake_fetch):
             with patch.object(client, "refresh_access_token", new_callable=AsyncMock) as mock_refresh:
-                messages = await client.get_messages(mock_session, group_id=1)
+                with pytest.raises(ApiError):
+                    await client.get_messages(mock_session, group_id=1)
 
-        # Should have the one message from page 0
-        assert len(messages) == 1
-        assert messages[0]["id"] == 10
         # refresh_access_token should NOT be called for later pages
         mock_refresh.assert_not_called()
 

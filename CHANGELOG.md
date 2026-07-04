@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   update or reinstall) could silently wipe a stored API key. Each credential is
   now isolated under its own service (`pysaka:<group>`), and existing credentials
   are transparently migrated on first read so upgrades keep sessions and keys.
+- `get_messages` now fails closed on an incomplete timeline pagination. If a
+  continuation page fails to fetch (a non-raising error path) before the cursor or
+  the end of the timeline is reached, it raises instead of returning the partial
+  newest-only set — otherwise the caller would advance its timestamp cursor past
+  the un-fetched older-but-still-new messages, silently losing them.
 
 ### Changed
 - `SyncManager.scan_member_media` now also reports `unresolved`: media-type
