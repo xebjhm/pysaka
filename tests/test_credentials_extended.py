@@ -166,7 +166,7 @@ class TestKeyringStore:
         stored_data = {}
 
         def mock_set(service, key, val):
-            stored_data[key] = val
+            stored_data[service] = val
 
         with patch("keyring.set_password", side_effect=mock_set), patch("keyring.delete_password"):
             store = KeyringStore()
@@ -174,13 +174,13 @@ class TestKeyringStore:
             token_data = {"access_token": "test", "cookies": {"s": "v"}}
             store.save("group1", token_data)
 
-            # Data should be compressed (base64 encoded)
-            assert "group1" in stored_data
-            # The stored value should be different from raw JSON
+            # Each credential is isolated under its own service ("pysaka:<group>").
+            assert "pysaka:group1" in stored_data
+            # The stored value should be compressed, not raw JSON.
             import json
 
             raw_json = json.dumps(token_data)
-            assert stored_data["group1"] != raw_json
+            assert stored_data["pysaka:group1"] != raw_json
 
     def test_keyring_store_load_decompresses_data(self):
         """Test that load decompresses data."""

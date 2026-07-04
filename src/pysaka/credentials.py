@@ -14,6 +14,21 @@ logger = structlog.get_logger()
 
 SERVICE_NAME = "pysaka"
 
+# Each credential is stored under its OWN keyring service ("pysaka:<group>")
+# with a single fixed entry name. keyring's Windows backend always writes the
+# newest credential for a service to the bare "service" target and relocates the
+# previous occupant to "user@service" (see keyring backends/Windows.py). Sharing
+# one service across many groups therefore churns every credential through a
+# single target, letting them clobber one another -- e.g. a routine login/token
+# re-save (which happens around an app update or reinstall) overwrites the stored
+# LLM API key. One credential per service removes that shared target entirely.
+_ENTRY_USERNAME = "credential"
+
+
+def _service_for(group: str) -> str:
+    """Keyring service name isolating a single credential group."""
+    return f"{SERVICE_NAME}:{group}"
+
 
 def _compress_data(data: str) -> str:
     """Compress and base64-encode data for storage in size-limited backends."""
@@ -124,13 +139,17 @@ class KeyringStore(CredentialStore):
         try:
             json_data = json.dumps(token_data)
             compressed = _compress_data(json_data)
-            self._keyring.set_password(SERVICE_NAME, group, compressed)
+            self._keyring.set_password(_service_for(group), _ENTRY_USERNAME, compressed)
         except Exception as e:
             raise SakaError(f"Failed to save credentials to keyring: {e}") from e
 
     def load(self, group: str) -> Optional[dict[str, Any]]:
         try:
-            data = self._keyring.get_password(SERVICE_NAME, group)
+            data = self._keyring.get_password(_service_for(group), _ENTRY_USERNAME)
+            if data is None:
+                # Fall back to the old shared-service layout and migrate it, so
+                # users upgrading from a pre-fix version keep their credentials.
+                data = self._migrate_legacy(group)
             if data:
                 # Decompress (handles legacy uncompressed data automatically)
                 json_data = _decompress_data(data)
@@ -139,31 +158,49 @@ class KeyringStore(CredentialStore):
             logger.warning(f"Failed to load credentials for {group}: {e}")
         return None
 
-    def delete(self, group: str) -> None:
-        # 1. Delete from currently active backend
+    def _migrate_legacy(self, group: str) -> Optional[str]:
+        """Read a credential written under the old shared-service layout
+        (service=SERVICE_NAME, username=group) and move it to its own service."""
+        legacy = self._keyring.get_password(SERVICE_NAME, group)
+        if legacy is None:
+            return None
         try:
+            self._keyring.set_password(_service_for(group), _ENTRY_USERNAME, legacy)
+            # delete_password's username guard only removes the matching entry,
+            # so this never disturbs another group still on the shared service.
             self._keyring.delete_password(SERVICE_NAME, group)
-            logger.debug("Deleted credentials from keyring", group=group)
+            logger.info("Migrated credential to isolated keyring service", group=group)
         except Exception as e:
-            logger.debug("Keyring delete failed (may not exist)", group=group, error=str(e))
+            logger.warning("Legacy credential migration failed", group=group, error=str(e))
+        return legacy
 
-        # 2. Explicitly try to clean up keyrings.alt (Plaintext)
-        # This handles cases where user switched between Headless/GUI environments
+    def delete(self, group: str) -> None:
+        # Delete both the isolated credential and any legacy shared-service entry.
+        for service, username in ((_service_for(group), _ENTRY_USERNAME), (SERVICE_NAME, group)):
+            try:
+                self._keyring.delete_password(service, username)
+                logger.debug("Deleted credentials from keyring", service=service, group=group)
+            except Exception as e:
+                logger.debug(
+                    "Keyring delete failed (may not exist)", service=service, group=group, error=str(e)
+                )
+
+        # Explicitly clean up keyrings.alt (Plaintext) residue for both layouts.
+        # This handles cases where a user switched between Headless/GUI environments.
         try:
             import keyrings.alt.file
 
             alt_kr = keyrings.alt.file.PlaintextKeyring()
-            try:
-                alt_kr.delete_password(SERVICE_NAME, group)
-                logger.debug("Cleaned up residue from keyrings.alt", group=group)
-            except Exception as e:
-                logger.debug("keyrings.alt delete failed (may not exist)", group=group, error=str(e))
+            for service, username in ((_service_for(group), _ENTRY_USERNAME), (SERVICE_NAME, group)):
+                try:
+                    alt_kr.delete_password(service, username)
+                    logger.debug("Cleaned up residue from keyrings.alt", service=service, group=group)
+                except Exception as e:
+                    logger.debug(
+                        "keyrings.alt delete failed (may not exist)", service=service, group=group, error=str(e)
+                    )
         except ImportError:
             pass
-
-        # 3. Explicit check for Windows Credential Manager if on Windows but currently using fallback?
-        # Usually checking current backend (Step 1) covers WCM on Windows,
-        # as WCM is the priority backend.
 
 
 class TokenManager:
