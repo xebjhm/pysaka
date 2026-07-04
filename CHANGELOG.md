@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-07-04
+
+### Fixed
+- Credentials no longer clobber each other in the OS keyring. Every credential
+  (login sessions and stored API keys) was written under a single keyring
+  service, separated only by the keyring username; keyring's Windows backend
+  routes the newest write to the bare `service` target, so credentials churned
+  through one slot and a routine session re-save (e.g. the re-auth around an app
+  update or reinstall) could silently wipe a stored API key. Each credential is
+  now isolated under its own service (`pysaka:<group>`), and existing credentials
+  are transparently migrated on first read so upgrades keep sessions and keys.
+
 ## [0.4.1] - 2026-07-03
 
 ### Fixed
