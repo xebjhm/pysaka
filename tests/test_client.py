@@ -205,6 +205,83 @@ async def test_get_messages_empty_page_without_continuation_is_clean_end(client,
 
 
 @pytest.mark.asyncio
+async def test_get_messages_raises_on_missing_continuation_before_cursor(client, mock_session):
+    """A NON-empty page whose oldest message is STILL newer than the cursor but that
+    carries NO continuation means the timeline ended before reaching the cursor: the
+    server gave us no way to fetch the older-but-still-new messages between here and
+    the cursor. Breaking would let the caller advance its cursor PAST that gap. Fail
+    closed, mirroring the empty-page-with-continuation guard added in 0.4.2."""
+    from pysaka.exceptions import ApiError
+
+    client.fetch_json = AsyncMock(
+        side_effect=[
+            {
+                "messages": [
+                    {"id": 100, "published_at": "2026-01-10T00:00:00Z"},
+                    {"id": 99, "published_at": "2026-01-09T00:00:00Z"},
+                ],
+                # No continuation, yet oldest (01-09) is still newer than the
+                # cursor (01-01) — the cursor was never reached.
+                "continuation": None,
+            },
+        ]
+    )
+
+    with pytest.raises(ApiError):
+        await client.get_messages(mock_session, group_id=1, since_ts="2026-01-01T00:00:00Z")
+
+
+@pytest.mark.asyncio
+async def test_get_messages_raises_on_duplicate_continuation_before_cursor(client, mock_session):
+    """A repeated continuation token (server hands back the SAME cursor it was given)
+    means pagination is stuck. Breaking to avoid an infinite loop while the oldest
+    fetched message is still newer than the cursor skips a gap — fail closed."""
+    from pysaka.exceptions import ApiError
+
+    client.fetch_json = AsyncMock(
+        side_effect=[
+            {
+                "messages": [
+                    {"id": 100, "published_at": "2026-01-10T00:00:00Z"},
+                    {"id": 99, "published_at": "2026-01-09T00:00:00Z"},
+                ],
+                "continuation": "tok1",
+            },
+            {
+                "messages": [{"id": 98, "published_at": "2026-01-08T00:00:00Z"}],
+                # Same token we just sent — server isn't advancing, and oldest
+                # (01-08) is still newer than the cursor (01-01).
+                "continuation": "tok1",
+            },
+        ]
+    )
+
+    with pytest.raises(ApiError):
+        await client.get_messages(mock_session, group_id=1, since_ts="2026-01-01T00:00:00Z")
+
+
+@pytest.mark.asyncio
+async def test_get_messages_missing_continuation_after_cursor_is_clean_end(client, mock_session):
+    """A page with no continuation whose oldest message has REACHED the cursor is a
+    legitimate end-of-timeline: return the newer-than-cursor messages, do not raise.
+    Guards against the gap check false-positiving once the cursor is crossed."""
+    client.fetch_json = AsyncMock(
+        side_effect=[
+            {
+                "messages": [
+                    {"id": 100, "published_at": "2026-01-10T00:00:00Z"},
+                    {"id": 5, "published_at": "2025-12-31T00:00:00Z"},
+                ],
+                "continuation": None,
+            },
+        ]
+    )
+
+    msgs = await client.get_messages(mock_session, group_id=1, since_ts="2026-01-01T00:00:00Z")
+    assert [m["id"] for m in msgs] == [100]
+
+
+@pytest.mark.asyncio
 async def test_get_messages_does_not_clear_unread_by_default(client, mock_session):
     """Syncing must NOT clear the user's unread badge on the official mobile app.
 
