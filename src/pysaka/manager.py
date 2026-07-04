@@ -439,30 +439,44 @@ class SyncManager:
         Expected paths are resolved as ``self.output_dir / msg["media_file"]``.
 
         Returns:
-            ``{"checked": int, "missing": list[dict], "unresolved": list[dict]}``
-            where each missing descriptor is ``{"message_id", "media_type",
-            "path": Path, "timestamp"}`` and each ``unresolved`` descriptor is
-            ``{"message_id", "media_type", "timestamp"}`` (no path). ``unresolved``
-            lists media-type messages that have no recorded ``media_file`` (the
-            media URL was absent at sync time, e.g. a source-removed stub): they
-            cannot be located or verified on disk, so they are reported separately
-            rather than silently ignored — otherwise the result would claim 'all
-            present' while such media is genuinely absent. Returns zero/empty if
-            messages.json is absent or unreadable.
+            ``{"checked": int, "missing": list[dict], "unresolved": list[dict],
+            "error": str | None}`` where each missing descriptor is
+            ``{"message_id", "media_type", "path": Path, "timestamp"}`` and each
+            ``unresolved`` descriptor is ``{"message_id", "media_type", "timestamp"}``
+            (no path). ``unresolved`` lists media-type messages that have no recorded
+            ``media_file`` (the media URL was absent at sync time, e.g. a
+            source-removed stub): they cannot be located or verified on disk, so they
+            are reported separately rather than silently ignored — otherwise the
+            result would claim 'all present' while such media is genuinely absent.
+
+            ``error`` is ``None`` for a readable manifest. When messages.json cannot
+            be used it is set to a stable id so callers can distinguish it from a
+            fully-synced member (which also yields checked=0/missing=[]):
+            ``"manifest_missing"`` (absent), ``"manifest_unreadable"`` (present but
+            corrupt/unreadable), or ``"manifest_invalid"`` (valid JSON but not an
+            object). In every case the zero/empty counts are still returned.
         """
-        result: dict[str, Any] = {"checked": 0, "missing": [], "unresolved": []}
+        result: dict[str, Any] = {"checked": 0, "missing": [], "unresolved": [], "error": None}
         messages_file = member_dir / "messages.json"
         if not messages_file.exists():
+            # An absent manifest is NOT the same as a fully-synced member (which also
+            # yields checked=0/missing=[]). Signal it distinctly so callers can tell
+            # "nothing synced yet" apart from "all present".
+            result["error"] = "manifest_missing"
             return result
         try:
             with open(messages_file, encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:  # noqa: BLE001
-            logger.warning("scan: unreadable messages.json", file=str(messages_file), error=str(e))
+            # A corrupt/unreadable manifest must be surfaced, not collapsed into a
+            # clean-looking empty result that reads as "fully synced".
+            logger.warning("saka.scan.manifest_unreadable", file=str(messages_file), error=str(e))
+            result["error"] = "manifest_unreadable"
             return result
 
         if not isinstance(data, dict):
-            logger.warning("scan: messages.json is not a JSON object", file=str(messages_file))
+            logger.warning("saka.scan.manifest_invalid", file=str(messages_file))
+            result["error"] = "manifest_invalid"
             return result
 
         for msg in data.get("messages", []):

@@ -344,6 +344,8 @@ def test_scan_member_media_finds_absent_and_zero_byte(sync_manager):
     assert sorted(d["message_id"] for d in result["missing"]) == [102, 103]
     assert all(isinstance(d["path"], Path) for d in result["missing"])
     assert result["unresolved"] == []
+    # A readable manifest carries no error signal.
+    assert result["error"] is None
 
 
 def test_scan_member_media_counts_media_without_media_file_as_unresolved(sync_manager):
@@ -422,20 +424,52 @@ def test_scan_member_media_surfaces_unexpected_state_as_unresolved(sync_manager)
     assert [u["message_id"] for u in result["unresolved"]] == [401]
 
 
-def test_scan_member_media_missing_file_returns_empty(sync_manager):
+def test_scan_member_media_missing_file_signals_absent_manifest(sync_manager):
+    # An absent messages.json must be distinguishable from a fully-synced member
+    # (checked=0, missing=[]): callers get a distinct 'manifest_missing' error id
+    # rather than a result that looks identical to "all present".
     member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
     member_dir.mkdir(parents=True)
-    assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": [], "unresolved": []}
+    assert sync_manager.scan_member_media(member_dir) == {
+        "checked": 0,
+        "missing": [],
+        "unresolved": [],
+        "error": "manifest_missing",
+    }
 
 
-def test_scan_member_media_non_dict_json_returns_empty(sync_manager):
-    # A valid-but-non-dict messages.json (e.g. "[]" or "null") must degrade to
-    # the empty result rather than raising AttributeError on data.get(...).
+def test_scan_member_media_non_dict_json_signals_invalid_manifest(sync_manager):
+    # A valid-but-non-dict messages.json (e.g. "[]" or "null") must degrade to an
+    # empty result rather than raising AttributeError on data.get(...) — and now
+    # carry a distinct 'manifest_invalid' error id so callers can tell it apart
+    # from a genuinely-synced member.
     member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
     member_dir.mkdir(parents=True)
     (member_dir / "messages.json").write_text(json.dumps([]), encoding="utf-8")
 
-    assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": [], "unresolved": []}
+    assert sync_manager.scan_member_media(member_dir) == {
+        "checked": 0,
+        "missing": [],
+        "unresolved": [],
+        "error": "manifest_invalid",
+    }
+
+
+def test_scan_member_media_unreadable_manifest_signals_error(sync_manager):
+    # A corrupt/unreadable messages.json (invalid JSON) must NOT be reported as an
+    # empty-but-clean result — that would be indistinguishable from "fully synced".
+    # It carries a distinct 'manifest_unreadable' error id so callers can surface it.
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True)
+    (member_dir / "messages.json").write_text("{ this is not valid json", encoding="utf-8")
+
+    result = sync_manager.scan_member_media(member_dir)
+    assert result == {
+        "checked": 0,
+        "missing": [],
+        "unresolved": [],
+        "error": "manifest_unreadable",
+    }
 
 
 @pytest.mark.asyncio
