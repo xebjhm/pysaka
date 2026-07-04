@@ -155,7 +155,10 @@ class KeyringStore(CredentialStore):
                 json_data = _decompress_data(data)
                 return json.loads(json_data)
         except Exception as e:
-            logger.warning(f"Failed to load credentials for {group}: {e}")
+            # Greppable id so corrupt/undecodable stored data (a real problem) is
+            # distinguishable in logs from the legitimate "never stored" case, which
+            # returns None without logging here.
+            logger.warning("saka.cred.load_failed", group=group, error=str(e))
         return None
 
     def _migrate_legacy(self, group: str) -> Optional[str]:
@@ -164,14 +167,26 @@ class KeyringStore(CredentialStore):
         legacy = self._keyring.get_password(SERVICE_NAME, group)
         if legacy is None:
             return None
+        # Write the isolated copy FIRST. If this fails the migration did NOT happen:
+        # surface it (raise) rather than returning the credential as if migrated, and
+        # critically do NOT fall through to the delete below — deleting the legacy
+        # entry after a failed write would destroy the only surviving copy. Raising
+        # leaves the legacy entry intact so the next load retries the migration.
         try:
             self._keyring.set_password(_service_for(group), _ENTRY_USERNAME, legacy)
-            # delete_password's username guard only removes the matching entry,
-            # so this never disturbs another group still on the shared service.
+        except Exception as e:
+            logger.error("saka.cred.migrate_write_failed", group=group, error=str(e))
+            raise SakaError(f"Failed to migrate legacy credential for {group}: {e}") from e
+        # Isolated copy is safely written; the legacy entry can now be removed.
+        # delete_password's username guard only removes the matching entry, so this
+        # never disturbs another group still on the shared service. A delete failure
+        # only leaves harmless residue (the isolated copy is authoritative and new
+        # saves never touch the shared service), so log it but don't fail the load.
+        try:
             self._keyring.delete_password(SERVICE_NAME, group)
             logger.info("Migrated credential to isolated keyring service", group=group)
         except Exception as e:
-            logger.warning("Legacy credential migration failed", group=group, error=str(e))
+            logger.warning("saka.cred.migrate_delete_failed", group=group, error=str(e))
         return legacy
 
     def delete(self, group: str) -> None:
