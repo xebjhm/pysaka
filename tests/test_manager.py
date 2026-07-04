@@ -343,7 +343,7 @@ def test_scan_member_media_finds_absent_and_zero_byte(sync_manager):
     assert result["checked"] == 3
     assert sorted(d["message_id"] for d in result["missing"]) == [102, 103]
     assert all(isinstance(d["path"], Path) for d in result["missing"])
-    assert result["unresolved"] == 0
+    assert result["unresolved"] == []
 
 
 def test_scan_member_media_counts_media_without_media_file_as_unresolved(sync_manager):
@@ -371,13 +371,15 @@ def test_scan_member_media_counts_media_without_media_file_as_unresolved(sync_ma
     result = sync_manager.scan_member_media(member_dir)
     assert result["checked"] == 1  # only 201 has a checkable media_file
     assert result["missing"] == []  # 201 is present on disk
-    assert result["unresolved"] == 2  # 202 and 203: media type but no usable media_file
+    # 202 and 203: media type but no usable media_file, reported with details
+    assert sorted(u["message_id"] for u in result["unresolved"]) == [202, 203]
+    assert {u["media_type"] for u in result["unresolved"]} == {"video", "picture"}
 
 
 def test_scan_member_media_missing_file_returns_empty(sync_manager):
     member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
     member_dir.mkdir(parents=True)
-    assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": [], "unresolved": 0}
+    assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": [], "unresolved": []}
 
 
 def test_scan_member_media_non_dict_json_returns_empty(sync_manager):
@@ -387,7 +389,7 @@ def test_scan_member_media_non_dict_json_returns_empty(sync_manager):
     member_dir.mkdir(parents=True)
     (member_dir / "messages.json").write_text(json.dumps([]), encoding="utf-8")
 
-    assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": [], "unresolved": 0}
+    assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": [], "unresolved": []}
 
 
 @pytest.mark.asyncio

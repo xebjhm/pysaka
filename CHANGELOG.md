@@ -25,11 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the un-fetched older-but-still-new messages, silently losing them.
 
 ### Changed
-- `SyncManager.scan_member_media` now also reports `unresolved`: media-type
-  messages (picture/video/voice) that have no recorded media file because the
-  media URL was absent at sync time (e.g. expired-media stubs). These were
-  previously skipped entirely, which could let a completeness check report "all
-  media present" while such media was genuinely missing and unrecoverable.
+- `SyncManager.scan_member_media` now also reports `unresolved` — a list of
+  media-type messages (each `{message_id, media_type, timestamp}`) that have no
+  recorded media file because the media URL was absent at sync time (e.g. media
+  removed on the server). These were previously skipped entirely, which could let
+  a completeness check report "all media present" while such media was genuinely
+  missing and unrecoverable.
 
 ## [0.4.1] - 2026-07-03
 
