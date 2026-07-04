@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the un-fetched older-but-still-new messages, silently losing them.
 
 ### Changed
+- Messages now record a non-"published" server `state` (e.g. `canceled` — the
+  member withdrew the post, which strips its media). `normalize_message` keeps it
+  on disk; `scan_member_media` excludes canceled messages from `unresolved` since
+  a withdrawn post has no media by design (not a completeness gap). Published
+  messages stay lean (no `state` field).
 - `SyncManager.scan_member_media` now also reports `unresolved` — a list of
   media-type messages (each `{message_id, media_type, timestamp}`) that have no
   recorded media file because the media URL was absent at sync time (e.g. media

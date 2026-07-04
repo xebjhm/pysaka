@@ -376,6 +376,29 @@ def test_scan_member_media_counts_media_without_media_file_as_unresolved(sync_ma
     assert {u["media_type"] for u in result["unresolved"]} == {"video", "picture"}
 
 
+def test_scan_member_media_excludes_canceled_from_unresolved(sync_manager):
+    """A withdrawn post (state != 'published', e.g. 'canceled') legitimately has no
+    media, so it must NOT be reported as unresolved — only genuinely-missing
+    published media should be. The state stays recorded on disk."""
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True)
+    (member_dir / "messages.json").write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"id": 301, "type": "video"},  # published (no state), no media_file -> unresolved
+                    {"id": 302, "type": "video", "state": "canceled"},  # withdrawn -> excluded
+                    {"id": 303, "type": "picture", "state": "canceled"},  # withdrawn -> excluded
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = sync_manager.scan_member_media(member_dir)
+    assert [u["message_id"] for u in result["unresolved"]] == [301]
+
+
 def test_scan_member_media_missing_file_returns_empty(sync_manager):
     member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
     member_dir.mkdir(parents=True)

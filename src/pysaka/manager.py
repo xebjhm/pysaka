@@ -465,8 +465,16 @@ class SyncManager:
                 continue
             media_file = msg.get("media_file")
             if not media_file:
-                # Media-type message with no recorded media path: not locatable or
-                # verifiable on disk. Surface it so completeness is never overclaimed.
+                # A non-"published" message (e.g. state="canceled" — the member
+                # withdrew the post, which strips its media) legitimately has no
+                # media and is NOT a completeness gap. The state is recorded on
+                # disk; skip it silently.
+                state = msg.get("state")
+                if state and state != "published":
+                    continue
+                # Otherwise: a published media-type message with no recorded media
+                # path — genuinely unaccounted. Surface it so completeness is never
+                # overclaimed.
                 result["unresolved"].append(
                     {
                         "message_id": msg.get("id"),
