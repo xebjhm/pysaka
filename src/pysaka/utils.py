@@ -179,7 +179,7 @@ def normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
     elif raw_type in ["voice"]:
         msg_type = "voice"
 
-    return {
+    normalized: dict[str, Any] = {
         "id": msg["id"],
         "timestamp": msg.get("published_at"),  # ISO string from API
         "type": msg_type,
@@ -188,3 +188,11 @@ def normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
         # raw type useful for extension determination later
         "_raw_type": raw_type,
     }
+    # Record a non-"published" server state (e.g. "canceled" = the member withdrew
+    # the post, which strips its media). Kept on disk so the app can tell a
+    # withdrawn post apart from genuinely-missing media; omitted for normal
+    # published messages to avoid bloating every record.
+    state = msg.get("state")
+    if state and state != "published":
+        normalized["state"] = state
+    return normalized

@@ -17,6 +17,12 @@ from .utils import get_media_extension, media_file_is_present, normalize_message
 
 logger = structlog.get_logger()
 
+# Server states where the member withdrew the post, which legitimately strips its
+# media (confirmed via the live timeline probe). ANY OTHER non-"published" state is
+# treated as a potential real gap and surfaced in `unresolved`, so completeness is
+# never overclaimed on an unexpected/transient state (e.g. "processing").
+_MEDIA_STRIPPING_STATES = frozenset({"canceled", "cancelled"})
+
 
 class SyncManager:
     """
@@ -433,30 +439,71 @@ class SyncManager:
         Expected paths are resolved as ``self.output_dir / msg["media_file"]``.
 
         Returns:
-            ``{"checked": int, "missing": list[dict]}`` where each missing
-            descriptor is ``{"message_id", "media_type", "path": Path,
-            "timestamp"}``. Returns zero/empty if messages.json is absent or
-            unreadable.
+            ``{"checked": int, "missing": list[dict], "unresolved": list[dict],
+            "error": str | None}`` where each missing descriptor is
+            ``{"message_id", "media_type", "path": Path, "timestamp"}`` and each
+            ``unresolved`` descriptor is ``{"message_id", "media_type", "timestamp"}``
+            (no path). ``unresolved`` lists media-type messages that have no recorded
+            ``media_file`` (the media URL was absent at sync time, e.g. a
+            source-removed stub): they cannot be located or verified on disk, so they
+            are reported separately rather than silently ignored — otherwise the
+            result would claim 'all present' while such media is genuinely absent.
+
+            ``error`` is ``None`` for a readable manifest. When messages.json cannot
+            be used it is set to a stable id so callers can distinguish it from a
+            fully-synced member (which also yields checked=0/missing=[]):
+            ``"manifest_missing"`` (absent), ``"manifest_unreadable"`` (present but
+            corrupt/unreadable), or ``"manifest_invalid"`` (valid JSON but not an
+            object). In every case the zero/empty counts are still returned.
         """
-        result: dict[str, Any] = {"checked": 0, "missing": []}
+        result: dict[str, Any] = {"checked": 0, "missing": [], "unresolved": [], "error": None}
         messages_file = member_dir / "messages.json"
         if not messages_file.exists():
+            # An absent manifest is NOT the same as a fully-synced member (which also
+            # yields checked=0/missing=[]). Signal it distinctly so callers can tell
+            # "nothing synced yet" apart from "all present".
+            result["error"] = "manifest_missing"
             return result
         try:
             with open(messages_file, encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:  # noqa: BLE001
-            logger.warning("scan: unreadable messages.json", file=str(messages_file), error=str(e))
+            # A corrupt/unreadable manifest must be surfaced, not collapsed into a
+            # clean-looking empty result that reads as "fully synced".
+            logger.warning("saka.scan.manifest_unreadable", file=str(messages_file), error=str(e))
+            result["error"] = "manifest_unreadable"
             return result
 
         if not isinstance(data, dict):
-            logger.warning("scan: messages.json is not a JSON object", file=str(messages_file))
+            logger.warning("saka.scan.manifest_invalid", file=str(messages_file))
+            result["error"] = "manifest_invalid"
             return result
 
         for msg in data.get("messages", []):
-            media_file = msg.get("media_file")
             mtype = msg.get("type")
-            if not media_file or mtype not in ("picture", "video", "voice"):
+            if mtype not in ("picture", "video", "voice"):
+                continue
+            media_file = msg.get("media_file")
+            if not media_file:
+                # A withdrawn post (state in _MEDIA_STRIPPING_STATES, e.g.
+                # "canceled" — the member withdrew it, which strips its media)
+                # legitimately has no media and is NOT a completeness gap. The state
+                # is recorded on disk; skip it silently. Any OTHER non-published
+                # state falls through and is surfaced below, so an unexpected or
+                # transient state can't silently hide a real gap.
+                state = msg.get("state")
+                if state in _MEDIA_STRIPPING_STATES:
+                    continue
+                # Otherwise: a published media-type message with no recorded media
+                # path — genuinely unaccounted. Surface it so completeness is never
+                # overclaimed.
+                result["unresolved"].append(
+                    {
+                        "message_id": msg.get("id"),
+                        "media_type": mtype,
+                        "timestamp": msg.get("timestamp") or msg.get("published_at"),
+                    }
+                )
                 continue
             result["checked"] += 1
             path = self.output_dir / media_file

@@ -633,10 +633,34 @@ class Client:
                 if page == 0 and not first_page_retried and await self.refresh_access_token(session):
                     first_page_retried = True
                     continue
+                # fetch_json returns None only on a genuine error (auth/unexpected
+                # status). If we have already collected earlier (newer) pages and
+                # have NOT reached the cursor/end, returning that partial newest-only
+                # set would let the caller advance its timestamp cursor PAST the
+                # un-fetched older-but-still-new messages — silent data loss. Fail
+                # closed so the sync is retried and the cursor is left untouched.
+                if all_messages:
+                    raise ApiError(
+                        f"Timeline pagination for group {group_id} aborted before "
+                        f"reaching the cursor after {len(all_messages)} message(s); "
+                        "refusing to return a partial page that would skip a gap."
+                    )
                 break
 
             messages = data.get("messages", [])
             if not messages:
+                # An empty page mid-pagination (earlier/newer pages already
+                # collected) that STILL carries a continuation means the server
+                # claims more data exists but returned nothing — breaking here and
+                # returning the partial newest set would advance the cursor past the
+                # un-fetched gap. Fail closed, mirroring the None-page guard above.
+                # An empty page with no continuation is a legitimate end-of-timeline.
+                if all_messages and data.get("continuation"):
+                    raise ApiError(
+                        f"Timeline pagination for group {group_id} returned an empty "
+                        f"page with a continuation after {len(all_messages)} "
+                        "message(s); refusing to skip a possible gap."
+                    )
                 break
 
             for m in messages:
@@ -662,6 +686,22 @@ class Client:
 
             current_continuation = data.get("continuation")
             if not current_continuation or current_continuation == params.get("continuation"):
+                # A missing or repeated continuation on a non-empty page normally
+                # means end-of-timeline. But when a cursor is set and the oldest
+                # message on this page is STILL newer than the cursor, the timeline
+                # ran out before reaching it: the server offered no way to fetch the
+                # older-but-still-new messages between here and the cursor. Breaking
+                # would let the caller advance its cursor past that gap. Fail closed,
+                # mirroring the empty-page and failed-fetch guards above.
+                if effective_ts and messages:
+                    oldest_timestamp = messages[-1].get("published_at", "")
+                    if oldest_timestamp and oldest_timestamp > effective_ts:
+                        raise ApiError(
+                            f"Timeline pagination for group {group_id} ended with a "
+                            f"missing/duplicate continuation while the oldest fetched "
+                            f"message ({oldest_timestamp}) is still newer than the "
+                            f"cursor ({effective_ts}); refusing to skip a possible gap."
+                        )
                 break
 
             page += 1

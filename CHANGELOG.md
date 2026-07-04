@@ -23,6 +23,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OnnxEmbedder` and a numpy-backed `NumpyVectorStore`. Not imported by
   `pysaka.knowledge` itself, so the default install stays lean.
 
+## [0.4.2] - 2026-07-04
+
+### Fixed
+- Credentials no longer clobber each other in the OS keyring. Every credential
+  (login sessions and stored API keys) was written under a single keyring
+  service, separated only by the keyring username; keyring's Windows backend
+  routes the newest write to the bare `service` target, so credentials churned
+  through one slot and a routine session re-save (e.g. the re-auth around an app
+  update or reinstall) could silently wipe a stored API key. Each credential is
+  now isolated under its own service (`pysaka:<group>`), and existing credentials
+  are transparently migrated on first read so upgrades keep sessions and keys.
+- `get_messages` now fails closed on an incomplete timeline pagination. If a
+  continuation page fails to fetch (a non-raising error path), or the server
+  returns an empty page that still carries a continuation, before the cursor or
+  the end of the timeline is reached, it raises instead of returning the partial
+  newest-only set — otherwise the caller would advance its timestamp cursor past
+  the un-fetched older-but-still-new messages, silently losing them. (An empty
+  page with no continuation remains a normal end-of-timeline.)
+
+### Changed
+- Messages now record a non-"published" server `state` (e.g. `canceled` — the
+  member withdrew the post, which strips its media). `normalize_message` keeps it
+  on disk; `scan_member_media` excludes only genuinely-withdrawn states
+  (`canceled`) from `unresolved` since a withdrawn post has no media by design
+  (not a completeness gap). Any other unexpected non-published state (e.g. a
+  transient `processing`) is still surfaced in `unresolved`, so it can't silently
+  hide a real gap. Published messages stay lean (no `state` field).
+- `SyncManager.scan_member_media` now also reports `unresolved` — a list of
+  media-type messages (each `{message_id, media_type, timestamp}`) that have no
+  recorded media file because the media URL was absent at sync time (e.g. media
+  removed on the server). These were previously skipped entirely, which could let
+  a completeness check report "all media present" while such media was genuinely
+  missing and unrecoverable.
+
 ## [0.4.1] - 2026-07-03
 
 ### Fixed
