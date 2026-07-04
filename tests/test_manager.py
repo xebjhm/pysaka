@@ -120,6 +120,26 @@ async def test_sync_member_write_failure_does_not_advance_cursor(sync_manager, m
 
 
 @pytest.mark.asyncio
+async def test_sync_member_get_messages_error_does_not_advance_cursor(sync_manager):
+    """If get_messages raises (e.g. it fails closed on an incomplete pagination),
+    the member sync must abort without advancing the cursor, so the next run
+    re-fetches from the last good point instead of skipping the un-fetched gap."""
+    from pysaka.exceptions import ApiError
+
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp", "subscription": {"state": "active"}}
+    member = {"id": 10, "name": "Mem", "portrait": "url"}
+
+    sync_manager.client.get_messages.side_effect = ApiError("pagination aborted before cursor")
+
+    count = await sync_manager.sync_member(session, group, member, [])
+
+    assert count == 0  # aborted, not reported as success
+    assert "1_10" not in sync_manager.sync_state  # cursor was NOT advanced
+    assert sync_manager.get_last_ts(1, 10) is None
+
+
+@pytest.mark.asyncio
 async def test_sync_member_prepare_failure_holds_cursor(sync_manager):
     """A message that fails to normalize must NOT let the cursor advance past it.
     The next sync fetches published_at >= cursor, so an un-clamped cursor would
@@ -323,12 +343,89 @@ def test_scan_member_media_finds_absent_and_zero_byte(sync_manager):
     assert result["checked"] == 3
     assert sorted(d["message_id"] for d in result["missing"]) == [102, 103]
     assert all(isinstance(d["path"], Path) for d in result["missing"])
+    assert result["unresolved"] == []
+
+
+def test_scan_member_media_counts_media_without_media_file_as_unresolved(sync_manager):
+    """A media-type message with no recorded media_file (the media URL was absent
+    at sync time — e.g. an expired-media stub) must be surfaced as `unresolved`,
+    not silently ignored. Otherwise the check reports 'all media present' while
+    such media is genuinely absent and unrecorded — a false completeness claim."""
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    (member_dir / "picture").mkdir(parents=True)
+    (member_dir / "picture" / "201.jpg").write_bytes(b"IMG")
+    (member_dir / "messages.json").write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"id": 201, "type": "picture", "media_file": "messages/1 Grp/10 Mem/picture/201.jpg"},
+                    {"id": 202, "type": "video"},  # media type, no media_file (no url at sync)
+                    {"id": 203, "type": "picture", "media_file": ""},  # empty media_file
+                    {"id": 204, "type": "text", "content": "hi"},  # non-media, ignored
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = sync_manager.scan_member_media(member_dir)
+    assert result["checked"] == 1  # only 201 has a checkable media_file
+    assert result["missing"] == []  # 201 is present on disk
+    # 202 and 203: media type but no usable media_file, reported with details
+    assert sorted(u["message_id"] for u in result["unresolved"]) == [202, 203]
+    assert {u["media_type"] for u in result["unresolved"]} == {"video", "picture"}
+
+
+def test_scan_member_media_excludes_canceled_from_unresolved(sync_manager):
+    """A withdrawn post (state 'canceled') legitimately has no media, so it must NOT
+    be reported as unresolved — only genuinely-missing published media should be.
+    The state stays recorded on disk."""
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True)
+    (member_dir / "messages.json").write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"id": 301, "type": "video"},  # published (no state), no media_file -> unresolved
+                    {"id": 302, "type": "video", "state": "canceled"},  # withdrawn -> excluded
+                    {"id": 303, "type": "picture", "state": "canceled"},  # withdrawn -> excluded
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = sync_manager.scan_member_media(member_dir)
+    assert [u["message_id"] for u in result["unresolved"]] == [301]
+
+
+def test_scan_member_media_surfaces_unexpected_state_as_unresolved(sync_manager):
+    """Only a genuinely-withdrawn state ('canceled') strips media legitimately. Any
+    OTHER non-published state (e.g. a transient 'processing') on a media message with
+    no media_file must STILL be surfaced as unresolved — otherwise an unexpected
+    state would silently hide a real gap, overclaiming completeness."""
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True)
+    (member_dir / "messages.json").write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"id": 401, "type": "video", "state": "processing"},  # unexpected -> surfaced
+                    {"id": 402, "type": "picture", "state": "canceled"},  # withdrawn -> excluded
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = sync_manager.scan_member_media(member_dir)
+    assert [u["message_id"] for u in result["unresolved"]] == [401]
 
 
 def test_scan_member_media_missing_file_returns_empty(sync_manager):
     member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
     member_dir.mkdir(parents=True)
-    assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": []}
+    assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": [], "unresolved": []}
 
 
 def test_scan_member_media_non_dict_json_returns_empty(sync_manager):
@@ -338,7 +435,7 @@ def test_scan_member_media_non_dict_json_returns_empty(sync_manager):
     member_dir.mkdir(parents=True)
     (member_dir / "messages.json").write_text(json.dumps([]), encoding="utf-8")
 
-    assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": []}
+    assert sync_manager.scan_member_media(member_dir) == {"checked": 0, "missing": [], "unresolved": []}
 
 
 @pytest.mark.asyncio

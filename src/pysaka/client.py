@@ -633,10 +633,34 @@ class Client:
                 if page == 0 and not first_page_retried and await self.refresh_access_token(session):
                     first_page_retried = True
                     continue
+                # fetch_json returns None only on a genuine error (auth/unexpected
+                # status). If we have already collected earlier (newer) pages and
+                # have NOT reached the cursor/end, returning that partial newest-only
+                # set would let the caller advance its timestamp cursor PAST the
+                # un-fetched older-but-still-new messages — silent data loss. Fail
+                # closed so the sync is retried and the cursor is left untouched.
+                if all_messages:
+                    raise ApiError(
+                        f"Timeline pagination for group {group_id} aborted before "
+                        f"reaching the cursor after {len(all_messages)} message(s); "
+                        "refusing to return a partial page that would skip a gap."
+                    )
                 break
 
             messages = data.get("messages", [])
             if not messages:
+                # An empty page mid-pagination (earlier/newer pages already
+                # collected) that STILL carries a continuation means the server
+                # claims more data exists but returned nothing — breaking here and
+                # returning the partial newest set would advance the cursor past the
+                # un-fetched gap. Fail closed, mirroring the None-page guard above.
+                # An empty page with no continuation is a legitimate end-of-timeline.
+                if all_messages and data.get("continuation"):
+                    raise ApiError(
+                        f"Timeline pagination for group {group_id} returned an empty "
+                        f"page with a continuation after {len(all_messages)} "
+                        "message(s); refusing to skip a possible gap."
+                    )
                 break
 
             for m in messages:

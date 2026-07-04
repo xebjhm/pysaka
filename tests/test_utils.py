@@ -45,6 +45,16 @@ def test_normalize_message_types():
     assert normalize_message({"id": 1, "type": "text"})["type"] == "text"
 
 
+def test_normalize_message_records_non_published_state():
+    # A withdrawn post keeps its state on disk...
+    canceled = normalize_message({"id": 1, "type": "video", "state": "canceled"})
+    assert canceled["state"] == "canceled"
+    # ...but a normal published message stays lean (no state field).
+    published = normalize_message({"id": 2, "type": "video", "state": "published"})
+    assert "state" not in published
+    assert "state" not in normalize_message({"id": 3, "type": "text"})
+
+
 # ============================================================================
 # JWT Utility Tests
 # ============================================================================

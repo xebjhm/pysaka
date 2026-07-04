@@ -43,10 +43,10 @@ def test_keyring_save_load(mock_keyring):
     stored_data = {}
 
     def set_password(service, username, password):
-        stored_data[username] = password
+        stored_data[(service, username)] = password
 
     def get_password(service, username):
-        return stored_data.get(username)
+        return stored_data.get((service, username))
 
     mock_keyring.set_password.side_effect = set_password
     mock_keyring.get_password.side_effect = get_password
@@ -54,13 +54,13 @@ def test_keyring_save_load(mock_keyring):
     # Test valid save/load
     tm.save_session("group1", "token123", "refresh123", {"s": "1"})
 
-    # Check what was stored (compressed string)
-    assert "group1" in stored_data
+    # Stored under an isolated per-group service, not the shared SERVICE_NAME.
+    assert ("pysaka:group1", "credential") in stored_data
     # Data is now compressed - verify by loading
     loaded = tm.load_session("group1")
     assert loaded["access_token"] == "token123"
     assert loaded["cookies"] == {"s": "1"}
 
-    # Test delete
+    # Test delete removes the isolated credential.
     tm.delete_session("group1")
-    mock_keyring.delete_password.assert_called_with("pysaka", "group1")
+    mock_keyring.delete_password.assert_any_call("pysaka:group1", "credential")

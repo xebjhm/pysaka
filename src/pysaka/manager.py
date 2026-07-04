@@ -17,6 +17,12 @@ from .utils import get_media_extension, media_file_is_present, normalize_message
 
 logger = structlog.get_logger()
 
+# Server states where the member withdrew the post, which legitimately strips its
+# media (confirmed via the live timeline probe). ANY OTHER non-"published" state is
+# treated as a potential real gap and surfaced in `unresolved`, so completeness is
+# never overclaimed on an unexpected/transient state (e.g. "processing").
+_MEDIA_STRIPPING_STATES = frozenset({"canceled", "cancelled"})
+
 
 class SyncManager:
     """
@@ -433,12 +439,18 @@ class SyncManager:
         Expected paths are resolved as ``self.output_dir / msg["media_file"]``.
 
         Returns:
-            ``{"checked": int, "missing": list[dict]}`` where each missing
-            descriptor is ``{"message_id", "media_type", "path": Path,
-            "timestamp"}``. Returns zero/empty if messages.json is absent or
-            unreadable.
+            ``{"checked": int, "missing": list[dict], "unresolved": list[dict]}``
+            where each missing descriptor is ``{"message_id", "media_type",
+            "path": Path, "timestamp"}`` and each ``unresolved`` descriptor is
+            ``{"message_id", "media_type", "timestamp"}`` (no path). ``unresolved``
+            lists media-type messages that have no recorded ``media_file`` (the
+            media URL was absent at sync time, e.g. a source-removed stub): they
+            cannot be located or verified on disk, so they are reported separately
+            rather than silently ignored — otherwise the result would claim 'all
+            present' while such media is genuinely absent. Returns zero/empty if
+            messages.json is absent or unreadable.
         """
-        result: dict[str, Any] = {"checked": 0, "missing": []}
+        result: dict[str, Any] = {"checked": 0, "missing": [], "unresolved": []}
         messages_file = member_dir / "messages.json"
         if not messages_file.exists():
             return result
@@ -454,9 +466,30 @@ class SyncManager:
             return result
 
         for msg in data.get("messages", []):
-            media_file = msg.get("media_file")
             mtype = msg.get("type")
-            if not media_file or mtype not in ("picture", "video", "voice"):
+            if mtype not in ("picture", "video", "voice"):
+                continue
+            media_file = msg.get("media_file")
+            if not media_file:
+                # A withdrawn post (state in _MEDIA_STRIPPING_STATES, e.g.
+                # "canceled" — the member withdrew it, which strips its media)
+                # legitimately has no media and is NOT a completeness gap. The state
+                # is recorded on disk; skip it silently. Any OTHER non-published
+                # state falls through and is surfaced below, so an unexpected or
+                # transient state can't silently hide a real gap.
+                state = msg.get("state")
+                if state in _MEDIA_STRIPPING_STATES:
+                    continue
+                # Otherwise: a published media-type message with no recorded media
+                # path — genuinely unaccounted. Surface it so completeness is never
+                # overclaimed.
+                result["unresolved"].append(
+                    {
+                        "message_id": msg.get("id"),
+                        "media_type": mtype,
+                        "timestamp": msg.get("timestamp") or msg.get("published_at"),
+                    }
+                )
                 continue
             result["checked"] += 1
             path = self.output_dir / media_file
