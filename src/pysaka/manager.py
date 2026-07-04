@@ -433,12 +433,16 @@ class SyncManager:
         Expected paths are resolved as ``self.output_dir / msg["media_file"]``.
 
         Returns:
-            ``{"checked": int, "missing": list[dict]}`` where each missing
-            descriptor is ``{"message_id", "media_type", "path": Path,
-            "timestamp"}``. Returns zero/empty if messages.json is absent or
-            unreadable.
+            ``{"checked": int, "missing": list[dict], "unresolved": int}`` where
+            each missing descriptor is ``{"message_id", "media_type", "path": Path,
+            "timestamp"}``. ``unresolved`` counts media-type messages that have no
+            recorded ``media_file`` (the media URL was absent at sync time, e.g. an
+            expired-media stub): they cannot be located or verified on disk, so
+            they are reported separately rather than silently ignored — otherwise
+            the result would claim 'all present' while such media is genuinely
+            absent. Returns zero/empty if messages.json is absent or unreadable.
         """
-        result: dict[str, Any] = {"checked": 0, "missing": []}
+        result: dict[str, Any] = {"checked": 0, "missing": [], "unresolved": 0}
         messages_file = member_dir / "messages.json"
         if not messages_file.exists():
             return result
@@ -454,9 +458,14 @@ class SyncManager:
             return result
 
         for msg in data.get("messages", []):
-            media_file = msg.get("media_file")
             mtype = msg.get("type")
-            if not media_file or mtype not in ("picture", "video", "voice"):
+            if mtype not in ("picture", "video", "voice"):
+                continue
+            media_file = msg.get("media_file")
+            if not media_file:
+                # Media-type message with no recorded media path: not locatable or
+                # verifiable on disk. Surface it so completeness is never overclaimed.
+                result["unresolved"] += 1
                 continue
             result["checked"] += 1
             path = self.output_dir / media_file

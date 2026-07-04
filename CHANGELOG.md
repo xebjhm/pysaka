@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now isolated under its own service (`pysaka:<group>`), and existing credentials
   are transparently migrated on first read so upgrades keep sessions and keys.
 
+### Changed
+- `SyncManager.scan_member_media` now also reports `unresolved`: media-type
+  messages (picture/video/voice) that have no recorded media file because the
+  media URL was absent at sync time (e.g. expired-media stubs). These were
+  previously skipped entirely, which could let a completeness check report "all
+  media present" while such media was genuinely missing and unrecoverable.
+
 ## [0.4.1] - 2026-07-03
 
 ### Fixed
