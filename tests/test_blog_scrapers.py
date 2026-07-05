@@ -519,3 +519,104 @@ class TestBlogScraperEdgeCases:
         # Should only have 1 blog even though there were 2 with same ID
         assert len(blogs) == 1
         assert blogs[0].id == "12345"
+
+    @pytest.mark.asyncio
+    async def test_get_blogs_skips_gone_blog_hinatazaka(self):
+        """PY-I8: a deleted Hinatazaka blog (BlogGoneError) must not abort the generator."""
+        mock_session = MagicMock()
+        scraper = HinatazakaBlogScraper(mock_session)
+
+        list_html = """
+        <html><body>
+            <article class="p-blog-article">
+                <a href="/s/official/diary/detail/111">
+                    <div class="c-blog-article__title">Gone Blog</div>
+                    <div class="c-blog-article__date">2026.1.15 12:00</div>
+                </a>
+            </article>
+            <article class="p-blog-article">
+                <a href="/s/official/diary/detail/222">
+                    <div class="c-blog-article__title">Older Blog</div>
+                    <div class="c-blog-article__date">2026.1.10 12:00</div>
+                </a>
+            </article>
+        </body></html>
+        """
+        detail_html = """
+        <html><body>
+            <div class="c-blog-article__title">Older Blog</div>
+            <div class="c-blog-article__date"><time>2026.1.10 12:00</time></div>
+            <div class="c-blog-article__name">
+                <a href="/s/official/diary/member/list?ct=40">松田好花</a>
+            </div>
+            <div class="c-blog-article__text"><p>Content.</p></div>
+        </body></html>
+        """
+        empty_html = "<html><body></body></html>"
+
+        # 1) list page, 2) detail 111 -> 410 (gone), 3) detail 222 -> 200,
+        # 4) next list page -> empty (terminates)
+        mock_session.get.side_effect = [
+            MockResponse(text=list_html, status=200),
+            MockResponse(text="", status=410, url="https://www.hinatazaka46.com/s/official/diary/detail/111"),
+            MockResponse(text=detail_html, status=200, url="https://www.hinatazaka46.com/s/official/diary/detail/222"),
+            MockResponse(text=empty_html, status=200),
+        ]
+
+        blogs = []
+        async for blog in scraper.get_blogs("40"):
+            blogs.append(blog)
+
+        # The gone blog (111) is skipped; the older blog (222) is still yielded.
+        assert len(blogs) == 1
+        assert blogs[0].id == "222"
+
+    @pytest.mark.asyncio
+    async def test_get_blogs_skips_gone_blog_sakurazaka(self):
+        """PY-I8: a deleted Sakurazaka blog (BlogGoneError) must not abort the generator."""
+        mock_session = MagicMock()
+        scraper = SakurazakaBlogScraper(mock_session)
+
+        list_html = """
+        <html><body>
+            <ul>
+                <li class="box">
+                    <a href="/s/s46/diary/detail/111">
+                        <div class="date">2026/01/15 12:00</div>
+                    </a>
+                </li>
+                <li class="box">
+                    <a href="/s/s46/diary/detail/222">
+                        <div class="date">2026/01/10 12:00</div>
+                    </a>
+                </li>
+            </ul>
+        </body></html>
+        """
+        detail_html = """
+        <html><head>
+            <meta property="og:title" content="Older Blog | 櫻坂46 山崎天 公式ブログ"/>
+        </head><body>
+            <div class="blog-foot"><div class="date">2026/01/10 12:00</div></div>
+            <div class="name">山崎天</div>
+            <div class="box-article"><p>Content.</p></div>
+        </body></html>
+        """
+        empty_html = "<html><body></body></html>"
+
+        # 1) list page, 2) detail 111 -> 410 (gone), 3) detail 222 -> 200,
+        # 4) next list page -> empty (terminates via found_new=False)
+        mock_session.get.side_effect = [
+            MockResponse(text=list_html, status=200),
+            MockResponse(text="", status=410, url="https://sakurazaka46.com/s/s46/diary/detail/111"),
+            MockResponse(text=detail_html, status=200, url="https://sakurazaka46.com/s/s46/diary/detail/222"),
+            MockResponse(text=empty_html, status=200),
+        ]
+
+        blogs = []
+        async for blog in scraper.get_blogs("1"):
+            blogs.append(blog)
+
+        # The gone blog (111) is skipped; the older blog (222) is still yielded.
+        assert len(blogs) == 1
+        assert blogs[0].id == "222"
