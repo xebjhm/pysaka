@@ -12,6 +12,7 @@ import aiohttp
 import structlog
 
 from .client import Client
+from .exceptions import RefreshFailedError, SessionExpiredError
 from .media import get_audio_metadata, get_media_dimensions
 from .utils import get_media_extension, media_file_is_present, normalize_message, sanitize_name
 
@@ -200,61 +201,65 @@ class SyncManager:
         last_ts = self.get_last_ts(gid, mid)
         logger.info("Syncing member", member=mname, member_id=mid, last_ts=last_ts)
 
-        try:
+        state_key = f"{gid}_{mid}"
+        existing_file = member_dir / "messages.json"
+
+        async def fetch_for_member(since_ts: Optional[str]) -> list[dict[str, Any]]:
+            """Fetch this member's messages, filtered by the ``since_ts`` cursor.
+
+            Passing ``since_ts=None`` yields the member's FULL history (used by the
+            corruption/count-mismatch recovery path below). Works for both the
+            prefetched branch (re-filters the shared timeline with no lower bound)
+            and the API branch (calls the client with ``since_ts=None``).
+            """
             if prefetched_messages is not None:
                 # Pre-fetched: filter by member_id AND this member's timestamp cursor
-                messages = [
+                filtered = [
                     x
                     for x in prefetched_messages
-                    if x.get("member_id") == mid and (last_ts is None or (x.get("published_at") or "") >= last_ts)
+                    if x.get("member_id") == mid and (since_ts is None or (x.get("published_at") or "") >= since_ts)
                 ]
-                logger.info("Filtered prefetched messages for member", count=len(messages), member=mname)
-            else:
-                messages = await self.client.get_messages(
-                    session, gid, since_ts=last_ts, progress_callback=progress_callback
-                )
-                logger.info("Fetched messages", count=len(messages), group_id=gid)
+                logger.info("Filtered prefetched messages for member", count=len(filtered), member=mname)
+                return filtered
 
-                # Filter for member
-                messages = [x for x in messages if x.get("member_id") == mid]
-                logger.info("Filtered messages for member", count=len(messages), member=mname)
-
-            if not messages:
-                return 0
-
-            # Process & Prepare
-            processed, earliest_failed_ts, earliest_pending_media_ts = self.prepare_messages(
-                messages, member_dir, media_queue
+            fetched = await self.client.get_messages(
+                session, gid, since_ts=since_ts, progress_callback=progress_callback
             )
+            logger.info("Fetched messages", count=len(fetched), group_id=gid)
 
-            # Load existing
-            existing_file = member_dir / "messages.json"
+            # Filter for member
+            fetched = [x for x in fetched if x.get("member_id") == mid]
+            logger.info("Filtered messages for member", count=len(fetched), member=mname)
+            return fetched
+
+        try:
+            messages = await fetch_for_member(last_ts)
+
+            # Load existing (may be corrupt / truncated — see recovery below)
             existing_msgs: list[dict[str, Any]] = []
+            corrupt = False
             if existing_file.exists():
                 try:
                     async with aiofiles.open(existing_file, encoding="utf-8") as f:
                         data = json.loads(await f.read())
                         existing_msgs = data.get("messages", [])
                 except Exception:
-                    # Corrupt file (e.g. force-close during write).
-                    # Reset this member's last_id so the next sync
-                    # re-fetches from the beginning to recover.
+                    # Corrupt file (e.g. force-close during write). The existing
+                    # history is unreadable, so a full re-fetch is required.
                     logger.warning(
                         "corrupt_messages_file",
                         member=mname,
                         member_id=mid,
                         group_id=gid,
                     )
-                    self.sync_state.pop(f"{gid}_{mid}", None)
-                    self.save_sync_state()
+                    corrupt = True
 
             # Integrity check: if the file has fewer messages than sync_state
             # recorded, data was lost (e.g. past force-close overwrote the
-            # file with only new messages).  Reset last_id so the next sync
-            # does a full re-fetch to recover.
-            state_key = f"{gid}_{mid}"
+            # file with only new messages).
             expected = (self.sync_state.get(state_key) or {}).get("total_messages", 0)
-            if expected > 0 and len(existing_msgs) < expected:
+            mismatch = expected > 0 and len(existing_msgs) < expected
+            if mismatch:
                 logger.warning(
                     "message_count_mismatch",
                     member=mname,
@@ -263,8 +268,31 @@ class SyncManager:
                     expected=expected,
                     actual=len(existing_msgs),
                 )
-                self.sync_state.pop(state_key, None)
-                self.save_sync_state()
+
+            # Recovery: on corruption or count mismatch, the incremental fetch
+            # above (bounded by last_ts) only returned NEW messages, which would
+            # overwrite the file with a truncated history. Re-fetch the FULL
+            # history (since_ts=None) and treat existing as empty so the merged
+            # result is complete rather than truncated.
+            recovering = corrupt or mismatch
+            if recovering:
+                logger.info(
+                    "recovering_full_history",
+                    member=mname,
+                    member_id=mid,
+                    group_id=gid,
+                )
+                existing_msgs = []
+                messages = await fetch_for_member(None)
+
+            # No new messages and nothing to recover: nothing to write.
+            if not messages and not recovering:
+                return 0
+
+            # Process & Prepare (on the recovered full set when recovering)
+            processed, earliest_failed_ts, earliest_pending_media_ts = self.prepare_messages(
+                messages, member_dir, media_queue
+            )
 
             # Dedupe (Upsert: Prefer new data)
             merged_dict = {x["id"]: x for x in existing_msgs}
@@ -332,6 +360,10 @@ class SyncManager:
 
             return len(processed)
 
+        except (SessionExpiredError, RefreshFailedError):
+            # Auth failure is not "no new messages" — propagate so the caller
+            # can prompt re-login instead of reporting a successful empty sync.
+            raise
         except Exception as e:
             logger.error("Error syncing member", member=mname, error=str(e), exc_info=True)
             return 0

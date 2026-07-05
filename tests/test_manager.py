@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from pysaka.client import Client, Group
+from pysaka.exceptions import RefreshFailedError, SessionExpiredError
 from pysaka.manager import SyncManager
 
 
@@ -205,6 +206,27 @@ async def test_sync_member_prefetched_respects_last_id(sync_manager):
     group = {"id": 1, "name": "Grp"}
     member = {"id": 10, "name": "Mem"}
     media_queue = []
+
+    # Pre-existing on-disk history matching the recorded count, so the
+    # integrity check does not treat this as data loss (PY-I3 recovery).
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True, exist_ok=True)
+    (member_dir / "messages.json").write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {
+                        "id": i,
+                        "type": "text",
+                        "content": f"old{i}",
+                        "timestamp": f"2023-01-01T0{i}:00:00Z",
+                    }
+                    for i in range(1, 6)
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
 
     # Set last_ts cursor — messages with published_at < last_ts should be skipped
     sync_manager.update_sync_state(1, 10, 300, 5, last_ts="2023-01-01T03:00:00Z")
@@ -509,3 +531,121 @@ async def test_reconcile_no_timeline_match_is_still_missing(sync_manager):
     ]
     report = await sync_manager.reconcile_member_media(AsyncMock(), member_dir, missing, timeline_messages=[])
     assert report == {"repaired": 0, "failed": 0, "still_missing": 1}
+
+
+@pytest.mark.asyncio
+async def test_sync_member_recovers_full_history_on_count_mismatch(sync_manager):
+    """PY-I3: a count mismatch forces a full re-fetch (since_ts=None) so the
+    complete history is recovered, not truncated to only the new messages."""
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp"}
+    member = {"id": 10, "name": "Mem"}
+    media_queue = []
+
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True, exist_ok=True)
+    json_path = member_dir / "messages.json"
+
+    # On-disk file is truncated: only 1 message, but state expects 3.
+    json_path.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"id": 3, "type": "text", "content": "C", "timestamp": "2023-01-03T00:00:00Z"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    sync_manager.update_sync_state(1, 10, 3, 3, last_ts="2023-01-03T00:00:00Z")
+
+    full_history = [
+        {"id": 1, "type": "text", "text": "A", "member_id": 10, "published_at": "2023-01-01T00:00:00Z"},
+        {"id": 2, "type": "text", "text": "B", "member_id": 10, "published_at": "2023-01-02T00:00:00Z"},
+        {"id": 3, "type": "text", "text": "C", "member_id": 10, "published_at": "2023-01-03T00:00:00Z"},
+    ]
+
+    async def fake_get_messages(sess, gid, since_ts=None, progress_callback=None):
+        # Incremental fetch (bounded by cursor) returns nothing new; the full
+        # re-fetch (since_ts=None) returns the entire history.
+        if since_ts is None:
+            return list(full_history)
+        return [m for m in full_history if m["published_at"] >= since_ts]
+
+    sync_manager.client.get_messages.side_effect = fake_get_messages
+
+    await sync_manager.sync_member(session, group, member, media_queue)
+
+    # File must contain the COMPLETE history, not just the truncated single msg.
+    with open(json_path, encoding="utf-8") as f:
+        data = json.load(f)
+    assert len(data["messages"]) == 3
+    assert {m["id"] for m in data["messages"]} == {1, 2, 3}
+    # A full re-fetch (since_ts=None) must have occurred.
+    assert any(
+        call.kwargs.get("since_ts") is None for call in sync_manager.client.get_messages.call_args_list
+    )
+    # Recovered state reflects the full count.
+    assert sync_manager.sync_state["1_10"]["total_messages"] == 3
+
+
+@pytest.mark.asyncio
+async def test_sync_member_recovers_on_corrupt_file(sync_manager):
+    """PY-I3: a corrupt messages.json forces a full re-fetch to recover."""
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp"}
+    member = {"id": 10, "name": "Mem"}
+    media_queue = []
+
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True, exist_ok=True)
+    json_path = member_dir / "messages.json"
+    json_path.write_text("{ this is not valid json", encoding="utf-8")
+
+    # Prior cursor so the incremental fetch would otherwise return nothing.
+    sync_manager.update_sync_state(1, 10, 2, 2, last_ts="2023-01-02T00:00:00Z")
+
+    full_history = [
+        {"id": 1, "type": "text", "text": "A", "member_id": 10, "published_at": "2023-01-01T00:00:00Z"},
+        {"id": 2, "type": "text", "text": "B", "member_id": 10, "published_at": "2023-01-02T00:00:00Z"},
+    ]
+
+    async def fake_get_messages(sess, gid, since_ts=None, progress_callback=None):
+        if since_ts is None:
+            return list(full_history)
+        return [m for m in full_history if m["published_at"] >= since_ts]
+
+    sync_manager.client.get_messages.side_effect = fake_get_messages
+
+    await sync_manager.sync_member(session, group, member, media_queue)
+
+    with open(json_path, encoding="utf-8") as f:
+        data = json.load(f)
+    assert {m["id"] for m in data["messages"]} == {1, 2}
+
+
+@pytest.mark.asyncio
+async def test_sync_member_reraises_session_expired(sync_manager):
+    """PY-I4: SessionExpiredError from get_messages must propagate, not be
+    swallowed into a '0 new messages' result."""
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp"}
+    member = {"id": 10, "name": "Mem"}
+
+    sync_manager.client.get_messages.side_effect = SessionExpiredError("expired")
+
+    with pytest.raises(SessionExpiredError):
+        await sync_manager.sync_member(session, group, member, [])
+
+
+@pytest.mark.asyncio
+async def test_sync_member_reraises_refresh_failed(sync_manager):
+    """PY-I4: RefreshFailedError from get_messages must propagate."""
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp"}
+    member = {"id": 10, "name": "Mem"}
+
+    sync_manager.client.get_messages.side_effect = RefreshFailedError("failed")
+
+    with pytest.raises(RefreshFailedError):
+        await sync_manager.sync_member(session, group, member, [])
