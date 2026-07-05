@@ -132,6 +132,10 @@ class Client:
         self.cookies = cookies
         self.auth_dir = Path(auth_dir) if auth_dir else None
 
+        # Single-flight guard for token refresh (PY-I5): concurrent 401s must not
+        # each POST /update_token with the same (soon-to-be-rotated) cookie.
+        self._refresh_lock = asyncio.Lock()
+
         # Platform profile: "web" (default) mimics the browser client;
         # "android" mimics the Flutter/Dart app (different UA, host, headers).
         if platform not in ("web", "android"):
@@ -276,10 +280,39 @@ class Client:
 
     async def refresh_access_token(self, session: aiohttp.ClientSession) -> bool:
         """
-        Attempt to refresh the access token using stored cookies.
+        Attempt to refresh the access token (refresh_token → cookies → headless).
+
+        Guarded by an ``asyncio.Lock`` so concurrent 401s do not race and rotate
+        the session cookie under each other (single-flight, PY-I5). After
+        acquiring the lock, re-checks whether another caller already refreshed
+        the token and returns early if so.
 
         Returns:
-            True if refresh was successful, False otherwise.
+            True if a refresh was performed (or another caller already refreshed
+            the token while this call waited on the lock); False otherwise.
+        """
+        # Snapshot the token before we contend for the lock. If it changes while
+        # we wait, another concurrent caller already refreshed → skip our attempt.
+        token_before_wait = self.access_token
+        async with self._refresh_lock:
+            if self.access_token != token_before_wait and self.access_token:
+                logger.debug("Token already refreshed by another caller; skipping redundant refresh.")
+                return True
+            # Also skip if the token became valid again (another caller refreshed
+            # to a token that isn't expiring within the danger window).
+            remaining = self.get_token_expiry_seconds()
+            if token_before_wait is not None and remaining is not None and remaining > 300:
+                logger.debug(
+                    "Token valid after acquiring refresh lock; skipping redundant refresh.",
+                    remaining_seconds=remaining,
+                )
+                return True
+            return await self._perform_refresh(session)
+
+    async def _perform_refresh(self, session: aiohttp.ClientSession) -> bool:
+        """Run the actual token refresh flow. Must be called with the refresh lock held.
+
+        See :meth:`refresh_access_token` for the return/raise contract.
         """
         has_refresh_token = bool(self.refresh_token)
         has_cookies = bool(self.cookies)
@@ -357,11 +390,13 @@ class Client:
                         new_token = data.get("access_token")
                         if new_token:
                             old_expiry = self.get_token_expiry_seconds()
-                            await self.update_token(new_token)
-                            new_expiry = self.get_token_expiry_seconds()
 
-                            # CRITICAL: Capture new session cookies from response
-                            # The server rotates the session cookie on each update_token call
+                            # CRITICAL (PY-C2): Capture the rotated session cookies
+                            # from the response BEFORE persisting. The server
+                            # rotates the session cookie on each update_token call;
+                            # persisting before capture would store the
+                            # already-consumed cookie, forcing a re-login on the
+                            # next restart.
                             cookies_updated = []
                             if resp.cookies:
                                 for key, cookie in resp.cookies.items():
@@ -372,6 +407,10 @@ class Client:
                                     updated_cookies=cookies_updated,
                                     new_cookie_count=len(self.cookies),
                                 )
+
+                            # Persist token + freshly-rotated cookies together.
+                            await self.update_token(new_token)
+                            new_expiry = self.get_token_expiry_seconds()
 
                             logger.info(
                                 "Token refreshed successfully via session cookies",
