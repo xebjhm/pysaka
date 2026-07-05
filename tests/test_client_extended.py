@@ -274,6 +274,79 @@ class TestClientRefreshToken:
             assert result is True
             assert client.access_token == "headless_token"
 
+    @pytest.mark.asyncio
+    async def test_refresh_persists_rotated_cookie_py_c2(self, client, mock_session):
+        """PY-C2: the rotated session cookie must be persisted, not the one that
+        was just consumed by /update_token."""
+        client.cookies = {"session": "old_cookie"}
+        client.refresh_token = None
+
+        persisted = {}
+        tm = MagicMock()
+        tm.save_session = MagicMock(
+            side_effect=lambda group, at, rt, cookies: persisted.update(
+                {"session": dict(cookies).get("session")}
+            )
+        )
+        client.token_manager = tm
+
+        mock_resp = mock_session.post.return_value.__aenter__.return_value
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"access_token": "new_token"})
+        mock_cookie = MagicMock()
+        mock_cookie.value = "new_cookie"
+        mock_resp.cookies = {"session": mock_cookie}
+
+        result = await client.refresh_access_token(mock_session)
+
+        assert result is True
+        # The cookie value handed to save_session must be the ROTATED one.
+        assert persisted["session"] == "new_cookie"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_refresh_single_flight_py_i5(self, client):
+        """PY-I5: concurrent 401s must POST /update_token only once — the second
+        caller sees the token already refreshed and skips."""
+        import asyncio
+
+        client.cookies = {"session": "old_cookie"}
+        client.refresh_token = None
+        client.token_manager = None  # avoid keyring writes
+
+        post_count = 0
+
+        def _make_post(*args, **kwargs):
+            nonlocal post_count
+            post_count += 1
+            resp = MagicMock()
+            resp.status = 200
+            resp.json = AsyncMock(return_value={"access_token": "new_token"})
+            cookie = MagicMock()
+            cookie.value = "new_cookie"
+            resp.cookies = {"session": cookie}
+
+            async def _slow_aenter(*a, **k):
+                # A real suspension point so the second coroutine gets scheduled
+                # and blocks on the refresh lock while the first is mid-POST.
+                await asyncio.sleep(0)
+                return resp
+
+            cm = MagicMock()
+            cm.__aenter__ = AsyncMock(side_effect=_slow_aenter)
+            cm.__aexit__ = AsyncMock(return_value=False)
+            return cm
+
+        session = MagicMock()
+        session.post = MagicMock(side_effect=_make_post)
+
+        results = await asyncio.gather(
+            client.refresh_access_token(session),
+            client.refresh_access_token(session),
+        )
+
+        assert all(results)
+        assert post_count == 1
+
 
 class TestClientDownloadFile:
     """Tests for Client.download_file method."""
