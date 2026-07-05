@@ -405,6 +405,14 @@ class HinatazakaBlogScraper(BaseBlogScraper):
 
                         # Polite delay between requests
                         await asyncio.sleep(DETAIL_DELAY)
+                    except BlogGoneError as e:
+                        # Blog was deleted between list and detail fetch.
+                        # Skip it and continue yielding remaining older blogs.
+                        logger.info(
+                            "blog_detail_gone",
+                            blog_id=blog_id,
+                            error=str(e),
+                        )
                     except ValueError as e:
                         logger.warning(
                             "blog_detail_fetch_failed",
