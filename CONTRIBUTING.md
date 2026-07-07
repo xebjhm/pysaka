@@ -184,23 +184,41 @@ Integration tests require stored credentials. They test real browser refresh and
 
 **Prerequisites**:
 
-1. Use `BrowserAuth` to log in and store credentials:
+1. Log in and store credentials. The simplest way is the bundled login script,
+   which persists the browser profile under `auth_data/<group>` (needed by the
+   skip gate below) and stores keyring credentials:
+   ```bash
+   uv run python scripts/login.py --group hinatazaka46
+   ```
+
+   Equivalent inline flow — note the `user_data_dir`, which is what actually
+   populates `auth_data` (without it the tests still skip):
    ```python
    import asyncio
-   from pysaka import BrowserAuth, Group
+   from pysaka import BrowserAuth, Group, get_auth_dir
    from pysaka.credentials import get_token_manager
 
    async def login():
-       creds = await BrowserAuth.login(Group.HINATAZAKA46)
+       user_data_dir = str(get_auth_dir() / "hinatazaka46")
+       creds = await BrowserAuth.login(Group.HINATAZAKA46, user_data_dir=user_data_dir)
        tm = get_token_manager()
-       tm.save_session("hinatazaka46", creds["access_token"], cookies=creds.get("cookies"))
+       tm.save_session("hinatazaka46", creds["access_token"],
+                       creds.get("refresh_token"), creds.get("cookies"))
 
    asyncio.run(login())
    ```
 
 2. A browser window will open -- complete the login process
 
-3. Credentials are stored in your system keyring
+3. Credentials are stored in your system keyring, and the persistent browser
+   profile is written under `get_auth_dir()/<group>`. The integration suite is
+   gated on that `auth_data` directory being non-empty:
+   ```python
+   pytest.mark.skipif(
+       not get_auth_dir().exists() or not any(get_auth_dir().iterdir()),
+       reason="No auth_data present. Login first with scripts/login.py.",
+   )
+   ```
 
 **Run integration tests**:
 ```bash

@@ -17,6 +17,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bundled-Chromium behaviour with `auto_install` as the fallback, so headless
   server usage is unchanged.
 
+### Changed
+- **Breaking:** `TokenManager`, `get_token_manager`, and `KeyringStore` now raise
+  `NoSecureKeyringError` on hosts with no secure keyring backend (headless / CI /
+  container, or a locked Secret Service) instead of silently writing an
+  obfuscated plaintext file. **Migration:** opt in with
+  `allow_plaintext_fallback=True` or set `PYSAKA_ALLOW_PLAINTEXT_KEYRING=1` (and
+  install the `pysaka[headless]` extra) to keep the previous fallback behaviour,
+  or handle the exception and prompt for secure storage.
+- `SyncManager.scan_member_media` now returns an `error` field
+  (`None` / `"manifest_missing"` / `"manifest_unreadable"` / `"manifest_invalid"`)
+  so callers can distinguish an unsynced or corrupt member manifest from a
+  fully-present one. Previously an unreadable/missing manifest collapsed into a
+  clean-looking empty result that read as "all media present".
+
+### Fixed
+- **Data loss:** `SyncManager` no longer truncates a member's message history
+  during recovery. A readable-but-short or corrupt `messages.json` is now rebuilt
+  from the member's TRUE full history (fetched from the API, bypassing the
+  incremental `prefetched_messages` window) and merged add-only, instead of being
+  overwritten with just the incremental window.
+- **Data loss:** locally-derived media metadata (`width`, `height`,
+  `media_duration`, `is_muted`, and the `media_file` pointer) is now preserved
+  across re-syncs. These fields — which the message API never returns — were
+  dropped on every re-sync's whole-object upsert; `media_file` in particular is
+  now inherited so a withdrawn post (state `canceled`, URL stripped) keeps its
+  already-downloaded media reachable instead of orphaning the file.
+- `Client.refresh_access_token` is now single-flight: concurrent 401s no longer
+  each `POST /update_token` with the same soon-to-be-rotated cookie, and the
+  rotated cookie is persisted before the next request uses it.
+- `get_messages` also fails closed on a continuation gap detected *before* the
+  cursor is reached (in addition to the incomplete-pagination guard), so a
+  partial timeline can no longer advance the caller's cursor past unfetched
+  messages.
+- A failed legacy-credential migration is now surfaced (raises) instead of
+  returning the credential as if migrated, and corrupt/undecodable stored data
+  logs a greppable `saka.cred.load_failed` id distinct from the never-stored case.
+- Blog sync skips an individual deleted blog post (`BlogGoneError`) instead of
+  aborting the whole member's backfill.
+
 ## [0.4.2] - 2026-07-04
 
 ### Fixed
@@ -194,7 +233,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Secure credential storage via system keyring
 - Token refresh without storing plaintext credentials
 
-[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/xebjhm/pysaka/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/xebjhm/pysaka/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/xebjhm/pysaka/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/xebjhm/pysaka/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/xebjhm/pysaka/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/xebjhm/pysaka/compare/v0.1.0...v0.1.1

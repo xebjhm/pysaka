@@ -9,8 +9,13 @@ pysaka.configure_logging()
 
 
 async def main():
-    # 1. Login (or provide tokens manually)
-    creds = await BrowserAuth.login(Group.HINATAZAKA46, headless=True)
+    # 1. Login (or provide tokens manually).
+    # Interactive OAuth login needs a visible window for the user to sign in, so
+    # keep headless=False. A fresh cookie-less headless context has nobody to
+    # enter credentials and times out (PY-AUX-03). Headless refresh of an already
+    # authenticated session is a separate path: BrowserAuth.refresh_token_headless
+    # with a persistent user_data_dir.
+    creds = await BrowserAuth.login(Group.HINATAZAKA46, headless=False)
     if not creds:
         print("Login failed")
         return

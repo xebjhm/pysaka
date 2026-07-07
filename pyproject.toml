@@ -22,6 +22,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Internet :: WWW/HTTP",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
@@ -53,6 +54,7 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.1.0",
+    "pytest-timeout>=2.3.0",
     "ruff>=0.3.0",
     "mypy>=1.9.0",
     "types-aiofiles>=23.1.0",
@@ -94,6 +96,15 @@ addopts = "-ra -q --cov=pysaka --cov-report=term-missing -m 'not integration'"
 testpaths = [
     "tests",
 ]
+# Backstop against hung race-pattern async tests (PY-TEST-05): a login-handler
+# race that never fires would otherwise wait out login()'s internal 45-300s
+# asyncio.wait_for. Cap any single test so a hang fails fast instead of freezing
+# an autonomous iteration loop. Override per-test with @pytest.mark.timeout(...).
+timeout = 30
+# On Windows the default "signal" method is a no-op, so a hung test still blocks
+# forever; the "thread" method actually interrupts it. Without this the timeout
+# cap above does nothing on the maintainer's platform (PY-TEST-05/06).
+timeout_method = "thread"
 asyncio_mode = "auto"
 pythonpath = ["src"]
 markers = [
