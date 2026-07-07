@@ -4,9 +4,20 @@ from pathlib import Path
 from typing import Any, Optional, TypedDict, Union
 
 import structlog
-from playwright.async_api import async_playwright
 
-from .client import GROUP_CONFIG, Group
+# PY-CORE-04: Pin Playwright's browser location to the package-local dir BEFORE
+# the Playwright driver is ever spawned. The Node driver snapshots its
+# environment at `async_playwright()` start time; setting this only later (inside
+# _install_bundled_chromium, after the driver launched) downloaded Chromium where
+# the already-running driver never looked, so the retry launch failed and the
+# ~130 MB download repeated on every refresh. Set at import so every
+# async_playwright() context in this module — and the bundled-Chromium install
+# subprocess — resolve to the same location. Respect a caller's explicit override.
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+
+from playwright.async_api import async_playwright  # noqa: E402  (must follow the env pin above)
+
+from .client import GROUP_CONFIG, Group  # noqa: E402
 
 logger = structlog.get_logger()
 
@@ -416,8 +427,9 @@ class BrowserAuth:
         command ran to completion.
         """
         logger.info("Downloading headless browser for auto-refresh (one-time setup)...")
-        # Store browsers inside the Playwright package dir (frozen-bundle friendly).
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+        # PY-CORE-04: PLAYWRIGHT_BROWSERS_PATH is pinned at import time (module
+        # top) so the download lands where the already-running driver looks — we
+        # must NOT set it here, after async_playwright() has spawned the driver.
         try:
             import sys
 

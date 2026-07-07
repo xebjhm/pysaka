@@ -365,3 +365,32 @@ class TestBrowserAuthRefreshHeadless:
             assert result is not None
             assert result["access_token"] == "tok"
             assert mock_p.chromium.launch_persistent_context.call_args.kwargs.get("channel") == "chrome"
+
+
+class TestPlaywrightBrowsersPathPin:
+    """PY-CORE-04: PLAYWRIGHT_BROWSERS_PATH must be pinned BEFORE the driver spawns."""
+
+    def test_env_pinned_at_import_time(self):
+        """Importing pysaka.auth pins the browser path (so async_playwright()'s
+        driver snapshots it), rather than setting it after the driver started."""
+        import os
+
+        # pysaka.auth is imported at module top; the pin runs on import.
+        assert os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0"
+
+    @pytest.mark.asyncio
+    async def test_install_does_not_mutate_browsers_path(self, monkeypatch):
+        """_install_bundled_chromium must NOT set PLAYWRIGHT_BROWSERS_PATH itself
+        (doing so after async_playwright() already spawned the driver put the
+        download where the running driver never looked). The value must be
+        whatever was pinned at import — untouched by the install call."""
+        import os
+
+        # Pretend the caller had pinned an explicit location.
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "/custom/path")
+
+        with patch("playwright.__main__.main"):
+            await BrowserAuth._install_bundled_chromium()
+
+        # Unchanged by the install routine.
+        assert os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "/custom/path"

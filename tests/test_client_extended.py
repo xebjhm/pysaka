@@ -178,7 +178,10 @@ class TestClientFetchJson:
 
     @pytest.mark.asyncio
     async def test_fetch_json_401_no_credentials(self, client, mock_session):
-        """Test fetch_json handles 401 without credentials for refresh."""
+        """PY-CORE-06: a 401 with no refresh credentials surfaces RefreshFailedError
+        (re-raised by fetch_json) instead of silently returning None/empty data."""
+        from pysaka.exceptions import RefreshFailedError
+
         mock_resp = mock_session.get.return_value.__aenter__.return_value
         mock_resp.status = 401
 
@@ -187,8 +190,8 @@ class TestClientFetchJson:
         client.cookies = None
         client.auth_dir = None
 
-        result = await client.fetch_json(mock_session, "/test")
-        assert result is None
+        with pytest.raises(RefreshFailedError):
+            await client.fetch_json(mock_session, "/test")
 
     @pytest.mark.asyncio
     async def test_fetch_json_unexpected_status(self, client, mock_session):
@@ -346,6 +349,26 @@ class TestClientRefreshToken:
 
         assert all(results)
         assert post_count == 1
+
+
+class TestRefreshLockLazyInit:
+    """PY-CORE-05: the refresh lock is created lazily on the running loop."""
+
+    def test_lock_not_created_in_init(self):
+        """Constructing a Client must NOT build an asyncio.Lock (which on 3.9
+        binds the current event loop at construction and breaks setup-time
+        Client(...) + asyncio.run(...) usage)."""
+        client = Client(group=Group.NOGIZAKA46, access_token="test")
+        assert client._refresh_lock is None
+
+    @pytest.mark.asyncio
+    async def test_lock_created_on_first_use(self):
+        """The lock is created (once) inside a running coroutine and reused."""
+        client = Client(group=Group.NOGIZAKA46, access_token="test")
+        lock1 = client._get_refresh_lock()
+        lock2 = client._get_refresh_lock()
+        assert lock1 is client._refresh_lock
+        assert lock1 is lock2
 
 
 class TestClientDownloadFile:
@@ -506,3 +529,85 @@ class TestClientGetNews:
 
         call_kwargs = mock_session.get.call_args[1]
         assert call_kwargs["params"]["count"] == 50
+
+
+class TestFetchJsonTimeout:
+    """PY-CORE-02: request timeouts must surface as ApiError, not silent None."""
+
+    @pytest.fixture
+    def client(self):
+        return Client(group=Group.NOGIZAKA46, access_token="test")
+
+    @pytest.fixture
+    def mock_session(self):
+        session = MagicMock()
+        session.get.return_value.__aenter__.return_value = AsyncMock()
+        session.get.return_value.__aexit__.return_value = None
+        return session
+
+    @pytest.mark.asyncio
+    async def test_total_timeout_raises_apierror(self, client, mock_session):
+        """aiohttp's total timeout raises asyncio.TimeoutError (NOT a ClientError);
+        fetch_json must translate it to ApiError instead of swallowing to None."""
+        import asyncio
+
+        from pysaka import ApiError
+
+        mock_session.get.return_value.__aenter__.side_effect = asyncio.TimeoutError()
+
+        with pytest.raises(ApiError):
+            await client.fetch_json(mock_session, "/test")
+
+
+class TestDownloadMessageMediaSanitizesId:
+    """PY-SEC-01: server-controlled message['id'] must not build a traversal path."""
+
+    @pytest.fixture
+    def client(self):
+        return Client(group=Group.NOGIZAKA46, access_token="test")
+
+    @pytest.fixture
+    def mock_session(self):
+        session = MagicMock()
+        session.get.return_value.__aenter__.return_value = AsyncMock()
+        session.get.return_value.__aexit__.return_value = None
+        return session
+
+    @pytest.mark.asyncio
+    async def test_traversal_id_is_rejected(self, client, mock_session, tmp_path):
+        """A malicious non-integer id (path traversal) is rejected — no write
+        escapes output_dir and download_file is never invoked for it."""
+        msg = {
+            "id": "../../../../evil",
+            "type": "picture",
+            "file": "https://cdn.example.com/x.jpg",
+        }
+
+        with patch.object(client, "download_file", new=AsyncMock(return_value=True)) as mock_dl:
+            result = await client.download_message_media(mock_session, msg, tmp_path)
+
+        assert result is None
+        mock_dl.assert_not_called()
+        # Nothing was written outside the intended directory.
+        assert not (tmp_path.parent / "evil.jpg").exists()
+
+    @pytest.mark.asyncio
+    async def test_integer_id_still_works(self, client, mock_session, tmp_path):
+        """A well-formed integer id downloads to <output>/<type>/<id>.<ext>."""
+        msg = {"id": 12345, "type": "picture", "file": "https://cdn.example.com/x.jpg"}
+
+        with patch.object(client, "download_file", new=AsyncMock(return_value=True)) as mock_dl:
+            result = await client.download_message_media(mock_session, msg, tmp_path)
+
+        assert result == tmp_path / "picture" / "12345.jpg"
+        mock_dl.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_numeric_string_id_is_coerced(self, client, mock_session, tmp_path):
+        """A numeric string id is coerced to int and used safely."""
+        msg = {"id": "678", "type": "picture", "file": "https://cdn.example.com/x.jpg"}
+
+        with patch.object(client, "download_file", new=AsyncMock(return_value=True)):
+            result = await client.download_message_media(mock_session, msg, tmp_path)
+
+        assert result == tmp_path / "picture" / "678.jpg"

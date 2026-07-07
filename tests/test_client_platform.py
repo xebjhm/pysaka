@@ -4,6 +4,7 @@ import pytest
 
 from pysaka import Client, Group
 from pysaka.client import GROUP_CONFIG
+from pysaka.exceptions import RefreshFailedError
 
 
 def test_group_config_has_verified_mobile_hosts():
@@ -104,9 +105,11 @@ async def test_get_news_web_sends_platform_web(_mock_session):
 async def test_android_skips_cookie_refresh_for_purity():
     """Absolute fingerprint purity: android mode must never POST web session cookies
     on token refresh — a real Flutter client only uses the refresh_token grant. With no
-    refresh_token and android platform, refresh is a no-op (cookie fallback is web-only)."""
+    refresh_token and android platform, cookies are unusable (web-only), so there is no
+    usable refresh credential: this now surfaces RefreshFailedError (PY-CORE-06) rather
+    than silently returning False. The purity guarantee is that no cookie POST is made."""
     c = Client(group=Group.NOGIZAKA46, platform="android", cookies={"session": "x"})
     session = MagicMock()
-    result = await c.refresh_access_token(session)
-    assert result is False
+    with pytest.raises(RefreshFailedError):
+        await c.refresh_access_token(session)
     session.post.assert_not_called()

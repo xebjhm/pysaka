@@ -58,9 +58,11 @@ async def test_refresh_token(client, mock_session):
 
 @pytest.mark.asyncio
 async def test_refresh_missing_token(client, mock_session):
+    # PY-CORE-06: no refresh_token/cookies/auth_dir → raise an auth error rather
+    # than silently returning False (which would surface as empty data upstream).
     client.refresh_token = None
-    success = await client.refresh_access_token(mock_session)
-    assert success is False
+    with pytest.raises(RefreshFailedError):
+        await client.refresh_access_token(mock_session)
     mock_session.post.assert_not_called()
 
 
