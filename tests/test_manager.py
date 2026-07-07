@@ -762,6 +762,32 @@ async def test_sync_member_first_sync_uses_prefetched_not_api(sync_manager):
     assert {m["id"] for m in data["messages"]} == {1}  # only member 10's message
 
 
+def test_merge_preserves_media_file_when_url_stripped():
+    """PY-MGR-02: a withdrawn post strips media_url, so the fresh record omits
+    media_file; the merge must keep the pointer to the already-downloaded file
+    (else the archived media is orphaned and unrecoverable — the URL is gone)."""
+    existing = [
+        {"id": 1, "type": "video", "media_file": "video/1.mp4", "is_muted": True, "width": 720}
+    ]
+    # Fresh re-sync of the now-withdrawn post: no media_file / is_muted / width.
+    processed = [{"id": 1, "type": "video", "content": "withdrawn"}]
+    merged = SyncManager._merge_messages(existing, processed)
+    m = {x["id"]: x for x in merged}[1]
+    assert m["media_file"] == "video/1.mp4"
+    assert m["is_muted"] is True
+    assert m["width"] == 720
+    assert m["content"] == "withdrawn"  # fresh data still wins for non-derived fields
+
+
+def test_merge_fresh_media_file_wins():
+    """A re-derived media_file (media replaced on the server) overrides the
+    stored pointer — inheritance only fills a field the fresh record omits."""
+    existing = [{"id": 1, "type": "video", "media_file": "video/old.mp4"}]
+    processed = [{"id": 1, "type": "video", "media_file": "video/new.mp4"}]
+    merged = SyncManager._merge_messages(existing, processed)
+    assert {x["id"]: x for x in merged}[1]["media_file"] == "video/new.mp4"
+
+
 @pytest.mark.asyncio
 async def test_sync_member_reraises_session_expired(sync_manager):
     """PY-I4: SessionExpiredError from get_messages must propagate, not be

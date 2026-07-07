@@ -477,7 +477,14 @@ class SyncManager:
     # on-disk files, but is_muted/media_duration are computed only once (at
     # download, in process_media_queue), so carrying them forward here is what
     # keeps them alive across re-syncs.
-    _LOCAL_DERIVED_FIELDS = ("width", "height", "media_duration", "is_muted")
+    #
+    # media_file is the pointer to the already-downloaded file. It is only set in
+    # prepare_messages when the API still returns a media URL, so when a member
+    # withdraws a post (state -> canceled, URL stripped) the fresh record omits it.
+    # Inheriting it keeps the archived media reachable; dropping it would orphan a
+    # file that can no longer be re-downloaded (PY-MGR-02). A genuine media change
+    # sets a fresh media_file, which wins (inheritance only fills an omitted field).
+    _LOCAL_DERIVED_FIELDS = ("width", "height", "media_duration", "is_muted", "media_file")
 
     @staticmethod
     def _merge_messages(
