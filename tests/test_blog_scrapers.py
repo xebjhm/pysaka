@@ -2,16 +2,18 @@
 
 from datetime import datetime
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
+from structlog.testing import capture_logs
 
 from pysaka.blog import (
     HinatazakaBlogScraper,
     NogizakaBlogScraper,
     SakurazakaBlogScraper,
 )
+from pysaka.blog.config import parse_jst_datetime
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -620,3 +622,319 @@ class TestBlogScraperEdgeCases:
         # The gone blog (111) is skipped; the older blog (222) is still yielded.
         assert len(blogs) == 1
         assert blogs[0].id == "222"
+
+
+class TestParseJstDatetimeParseFailure:
+    """PY-MGR-04: parse failure must not fabricate datetime.now(JST)."""
+
+    def test_valid_date_parses(self):
+        """Sanity: a well-formed date still parses to a JST datetime."""
+        dt = parse_jst_datetime("2026.7.6 21:05")
+        assert dt is not None
+        assert (dt.year, dt.month, dt.day, dt.hour, dt.minute) == (2026, 7, 6, 21, 5)
+        assert dt.tzinfo == JST
+
+    def test_unparseable_returns_none_not_now(self):
+        """PY-MGR-04: an unparseable date returns None (never now())."""
+        assert parse_jst_datetime("not-a-date") is None
+
+    def test_unparseable_logs_warning_with_text(self):
+        """PY-MGR-04: the failure is logged (greppable) with the offending text."""
+        with capture_logs() as logs:
+            result = parse_jst_datetime("garbage 2026 date")
+
+        assert result is None
+        events = [e for e in logs if e.get("event") == "blog_date_parse_failed"]
+        assert events, f"expected a 'blog_date_parse_failed' log event, got {[e.get('event') for e in logs]}"
+        # The unparsed text must be present so drift is diagnosable.
+        assert events[0].get("date_text") == "garbage 2026 date"
+
+    def test_empty_string_returns_none(self):
+        """An empty/whitespace date string is a parse failure, not now()."""
+        assert parse_jst_datetime("") is None
+        assert parse_jst_datetime("   ") is None
+
+
+class TestSameDaySkipCursor:
+    """PY-MGR-03: date-only list date vs time-precision cursor must not skip
+    a same-day newer blog forever."""
+
+    @pytest.fixture
+    def mock_session(self):
+        return MagicMock()
+
+    @pytest.mark.asyncio
+    async def test_sakurazaka_metadata_same_day_newer_blog_not_skipped(self, mock_session):
+        """A blog posted later the same day (list shows date only) must still be
+        yielded when the cursor is a same-day, earlier time-of-day."""
+        scraper = SakurazakaBlogScraper(mock_session)
+
+        # List page: two boxes both dated 2026/07/06 (date-only, midnight JST).
+        # Newer blog id=200 appears above older id=100.
+        list_html = """
+        <html><body>
+            <ul>
+                <li class="box">
+                    <a href="/s/s46/diary/detail/200"></a>
+                    <span class="name">山崎天</span>
+                    <span class="date">2026/07/06</span>
+                    <span class="title">Newer same-day blog</span>
+                </li>
+                <li class="box">
+                    <a href="/s/s46/diary/detail/100"></a>
+                    <span class="name">山崎天</span>
+                    <span class="date">2026/07/06</span>
+                    <span class="title">Earlier same-day blog</span>
+                </li>
+            </ul>
+        </body></html>
+        """
+        empty_html = "<html><body></body></html>"
+        mock_session.get.side_effect = [
+            MockResponse(text=list_html, status=200),
+            MockResponse(text=empty_html, status=200),
+        ]
+
+        # Cursor: last synced blog published 2026-07-06 21:05 JST (time precision).
+        since_date = datetime(2026, 7, 6, 21, 5, tzinfo=JST)
+
+        blogs = []
+        async for blog in scraper.get_blogs_metadata(
+            "1", since_date=since_date, max_pages=2, member_name="山崎天"
+        ):
+            blogs.append(blog)
+
+        # Both same-day blogs must be yielded (caller dedupes by id); the strict
+        # midnight < 21:05 early-return must NOT drop the newer one.
+        ids = {b.id for b in blogs}
+        assert ids == {"200", "100"}, f"same-day blogs were skipped, got {ids}"
+
+    @pytest.mark.asyncio
+    async def test_sakurazaka_metadata_strictly_older_day_stops(self, mock_session):
+        """A blog from a strictly earlier day than the cursor still stops pagination."""
+        scraper = SakurazakaBlogScraper(mock_session)
+
+        list_html = """
+        <html><body>
+            <ul>
+                <li class="box">
+                    <a href="/s/s46/diary/detail/100"></a>
+                    <span class="name">山崎天</span>
+                    <span class="date">2026/07/05</span>
+                    <span class="title">Yesterday's blog</span>
+                </li>
+            </ul>
+        </body></html>
+        """
+        mock_session.get.side_effect = [
+            MockResponse(text=list_html, status=200),
+        ]
+
+        since_date = datetime(2026, 7, 6, 21, 5, tzinfo=JST)
+
+        blogs = []
+        async for blog in scraper.get_blogs_metadata(
+            "1", since_date=since_date, max_pages=2, member_name="山崎天"
+        ):
+            blogs.append(blog)
+
+        assert blogs == [], "strictly-older-day blog should have been filtered"
+
+    @pytest.mark.asyncio
+    async def test_hinatazaka_metadata_same_day_newer_blog_not_skipped(self, mock_session):
+        """Hinatazaka list dates carry time, but the '%Y.%m.%d' date-only fallback
+        has the same hazard: a same-day cursor must not drop a same-day blog."""
+        scraper = HinatazakaBlogScraper(mock_session)
+
+        # Date-only (fallback format) list entries, both on 2026.7.6.
+        list_html = """
+        <html><body>
+            <article class="p-blog-article">
+                <a href="/s/official/diary/detail/200">
+                    <div class="c-blog-article__title">Newer same-day</div>
+                    <div class="c-blog-article__date">2026.7.6</div>
+                    <div class="c-blog-article__name">松田好花</div>
+                </a>
+            </article>
+            <article class="p-blog-article">
+                <a href="/s/official/diary/detail/100">
+                    <div class="c-blog-article__title">Earlier same-day</div>
+                    <div class="c-blog-article__date">2026.7.6</div>
+                    <div class="c-blog-article__name">松田好花</div>
+                </a>
+            </article>
+        </body></html>
+        """
+        empty_html = "<html><body></body></html>"
+        mock_session.get.side_effect = [
+            MockResponse(text=list_html, status=200),
+            MockResponse(text=empty_html, status=200),
+        ]
+
+        since_date = datetime(2026, 7, 6, 21, 5, tzinfo=JST)
+
+        blogs = []
+        async for blog in scraper.get_blogs_metadata("40", since_date=since_date, max_pages=2):
+            blogs.append(blog)
+
+        ids = {b.id for b in blogs}
+        assert ids == {"200", "100"}, f"same-day blogs were skipped, got {ids}"
+
+    @pytest.mark.asyncio
+    async def test_metadata_unparseable_date_does_not_stop_or_skip(self, mock_session):
+        """PY-MGR-04 x PY-MGR-03: a blog whose date fails to parse (published_at
+        is None) must still be yielded and must not early-stop pagination."""
+        scraper = SakurazakaBlogScraper(mock_session)
+
+        list_html = """
+        <html><body>
+            <ul>
+                <li class="box">
+                    <a href="/s/s46/diary/detail/300"></a>
+                    <span class="name">山崎天</span>
+                    <span class="date">???broken???</span>
+                    <span class="title">Broken date blog</span>
+                </li>
+            </ul>
+        </body></html>
+        """
+        empty_html = "<html><body></body></html>"
+        mock_session.get.side_effect = [
+            MockResponse(text=list_html, status=200),
+            MockResponse(text=empty_html, status=200),
+        ]
+
+        since_date = datetime(2026, 7, 6, 21, 5, tzinfo=JST)
+
+        blogs = []
+        async for blog in scraper.get_blogs_metadata(
+            "1", since_date=since_date, max_pages=2, member_name="山崎天"
+        ):
+            blogs.append(blog)
+
+        assert len(blogs) == 1
+        assert blogs[0].id == "300"
+        # Never fabricate now(): the unparsed date leaves published_at as None.
+        assert blogs[0].published_at is None
+
+
+class TestMaxPagesSafetyCap:
+    """PY-MGR-05: safety cap applied uniformly, only as a failsafe when the
+    caller's max_pages is unbounded, and logged when it terminates pagination."""
+
+    @pytest.fixture
+    def mock_session(self):
+        return MagicMock()
+
+    @pytest.mark.asyncio
+    async def test_sakurazaka_metadata_capped_when_unbounded(self, mock_session, monkeypatch):
+        """Sakurazaka metadata pagination must not run forever: with an unbounded
+        max_pages it stops at the safety cap and logs a warning."""
+        import pysaka.blog.sakurazaka as sakurazaka_mod
+
+        # Shrink the cap so the test is fast.
+        monkeypatch.setattr(sakurazaka_mod, "MAX_PAGES_SAFETY_CAP", 2)
+        monkeypatch.setattr(sakurazaka_mod.asyncio, "sleep", AsyncMock())
+        scraper = SakurazakaBlogScraper(mock_session)
+
+        # Every page returns a fresh unique blog so natural termination never fires.
+        def make_page(page_num: int) -> str:
+            bid = 1000 + page_num
+            return f"""
+            <html><body>
+                <ul>
+                    <li class="box">
+                        <a href="/s/s46/diary/detail/{bid}"></a>
+                        <span class="name">山崎天</span>
+                        <span class="date">2026/07/06</span>
+                        <span class="title">Page {page_num}</span>
+                    </li>
+                </ul>
+            </body></html>
+            """
+
+        mock_session.get.side_effect = [MockResponse(text=make_page(n), status=200) for n in range(10)]
+
+        with capture_logs() as logs:
+            blogs = []
+            async for blog in scraper.get_blogs_metadata(
+                "1", max_pages=10_000, member_name="山崎天"
+            ):
+                blogs.append(blog)
+
+        # Stopped at the (monkeypatched) cap of 2 pages, not the natural 10.
+        assert len(blogs) == 2
+        assert any(e.get("event") == "blog_pagination_safety_cap_hit" for e in logs), (
+            f"expected a safety-cap warning, got {[e.get('event') for e in logs]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_hinatazaka_metadata_bounded_request_not_clamped_silently(self, mock_session, monkeypatch):
+        """PY-MGR-05: a bounded caller max_pages below the cap must be honored
+        exactly (no silent clamp) and terminate naturally without a cap warning."""
+        import pysaka.blog.hinatazaka as hinatazaka_mod
+
+        monkeypatch.setattr(hinatazaka_mod, "MAX_PAGES_SAFETY_CAP", 100)
+        monkeypatch.setattr(hinatazaka_mod.asyncio, "sleep", AsyncMock())
+        scraper = HinatazakaBlogScraper(mock_session)
+
+        def make_page(page_num: int) -> str:
+            bid = 2000 + page_num
+            return f"""
+            <html><body>
+                <article class="p-blog-article">
+                    <a href="/s/official/diary/detail/{bid}">
+                        <div class="c-blog-article__title">Page {page_num}</div>
+                        <div class="c-blog-article__date">2026.7.6 12:00</div>
+                        <div class="c-blog-article__name">松田好花</div>
+                    </a>
+                </article>
+            </body></html>
+            """
+
+        # 3 non-empty pages available, but caller asks for only 2.
+        mock_session.get.side_effect = [MockResponse(text=make_page(n), status=200) for n in range(3)]
+
+        with capture_logs() as logs:
+            blogs = []
+            async for blog in scraper.get_blogs_metadata("40", max_pages=2):
+                blogs.append(blog)
+
+        assert len(blogs) == 2, "caller max_pages=2 must be honored exactly"
+        # Terminating on the caller's own bound is not a safety-cap event.
+        assert not any(e.get("event") == "blog_pagination_safety_cap_hit" for e in logs)
+
+    @pytest.mark.asyncio
+    async def test_nogizaka_metadata_capped_when_unbounded(self, mock_session, monkeypatch):
+        """Nogizaka metadata pagination must also respect the safety cap when
+        the caller passes an unbounded max_pages."""
+        import pysaka.blog.nogizaka as nogizaka_mod
+
+        monkeypatch.setattr(nogizaka_mod, "MAX_PAGES_SAFETY_CAP", 2)
+        monkeypatch.setattr(nogizaka_mod.asyncio, "sleep", AsyncMock())
+        scraper = NogizakaBlogScraper(mock_session)
+
+        # Each page must be "full" (page_size=32 unique blogs) so the
+        # len(blogs) < page_size natural-termination guard never fires.
+        def make_page(page_num: int) -> str:
+            items = []
+            for i in range(32):
+                bid = page_num * 100 + i
+                items.append(
+                    f'{{"code":"{bid}","title":"P{page_num}I{i}",'
+                    f'"date":"2026/07/06 12:00:00","link":"","name":"久保史緒里","arti_code":"55401"}}'
+                )
+            return 'res({"count":"32","data":[' + ",".join(items) + "]})"
+
+        mock_session.get.side_effect = [MockResponse(text=make_page(n), status=200) for n in range(10)]
+
+        with capture_logs() as logs:
+            blogs = []
+            async for blog in scraper.get_blogs_metadata("55401", max_pages=10_000):
+                blogs.append(blog)
+
+        # 2 pages * 32 = 64 blogs, then the cap stops it.
+        assert len(blogs) == 64
+        assert any(e.get("event") == "blog_pagination_safety_cap_hit" for e in logs), (
+            f"expected a safety-cap warning, got {[e.get('event') for e in logs]}"
+        )

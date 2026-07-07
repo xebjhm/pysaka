@@ -16,6 +16,7 @@ from .config import (
     FULL_CONTENT_PAGE_DELAY,
     MAX_PAGES_SAFETY_CAP,
     PAGE_DELAY,
+    is_before_since_date,
     parse_jst_datetime,
 )
 
@@ -177,8 +178,13 @@ class SakurazakaBlogScraper(BaseBlogScraper):
         """
         page = 0
         seen_ids: set[str] = set()
+        # PY-MGR-05: apply the safety cap uniformly as a failsafe. It only clamps
+        # the loop when the caller's max_pages exceeds it (i.e. an "unbounded"
+        # full-history request); a bounded caller max_pages is honored exactly.
+        effective_max = min(max_pages, MAX_PAGES_SAFETY_CAP)
+        capped = max_pages > MAX_PAGES_SAFETY_CAP
 
-        while page < max_pages:
+        while page < effective_max:
             url = f"{self.base_url}/s/s46/diary/blog/list"
             params = {"ima": "0000", "ct": member_id, "page": page}
 
@@ -236,7 +242,10 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                     date_text = date_elem.get_text(strip=True) if date_elem else ""
                     published_at = parse_jst_datetime(date_text)
 
-                    if since_date and published_at < since_date:
+                    # PY-MGR-03: the Sakurazaka list date is date-only (midnight
+                    # JST), but the cursor is time-precision. Compare at day
+                    # granularity so a same-day newer blog is not skipped forever.
+                    if is_before_since_date(published_at, since_date):
                         return
 
                     # Parse title from list
@@ -271,6 +280,17 @@ class SakurazakaBlogScraper(BaseBlogScraper):
 
                 page += 1
                 await asyncio.sleep(PAGE_DELAY)
+
+        # PY-MGR-05: if we exhausted the loop because the safety cap (not an
+        # empty page) terminated pagination, warn so truncation is never silent.
+        if capped and page >= effective_max:
+            logger.warning(
+                "blog_pagination_safety_cap_hit",
+                member_id=member_id,
+                pages_fetched=page,
+                cap=MAX_PAGES_SAFETY_CAP,
+                method="get_blogs_metadata",
+            )
 
     async def get_blogs(
         self,
@@ -338,19 +358,26 @@ class SakurazakaBlogScraper(BaseBlogScraper):
                     date_elem = box.select_one(".date")
                     date_text = date_elem.get_text(strip=True) if date_elem else ""
 
-                    # Check date filter early (from preview)
-                    if since_date and date_text:
-                        preview_date = parse_jst_datetime(date_text)
-                        if preview_date < since_date:
-                            return
+                    # Check date filter early (from preview). PY-MGR-03: the list
+                    # date is date-only, so only early-stop on a strictly earlier
+                    # day; the exact time is re-checked below against the detail.
+                    if date_text and is_before_since_date(parse_jst_datetime(date_text), since_date):
+                        return
 
                     # Fetch full blog detail
                     try:
                         entry = await self.get_blog_detail(blog_id)
                         entry.member_id = member_id
 
-                        # Check date filter again with actual date
-                        if since_date and entry.published_at < since_date:
+                        # Check date filter again with the actual (time-precision)
+                        # date from the detail page — here a strict time compare
+                        # is correct. A None date (unparseable, PY-MGR-04) is not
+                        # treated as "before": yield it rather than truncating.
+                        if (
+                            since_date is not None
+                            and entry.published_at is not None
+                            and entry.published_at < since_date
+                        ):
                             return
 
                         yield entry
@@ -377,6 +404,17 @@ class SakurazakaBlogScraper(BaseBlogScraper):
 
                 page += 1
                 await asyncio.sleep(FULL_CONTENT_PAGE_DELAY)
+
+        # PY-MGR-05: warn if the safety cap (not an empty page / date boundary)
+        # terminated a full-history fetch so silent truncation is visible.
+        if page >= MAX_PAGES_SAFETY_CAP:
+            logger.warning(
+                "blog_pagination_safety_cap_hit",
+                member_id=member_id,
+                pages_fetched=page,
+                cap=MAX_PAGES_SAFETY_CAP,
+                method="get_blogs",
+            )
 
     async def get_blog_detail(self, blog_id: str, member_id: str | None = None) -> BlogEntry:
         """Fetch the full content of a specific blog post.
