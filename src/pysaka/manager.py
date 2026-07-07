@@ -204,15 +204,22 @@ class SyncManager:
         state_key = f"{gid}_{mid}"
         existing_file = member_dir / "messages.json"
 
-        async def fetch_for_member(since_ts: Optional[str]) -> list[dict[str, Any]]:
+        async def fetch_for_member(
+            since_ts: Optional[str], *, recovery: bool = False
+        ) -> list[dict[str, Any]]:
             """Fetch this member's messages, filtered by the ``since_ts`` cursor.
 
-            Passing ``since_ts=None`` yields the member's FULL history (used by the
-            corruption/count-mismatch recovery path below). Works for both the
-            prefetched branch (re-filters the shared timeline with no lower bound)
-            and the API branch (calls the client with ``since_ts=None``).
+            Normal path: when a shared ``prefetched_messages`` timeline was supplied,
+            filter it by member (and by ``since_ts`` when set; ``since_ts=None`` here
+            means a first sync with no cursor, i.e. take all of the member's rows).
+
+            Recovery path (``recovery=True``): fetch the member's TRUE full history
+            from the API, bypassing ``prefetched_messages``. The prefetched timeline
+            is only the group's incremental window, so it CANNOT supply full history —
+            filtering it during recovery truncated the archive (PY-MGR-01). ``since_ts``
+            is None here and full history is fetched regardless.
             """
-            if prefetched_messages is not None:
+            if prefetched_messages is not None and not recovery:
                 # Pre-fetched: filter by member_id AND this member's timestamp cursor
                 filtered = [
                     x
@@ -223,7 +230,7 @@ class SyncManager:
                 return filtered
 
             fetched = await self.client.get_messages(
-                session, gid, since_ts=since_ts, progress_callback=progress_callback
+                session, gid, since_ts=None if recovery else since_ts, progress_callback=progress_callback
             )
             logger.info("Fetched messages", count=len(fetched), group_id=gid)
 
@@ -271,9 +278,12 @@ class SyncManager:
 
             # Recovery: on corruption or count mismatch, the incremental fetch
             # above (bounded by last_ts) only returned NEW messages, which would
-            # overwrite the file with a truncated history. Re-fetch the FULL
-            # history (since_ts=None) and treat existing as empty so the merged
-            # result is complete rather than truncated.
+            # overwrite the file with a truncated history. Re-fetch the member's
+            # TRUE full history from the API (recovery=True bypasses the prefetched
+            # incremental window, which cannot contain full history — PY-MGR-01).
+            # Keep any readable existing_msgs and merge, so recovery can only ADD:
+            # for a corrupt (unreadable) file existing_msgs is already [], but for a
+            # count mismatch the file is readable and must not be discarded.
             recovering = corrupt or mismatch
             if recovering:
                 logger.info(
@@ -281,9 +291,9 @@ class SyncManager:
                     member=mname,
                     member_id=mid,
                     group_id=gid,
+                    preserved_existing=len(existing_msgs),
                 )
-                existing_msgs = []
-                messages = await fetch_for_member(None)
+                messages = await fetch_for_member(None, recovery=True)
 
             # No new messages and nothing to recover: nothing to write.
             if not messages and not recovering:

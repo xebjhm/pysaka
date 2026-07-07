@@ -674,6 +674,95 @@ async def test_sync_member_recovers_on_corrupt_file(sync_manager):
 
 
 @pytest.mark.asyncio
+async def test_sync_member_recovers_full_history_on_prefetched_branch(sync_manager):
+    """PY-MGR-01: recovery must fetch TRUE full history from the API even when a
+    prefetched (incremental-window) timeline was supplied. The prefetched slice
+    cannot contain full history, so filtering IT during recovery truncates the
+    archive. Also: a readable-but-short file must be preserved (add-only)."""
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp"}
+    member = {"id": 10, "name": "Mem"}
+    media_queue = []
+
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True, exist_ok=True)
+    json_path = member_dir / "messages.json"
+
+    # Readable file has 2 messages, but state expects 3 -> mismatch tripwire.
+    json_path.write_text(
+        json.dumps({"messages": [
+            {"id": 2, "type": "text", "content": "B", "timestamp": "2023-01-02T00:00:00Z"},
+            {"id": 3, "type": "text", "content": "C", "timestamp": "2023-01-03T00:00:00Z"},
+        ]}),
+        encoding="utf-8",
+    )
+    sync_manager.update_sync_state(1, 10, 3, 3, last_ts="2023-01-03T00:00:00Z")
+
+    full_history = [
+        {"id": 1, "type": "text", "text": "A", "member_id": 10, "published_at": "2023-01-01T00:00:00Z"},
+        {"id": 2, "type": "text", "text": "B", "member_id": 10, "published_at": "2023-01-02T00:00:00Z"},
+        {"id": 3, "type": "text", "text": "C", "member_id": 10, "published_at": "2023-01-03T00:00:00Z"},
+    ]
+
+    async def fake_get_messages(sess, gid, since_ts=None, progress_callback=None):
+        if since_ts is None:
+            return list(full_history)
+        return [m for m in full_history if m["published_at"] >= since_ts]
+
+    sync_manager.client.get_messages.side_effect = fake_get_messages
+
+    # Prefetched timeline is ONLY the incremental window (the newest message) —
+    # it does NOT contain the older history. Pre-fix, recovery filtered THIS and
+    # truncated the archive to just id 3.
+    prefetched = [
+        {"id": 3, "type": "text", "text": "C", "member_id": 10, "published_at": "2023-01-03T00:00:00Z"},
+    ]
+
+    await sync_manager.sync_member(
+        session, group, member, media_queue, prefetched_messages=prefetched
+    )
+
+    with open(json_path, encoding="utf-8") as f:
+        data = json.load(f)
+    # Full history recovered via the API, not truncated to the prefetched window.
+    assert {m["id"] for m in data["messages"]} == {1, 2, 3}
+    assert sync_manager.sync_state["1_10"]["total_messages"] == 3
+    # Recovery must have reached the client with since_ts=None (true full fetch).
+    assert any(
+        call.kwargs.get("since_ts") is None
+        for call in sync_manager.client.get_messages.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_member_first_sync_uses_prefetched_not_api(sync_manager):
+    """Guard against PY-MGR-01 regression: a first sync (no cursor) with a
+    prefetched timeline must FILTER the prefetch, not fall back to a per-member
+    API call — only recovery bypasses the prefetch. Both 'no cursor' and
+    'recovery' previously collapsed to since_ts=None; they must stay distinct."""
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp"}
+    member = {"id": 10, "name": "Mem"}
+    media_queue = []
+
+    prefetched = [
+        {"id": 1, "type": "text", "text": "A", "member_id": 10, "published_at": "2023-01-01T00:00:00Z"},
+        {"id": 2, "type": "text", "text": "B", "member_id": 99, "published_at": "2023-01-02T00:00:00Z"},
+    ]
+
+    await sync_manager.sync_member(
+        session, group, member, media_queue, prefetched_messages=prefetched
+    )
+
+    # Prefetch supplied everything -> no per-member API call.
+    sync_manager.client.get_messages.assert_not_called()
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    with open(member_dir / "messages.json", encoding="utf-8") as f:
+        data = json.load(f)
+    assert {m["id"] for m in data["messages"]} == {1}  # only member 10's message
+
+
+@pytest.mark.asyncio
 async def test_sync_member_reraises_session_expired(sync_manager):
     """PY-I4: SessionExpiredError from get_messages must propagate, not be
     swallowed into a '0 new messages' result."""
