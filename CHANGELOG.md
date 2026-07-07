@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `BrowserAuth.refresh_token_headless` accepts a `channel` argument (also read
+  from the `PYSAKA_BROWSER_CHANNEL` env var) to drive the user's installed system
+  browser (e.g. `"chrome"`, `"msedge"`) for the silent token refresh. When set,
+  it tries that channel, falls back to Edge, and never downloads Chromium at
+  runtime — the download otherwise spawns a Node subprocess that pops a console
+  window inside a packaged GUI app. Unset (the default) preserves the previous
+  bundled-Chromium behaviour with `auto_install` as the fallback, so headless
+  server usage is unchanged.
+
 ## [0.4.2] - 2026-07-04
 
 ### Fixed
