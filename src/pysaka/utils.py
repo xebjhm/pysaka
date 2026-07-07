@@ -183,6 +183,10 @@ def normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
         "id": msg["id"],
         "timestamp": msg.get("published_at"),  # ISO string from API
         "type": msg_type,
+        # Favorite state is only readable via this timeline field — the API has
+        # no list/read-favorites endpoint — so it refreshes only for messages
+        # inside the sync window. See favorites.py "FAVORITE-READ LIMITATION";
+        # revisit with a rooted-Android capture of the official client.
         "is_favorite": msg.get("is_favorite", False),
         "content": msg.get("text"),
         # raw type useful for extension determination later

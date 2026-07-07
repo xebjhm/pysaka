@@ -24,6 +24,55 @@ def sync_manager(mock_client, tmp_path):
     return SyncManager(mock_client, tmp_path)
 
 
+class TestMergeMessages:
+    """The re-fetch upsert must not drop locally-derived media metadata.
+
+    Each sync re-fetches an overlapping window and rebuilds messages from the
+    API (which never carries width/height/is_muted/media_duration). A naive
+    whole-object upsert therefore erased is_muted/media_duration on every
+    re-sync. _merge_messages must carry those forward from the stored record.
+    """
+
+    def test_preserves_local_derived_fields_when_api_omits_them(self):
+        existing = [
+            {
+                "id": 1,
+                "type": "video",
+                "is_favorite": True,
+                "width": 540,
+                "height": 720,
+                "is_muted": True,
+                "media_duration": 2.4,
+            }
+        ]
+        # Fresh API rebuild: server fields only, no locally-derived metadata.
+        processed = [{"id": 1, "type": "video", "is_favorite": False}]
+
+        merged = {m["id"]: m for m in SyncManager._merge_messages(existing, processed)}
+
+        assert merged[1]["is_muted"] is True  # preserved
+        assert merged[1]["media_duration"] == 2.4  # preserved
+        assert merged[1]["width"] == 540 and merged[1]["height"] == 720
+        assert merged[1]["is_favorite"] is False  # server field: fresh value wins
+
+    def test_fresh_value_wins_when_present(self):
+        existing = [{"id": 1, "type": "video", "is_muted": True}]
+        processed = [{"id": 1, "type": "video", "is_muted": False}]  # re-derived
+
+        merged = {m["id"]: m for m in SyncManager._merge_messages(existing, processed)}
+
+        assert merged[1]["is_muted"] is False  # do not clobber a fresh derivation
+
+    def test_new_message_passes_through_and_existing_untouched(self):
+        existing = [{"id": 1, "type": "text", "content": "old"}]
+        processed = [{"id": 2, "type": "text", "content": "new"}]
+
+        merged = {m["id"]: m for m in SyncManager._merge_messages(existing, processed)}
+
+        assert merged[1]["content"] == "old"
+        assert merged[2]["content"] == "new"
+
+
 @pytest.mark.asyncio
 async def test_load_save_sync_state(sync_manager):
     sync_manager.sync_state = {"test_key": {"data": 123}}

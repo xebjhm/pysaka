@@ -294,12 +294,9 @@ class SyncManager:
                 messages, member_dir, media_queue
             )
 
-            # Dedupe (Upsert: Prefer new data)
-            merged_dict = {x["id"]: x for x in existing_msgs}
-            for pm in processed:
-                merged_dict[pm["id"]] = pm
-
-            merged = list(merged_dict.values())
+            # Dedupe (Upsert: prefer fresh API data, but preserve locally-derived
+            # media metadata the API never returns — see _merge_messages).
+            merged = self._merge_messages(existing_msgs, processed)
             merged.sort(key=lambda x: x.get("timestamp") or "")
 
             # Stats
@@ -462,6 +459,36 @@ class SyncManager:
                     earliest_failed_ts = failed_ts
                 logger.error("Prepare error", message_id=mid, error=str(e))
         return processed, earliest_failed_ts, earliest_pending_media_ts
+
+    # Media metadata derived locally from the downloaded file — the message API
+    # never returns these fields. Each sync re-fetches an overlapping window and
+    # rebuilds messages from the API, so a whole-object upsert would drop them on
+    # every re-sync. width/height are also recomputed in prepare_messages for
+    # on-disk files, but is_muted/media_duration are computed only once (at
+    # download, in process_media_queue), so carrying them forward here is what
+    # keeps them alive across re-syncs.
+    _LOCAL_DERIVED_FIELDS = ("width", "height", "media_duration", "is_muted")
+
+    @staticmethod
+    def _merge_messages(
+        existing_msgs: list[dict[str, Any]], processed: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Upsert ``processed`` over ``existing_msgs`` (prefer fresh API data),
+        carrying forward locally-derived media metadata the API cannot supply.
+
+        A field is only inherited from the stored record when the fresh message
+        omits it — a freshly re-derived value (e.g. is_muted recomputed on a
+        re-download) always wins.
+        """
+        merged = {m["id"]: m for m in existing_msgs}
+        for pm in processed:
+            prev = merged.get(pm["id"])
+            if prev:
+                for key in SyncManager._LOCAL_DERIVED_FIELDS:
+                    if key not in pm and key in prev:
+                        pm[key] = prev[key]
+            merged[pm["id"]] = pm
+        return list(merged.values())
 
     def scan_member_media(self, member_dir: Path) -> dict[str, Any]:
         """
