@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-07-08
+
 ### Added
 - `BrowserAuth.refresh_token_headless` accepts a `channel` argument (also read
   from the `PYSAKA_BROWSER_CHANNEL` env var) to drive the user's installed system
@@ -253,7 +255,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Secure credential storage via system keyring
 - Token refresh without storing plaintext credentials
 
-[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/xebjhm/pysaka/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/xebjhm/pysaka/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/xebjhm/pysaka/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/xebjhm/pysaka/compare/v0.3.0...v0.4.0
