@@ -12,7 +12,7 @@ import argparse
 import asyncio
 
 from pysaka import BrowserAuth, Group
-from pysaka.credentials import TokenManager
+from pysaka.credentials import TokenManager, get_auth_dir
 
 
 async def main() -> None:
@@ -43,7 +43,12 @@ async def main() -> None:
     print("A browser window will open. Please complete the login process.")
     print()
 
-    creds = await BrowserAuth.login(group, headless=args.headless)
+    # Persist the browser profile under auth_data/<group> so it populates the
+    # directory the integration-test skip gate checks (get_auth_dir() non-empty),
+    # and so the headless refresh path can later reuse this session (PY-AUX-01).
+    user_data_dir = str(get_auth_dir() / group.value)
+
+    creds = await BrowserAuth.login(group, headless=args.headless, user_data_dir=user_data_dir)
 
     if creds:
         print()
@@ -51,12 +56,15 @@ async def main() -> None:
         print(f"  Access token: {creds['access_token'][:20]}...")
         print(f"  Refresh token: {creds['refresh_token'][:20] if creds.get('refresh_token') else 'N/A'}...")
 
-        # Store credentials using TokenManager
+        # Store credentials using TokenManager. The real API is save_session
+        # (there is no store_tokens); it keys by the string group value and
+        # persists cookies, which the web-session refresh path requires (PY-AUX-01).
         token_manager = TokenManager()
-        token_manager.store_tokens(
-            group=group,
-            access_token=creds["access_token"],
-            refresh_token=creds.get("refresh_token"),
+        token_manager.save_session(
+            group.value,
+            creds["access_token"],
+            creds.get("refresh_token"),
+            creds.get("cookies"),
         )
         print()
         print("Credentials stored in system keyring.")

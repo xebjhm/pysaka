@@ -12,6 +12,7 @@ import aiohttp
 import structlog
 
 from .client import Client
+from .exceptions import RefreshFailedError, SessionExpiredError
 from .media import get_audio_metadata, get_media_dimensions
 from .utils import get_media_extension, media_file_is_present, normalize_message, sanitize_name
 
@@ -200,61 +201,72 @@ class SyncManager:
         last_ts = self.get_last_ts(gid, mid)
         logger.info("Syncing member", member=mname, member_id=mid, last_ts=last_ts)
 
-        try:
-            if prefetched_messages is not None:
+        state_key = f"{gid}_{mid}"
+        existing_file = member_dir / "messages.json"
+
+        async def fetch_for_member(
+            since_ts: Optional[str], *, recovery: bool = False
+        ) -> list[dict[str, Any]]:
+            """Fetch this member's messages, filtered by the ``since_ts`` cursor.
+
+            Normal path: when a shared ``prefetched_messages`` timeline was supplied,
+            filter it by member (and by ``since_ts`` when set; ``since_ts=None`` here
+            means a first sync with no cursor, i.e. take all of the member's rows).
+
+            Recovery path (``recovery=True``): fetch the member's TRUE full history
+            from the API, bypassing ``prefetched_messages``. The prefetched timeline
+            is only the group's incremental window, so it CANNOT supply full history —
+            filtering it during recovery truncated the archive (PY-MGR-01). ``since_ts``
+            is None here and full history is fetched regardless.
+            """
+            if prefetched_messages is not None and not recovery:
                 # Pre-fetched: filter by member_id AND this member's timestamp cursor
-                messages = [
+                filtered = [
                     x
                     for x in prefetched_messages
-                    if x.get("member_id") == mid and (last_ts is None or (x.get("published_at") or "") >= last_ts)
+                    if x.get("member_id") == mid and (since_ts is None or (x.get("published_at") or "") >= since_ts)
                 ]
-                logger.info("Filtered prefetched messages for member", count=len(messages), member=mname)
-            else:
-                messages = await self.client.get_messages(
-                    session, gid, since_ts=last_ts, progress_callback=progress_callback
-                )
-                logger.info("Fetched messages", count=len(messages), group_id=gid)
+                logger.info("Filtered prefetched messages for member", count=len(filtered), member=mname)
+                return filtered
 
-                # Filter for member
-                messages = [x for x in messages if x.get("member_id") == mid]
-                logger.info("Filtered messages for member", count=len(messages), member=mname)
-
-            if not messages:
-                return 0
-
-            # Process & Prepare
-            processed, earliest_failed_ts, earliest_pending_media_ts = self.prepare_messages(
-                messages, member_dir, media_queue
+            fetched = await self.client.get_messages(
+                session, gid, since_ts=None if recovery else since_ts, progress_callback=progress_callback
             )
+            logger.info("Fetched messages", count=len(fetched), group_id=gid)
 
-            # Load existing
-            existing_file = member_dir / "messages.json"
+            # Filter for member
+            fetched = [x for x in fetched if x.get("member_id") == mid]
+            logger.info("Filtered messages for member", count=len(fetched), member=mname)
+            return fetched
+
+        try:
+            messages = await fetch_for_member(last_ts)
+
+            # Load existing (may be corrupt / truncated — see recovery below)
             existing_msgs: list[dict[str, Any]] = []
+            corrupt = False
             if existing_file.exists():
                 try:
                     async with aiofiles.open(existing_file, encoding="utf-8") as f:
                         data = json.loads(await f.read())
                         existing_msgs = data.get("messages", [])
                 except Exception:
-                    # Corrupt file (e.g. force-close during write).
-                    # Reset this member's last_id so the next sync
-                    # re-fetches from the beginning to recover.
+                    # Corrupt file (e.g. force-close during write). The existing
+                    # history is unreadable, so a full re-fetch is required.
                     logger.warning(
                         "corrupt_messages_file",
                         member=mname,
                         member_id=mid,
                         group_id=gid,
                     )
-                    self.sync_state.pop(f"{gid}_{mid}", None)
-                    self.save_sync_state()
+                    corrupt = True
 
             # Integrity check: if the file has fewer messages than sync_state
             # recorded, data was lost (e.g. past force-close overwrote the
-            # file with only new messages).  Reset last_id so the next sync
-            # does a full re-fetch to recover.
-            state_key = f"{gid}_{mid}"
+            # file with only new messages).
             expected = (self.sync_state.get(state_key) or {}).get("total_messages", 0)
-            if expected > 0 and len(existing_msgs) < expected:
+            mismatch = expected > 0 and len(existing_msgs) < expected
+            if mismatch:
                 logger.warning(
                     "message_count_mismatch",
                     member=mname,
@@ -263,15 +275,56 @@ class SyncManager:
                     expected=expected,
                     actual=len(existing_msgs),
                 )
-                self.sync_state.pop(state_key, None)
-                self.save_sync_state()
 
-            # Dedupe (Upsert: Prefer new data)
-            merged_dict = {x["id"]: x for x in existing_msgs}
-            for pm in processed:
-                merged_dict[pm["id"]] = pm
+            # Recovery: on corruption or count mismatch, the incremental fetch
+            # above (bounded by last_ts) only returned NEW messages, which would
+            # overwrite the file with a truncated history. Re-fetch the member's
+            # TRUE full history from the API (recovery=True bypasses the prefetched
+            # incremental window, which cannot contain full history — PY-MGR-01).
+            # Keep any readable existing_msgs and merge, so recovery can only ADD:
+            # for a corrupt (unreadable) file existing_msgs is already [], but for a
+            # count mismatch the file is readable and must not be discarded.
+            recovering = corrupt or mismatch
+            if recovering:
+                logger.info(
+                    "recovering_full_history",
+                    member=mname,
+                    member_id=mid,
+                    group_id=gid,
+                    preserved_existing=len(existing_msgs),
+                )
+                messages = await fetch_for_member(None, recovery=True)
+                # Fail closed: an empty full-history re-fetch is indistinguishable
+                # from a transient API failure (get_messages returns [] when the
+                # first page fails after its refresh retry — it cannot tell a
+                # genuinely-empty timeline from a hiccup). Writing here would
+                # overwrite a corrupt/short file with an EMPTY archive and advance
+                # the cursor — the exact truncation recovery exists to prevent. So
+                # skip the write and the cursor advance and retry next sync. Any
+                # readable existing_msgs stay on disk untouched. (Review follow-up
+                # to PY-MGR-01.)
+                if not messages:
+                    logger.error(
+                        "recovery_fetch_empty_skipping_write",
+                        member=mname,
+                        member_id=mid,
+                        group_id=gid,
+                        preserved_existing=len(existing_msgs),
+                    )
+                    return 0
 
-            merged = list(merged_dict.values())
+            # No new messages and nothing to recover: nothing to write.
+            if not messages and not recovering:
+                return 0
+
+            # Process & Prepare (on the recovered full set when recovering)
+            processed, earliest_failed_ts, earliest_pending_media_ts = self.prepare_messages(
+                messages, member_dir, media_queue
+            )
+
+            # Dedupe (Upsert: prefer fresh API data, but preserve locally-derived
+            # media metadata the API never returns — see _merge_messages).
+            merged = self._merge_messages(existing_msgs, processed)
             merged.sort(key=lambda x: x.get("timestamp") or "")
 
             # Stats
@@ -332,6 +385,10 @@ class SyncManager:
 
             return len(processed)
 
+        except (SessionExpiredError, RefreshFailedError):
+            # Auth failure is not "no new messages" — propagate so the caller
+            # can prompt re-login instead of reporting a successful empty sync.
+            raise
         except Exception as e:
             logger.error("Error syncing member", member=mname, error=str(e), exc_info=True)
             return 0
@@ -431,6 +488,43 @@ class SyncManager:
                 logger.error("Prepare error", message_id=mid, error=str(e))
         return processed, earliest_failed_ts, earliest_pending_media_ts
 
+    # Media metadata derived locally from the downloaded file — the message API
+    # never returns these fields. Each sync re-fetches an overlapping window and
+    # rebuilds messages from the API, so a whole-object upsert would drop them on
+    # every re-sync. width/height are also recomputed in prepare_messages for
+    # on-disk files, but is_muted/media_duration are computed only once (at
+    # download, in process_media_queue), so carrying them forward here is what
+    # keeps them alive across re-syncs.
+    #
+    # media_file is the pointer to the already-downloaded file. It is only set in
+    # prepare_messages when the API still returns a media URL, so when a member
+    # withdraws a post (state -> canceled, URL stripped) the fresh record omits it.
+    # Inheriting it keeps the archived media reachable; dropping it would orphan a
+    # file that can no longer be re-downloaded (PY-MGR-02). A genuine media change
+    # sets a fresh media_file, which wins (inheritance only fills an omitted field).
+    _LOCAL_DERIVED_FIELDS = ("width", "height", "media_duration", "is_muted", "media_file")
+
+    @staticmethod
+    def _merge_messages(
+        existing_msgs: list[dict[str, Any]], processed: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Upsert ``processed`` over ``existing_msgs`` (prefer fresh API data),
+        carrying forward locally-derived media metadata the API cannot supply.
+
+        A field is only inherited from the stored record when the fresh message
+        omits it — a freshly re-derived value (e.g. is_muted recomputed on a
+        re-download) always wins.
+        """
+        merged = {m["id"]: m for m in existing_msgs}
+        for pm in processed:
+            prev = merged.get(pm["id"])
+            if prev:
+                for key in SyncManager._LOCAL_DERIVED_FIELDS:
+                    if key not in pm and key in prev:
+                        pm[key] = prev[key]
+            merged[pm["id"]] = pm
+        return list(merged.values())
+
     def scan_member_media(self, member_dir: Path) -> dict[str, Any]:
         """
         Offline scan of a member's messages.json for missing media.
@@ -439,30 +533,44 @@ class SyncManager:
         Expected paths are resolved as ``self.output_dir / msg["media_file"]``.
 
         Returns:
-            ``{"checked": int, "missing": list[dict], "unresolved": list[dict]}``
-            where each missing descriptor is ``{"message_id", "media_type",
-            "path": Path, "timestamp"}`` and each ``unresolved`` descriptor is
-            ``{"message_id", "media_type", "timestamp"}`` (no path). ``unresolved``
-            lists media-type messages that have no recorded ``media_file`` (the
-            media URL was absent at sync time, e.g. a source-removed stub): they
-            cannot be located or verified on disk, so they are reported separately
-            rather than silently ignored — otherwise the result would claim 'all
-            present' while such media is genuinely absent. Returns zero/empty if
-            messages.json is absent or unreadable.
+            ``{"checked": int, "missing": list[dict], "unresolved": list[dict],
+            "error": str | None}`` where each missing descriptor is
+            ``{"message_id", "media_type", "path": Path, "timestamp"}`` and each
+            ``unresolved`` descriptor is ``{"message_id", "media_type", "timestamp"}``
+            (no path). ``unresolved`` lists media-type messages that have no recorded
+            ``media_file`` (the media URL was absent at sync time, e.g. a
+            source-removed stub): they cannot be located or verified on disk, so they
+            are reported separately rather than silently ignored — otherwise the
+            result would claim 'all present' while such media is genuinely absent.
+
+            ``error`` is ``None`` for a readable manifest. When messages.json cannot
+            be used it is set to a stable id so callers can distinguish it from a
+            fully-synced member (which also yields checked=0/missing=[]):
+            ``"manifest_missing"`` (absent), ``"manifest_unreadable"`` (present but
+            corrupt/unreadable), or ``"manifest_invalid"`` (valid JSON but not an
+            object). In every case the zero/empty counts are still returned.
         """
-        result: dict[str, Any] = {"checked": 0, "missing": [], "unresolved": []}
+        result: dict[str, Any] = {"checked": 0, "missing": [], "unresolved": [], "error": None}
         messages_file = member_dir / "messages.json"
         if not messages_file.exists():
+            # An absent manifest is NOT the same as a fully-synced member (which also
+            # yields checked=0/missing=[]). Signal it distinctly so callers can tell
+            # "nothing synced yet" apart from "all present".
+            result["error"] = "manifest_missing"
             return result
         try:
             with open(messages_file, encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:  # noqa: BLE001
-            logger.warning("scan: unreadable messages.json", file=str(messages_file), error=str(e))
+            # A corrupt/unreadable manifest must be surfaced, not collapsed into a
+            # clean-looking empty result that reads as "fully synced".
+            logger.warning("saka.scan.manifest_unreadable", file=str(messages_file), error=str(e))
+            result["error"] = "manifest_unreadable"
             return result
 
         if not isinstance(data, dict):
-            logger.warning("scan: messages.json is not a JSON object", file=str(messages_file))
+            logger.warning("saka.scan.manifest_invalid", file=str(messages_file))
+            result["error"] = "manifest_invalid"
             return result
 
         for msg in data.get("messages", []):

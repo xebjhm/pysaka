@@ -1,11 +1,23 @@
 import asyncio
+import os
 from pathlib import Path
 from typing import Any, Optional, TypedDict, Union
 
 import structlog
-from playwright.async_api import async_playwright
 
-from .client import GROUP_CONFIG, Group
+# PY-CORE-04: Pin Playwright's browser location to the package-local dir BEFORE
+# the Playwright driver is ever spawned. The Node driver snapshots its
+# environment at `async_playwright()` start time; setting this only later (inside
+# _install_bundled_chromium, after the driver launched) downloaded Chromium where
+# the already-running driver never looked, so the retry launch failed and the
+# ~130 MB download repeated on every refresh. Set at import so every
+# async_playwright() context in this module — and the bundled-Chromium install
+# subprocess — resolve to the same location. Respect a caller's explicit override.
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+
+from playwright.async_api import async_playwright  # noqa: E402  (must follow the env pin above)
+
+from .client import GROUP_CONFIG, Group  # noqa: E402
 
 logger = structlog.get_logger()
 
@@ -246,7 +258,10 @@ class BrowserAuth:
 
     @staticmethod
     async def refresh_token_headless(
-        group: Group, auth_dir: Union[str, Path], auto_install: bool = True
+        group: Group,
+        auth_dir: Union[str, Path],
+        auto_install: bool = True,
+        channel: Optional[str] = None,
     ) -> Optional[LoginCredentials]:
         """
         Refreshes access token via headless browser using persistent context.
@@ -254,12 +269,31 @@ class BrowserAuth:
         Args:
             group: Target group for authentication.
             auth_dir: Path to persistent browser context directory.
-            auto_install: If True, automatically install Playwright chromium if missing.
+            auto_install: If True, download Playwright's bundled Chromium when it
+                is missing. Ignored when a system ``channel`` is in effect.
+            channel: System browser channel to drive (e.g. ``"chrome"``,
+                ``"msedge"``). May also be supplied via the
+                ``PYSAKA_BROWSER_CHANNEL`` environment variable. When set, the
+                refresh reuses the user's already-installed browser (the same one
+                interactive login requires) and NEVER downloads Chromium — that
+                runtime download runs a Node subprocess that pops a console
+                window in a packaged GUI app. It tries the requested channel,
+                then Edge (present on every modern Windows), then fails closed so
+                the caller can prompt a normal re-login. Defaults to None
+                (bundled Chromium, with ``auto_install`` as the fallback) so the
+                library's headless-server behaviour is unchanged.
         """
         auth_dir = Path(auth_dir)
         if not auth_dir.exists():
             logger.error(f"Auth directory {auth_dir} does not exist.")
             return None
+
+        # A caller (e.g. the desktop app) can pin the refresh to the user's
+        # installed browser explicitly or, more conveniently, via env — so a
+        # single startup setting covers every Client refresh path at once.
+        channel = channel if channel is not None else (os.environ.get("PYSAKA_BROWSER_CHANNEL") or None)
+        # Only the bundled-Chromium path (no system channel) may auto-download.
+        allow_download = auto_install and channel is None
 
         # Extract config
         config = GROUP_CONFIG[group]
@@ -270,54 +304,9 @@ class BrowserAuth:
         token_future: asyncio.Future[None] = asyncio.Future()
 
         async with async_playwright() as p:
-            try:
-                # Launch persistent context
-                context = await p.chromium.launch_persistent_context(
-                    user_data_dir=str(auth_dir), headless=True, args=["--disable-blink-features=AutomationControlled"]
-                )
-            except Exception as e:
-                if "Executable doesn't exist" in str(e) and auto_install:
-                    # UX: Explain why we are downloading
-                    logger.info("Downloading headless browser for auto-refresh (One-time setup)...")
-                    # Force Playwright to look in global cache, not frozen bundle
-                    import os
-
-                    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
-
-                    try:
-                        import sys
-
-                        from playwright.__main__ import main
-
-                        # In frozen environment, calling subprocess with sys.executable fails
-                        # caused by the executable trying to parse '-m' as an argument.
-                        # We must call the internal CLI entry point directly.
-                        old_argv = sys.argv
-                        try:
-                            sys.argv = ["playwright", "install", "chromium"]
-                            main()
-                        except SystemExit:
-                            # Playwright CLI calls sys.exit(), which is expected
-                            pass
-                        except Exception as inner_e:
-                            logger.error(f"Failed to install Playwright browser: {inner_e}")
-                            return None
-                        finally:
-                            sys.argv = old_argv
-                        logger.info("Playwright chromium installed successfully. Retrying...")
-
-                        # Retry launch after installation
-                        context = await p.chromium.launch_persistent_context(
-                            user_data_dir=str(auth_dir),
-                            headless=True,
-                            args=["--disable-blink-features=AutomationControlled"],
-                        )
-                    except Exception as install_error:
-                        logger.error(f"Failed to auto-install Playwright browser: {install_error}")
-                        return None
-                else:
-                    logger.error(f"Failed to launch headless browser: {e}")
-                    return None
+            context = await BrowserAuth._launch_refresh_context(p, auth_dir, channel, allow_download)
+            if context is None:
+                return None
 
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
@@ -382,3 +371,82 @@ class BrowserAuth:
                     await context.close()
                 except Exception:
                     pass
+
+    @staticmethod
+    async def _launch_refresh_context(p: Any, auth_dir: Path, channel: Optional[str], allow_download: bool) -> Any:
+        """Open the persistent context for a silent refresh.
+
+        With a system ``channel`` we try it, then Edge (guaranteed on modern
+        Windows), and never download. Only the bundled-Chromium path
+        (``channel is None``) may auto-install. Returns the launched context, or
+        None if every attempt failed (the caller then fails the refresh cleanly).
+        """
+        launch_args = ["--disable-blink-features=AutomationControlled"]
+
+        if channel:
+            channels_to_try = [channel]
+            if channel != "msedge":
+                channels_to_try.append("msedge")  # always present on modern Windows
+        else:
+            channels_to_try = [None]
+
+        last_error: Optional[Exception] = None
+        for ch in channels_to_try:
+            try:
+                return await p.chromium.launch_persistent_context(
+                    user_data_dir=str(auth_dir),
+                    headless=True,
+                    channel=ch,
+                    args=launch_args,
+                )
+            except Exception as e:
+                last_error = e
+                if ch is None and "Executable doesn't exist" in str(e) and allow_download:
+                    if await BrowserAuth._install_bundled_chromium():
+                        try:
+                            return await p.chromium.launch_persistent_context(
+                                user_data_dir=str(auth_dir),
+                                headless=True,
+                                channel=None,
+                                args=launch_args,
+                            )
+                        except Exception as retry_error:
+                            last_error = retry_error
+                logger.warning(f"Headless launch failed (channel={ch!r}): {e}")
+
+        logger.error(f"Failed to launch headless browser: {last_error}")
+        return None
+
+    @staticmethod
+    async def _install_bundled_chromium() -> bool:
+        """Download Playwright's bundled Chromium (one-time setup).
+
+        Used only by the library's bundled-Chromium fallback — never in a
+        system-channel run — because it runs a Node download subprocess that
+        pops a console window in a windowed app. Returns True if the install
+        command ran to completion.
+        """
+        logger.info("Downloading headless browser for auto-refresh (one-time setup)...")
+        # PY-CORE-04: PLAYWRIGHT_BROWSERS_PATH is pinned at import time (module
+        # top) so the download lands where the already-running driver looks — we
+        # must NOT set it here, after async_playwright() has spawned the driver.
+        try:
+            import sys
+
+            from playwright.__main__ import main
+
+            # In a frozen build, re-invoking sys.executable with '-m' fails (the
+            # exe parses '-m' as its own argument), so call the CLI entry directly.
+            old_argv = sys.argv
+            try:
+                sys.argv = ["playwright", "install", "chromium"]
+                main()
+            except SystemExit:
+                pass  # Playwright CLI calls sys.exit() on success
+            finally:
+                sys.argv = old_argv
+            logger.info("Playwright chromium installed successfully.")
+            return True
+        except Exception as install_error:
+            logger.error(f"Failed to auto-install Playwright browser: {install_error}")
+            return False

@@ -178,7 +178,10 @@ class TestClientFetchJson:
 
     @pytest.mark.asyncio
     async def test_fetch_json_401_no_credentials(self, client, mock_session):
-        """Test fetch_json handles 401 without credentials for refresh."""
+        """PY-CORE-06: a 401 with no refresh credentials surfaces RefreshFailedError
+        (re-raised by fetch_json) instead of silently returning None/empty data."""
+        from pysaka.exceptions import RefreshFailedError
+
         mock_resp = mock_session.get.return_value.__aenter__.return_value
         mock_resp.status = 401
 
@@ -187,8 +190,8 @@ class TestClientFetchJson:
         client.cookies = None
         client.auth_dir = None
 
-        result = await client.fetch_json(mock_session, "/test")
-        assert result is None
+        with pytest.raises(RefreshFailedError):
+            await client.fetch_json(mock_session, "/test")
 
     @pytest.mark.asyncio
     async def test_fetch_json_unexpected_status(self, client, mock_session):
@@ -273,6 +276,99 @@ class TestClientRefreshToken:
 
             assert result is True
             assert client.access_token == "headless_token"
+
+    @pytest.mark.asyncio
+    async def test_refresh_persists_rotated_cookie_py_c2(self, client, mock_session):
+        """PY-C2: the rotated session cookie must be persisted, not the one that
+        was just consumed by /update_token."""
+        client.cookies = {"session": "old_cookie"}
+        client.refresh_token = None
+
+        persisted = {}
+        tm = MagicMock()
+        tm.save_session = MagicMock(
+            side_effect=lambda group, at, rt, cookies: persisted.update(
+                {"session": dict(cookies).get("session")}
+            )
+        )
+        client.token_manager = tm
+
+        mock_resp = mock_session.post.return_value.__aenter__.return_value
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"access_token": "new_token"})
+        mock_cookie = MagicMock()
+        mock_cookie.value = "new_cookie"
+        mock_resp.cookies = {"session": mock_cookie}
+
+        result = await client.refresh_access_token(mock_session)
+
+        assert result is True
+        # The cookie value handed to save_session must be the ROTATED one.
+        assert persisted["session"] == "new_cookie"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_refresh_single_flight_py_i5(self, client):
+        """PY-I5: concurrent 401s must POST /update_token only once — the second
+        caller sees the token already refreshed and skips."""
+        import asyncio
+
+        client.cookies = {"session": "old_cookie"}
+        client.refresh_token = None
+        client.token_manager = None  # avoid keyring writes
+
+        post_count = 0
+
+        def _make_post(*args, **kwargs):
+            nonlocal post_count
+            post_count += 1
+            resp = MagicMock()
+            resp.status = 200
+            resp.json = AsyncMock(return_value={"access_token": "new_token"})
+            cookie = MagicMock()
+            cookie.value = "new_cookie"
+            resp.cookies = {"session": cookie}
+
+            async def _slow_aenter(*a, **k):
+                # A real suspension point so the second coroutine gets scheduled
+                # and blocks on the refresh lock while the first is mid-POST.
+                await asyncio.sleep(0)
+                return resp
+
+            cm = MagicMock()
+            cm.__aenter__ = AsyncMock(side_effect=_slow_aenter)
+            cm.__aexit__ = AsyncMock(return_value=False)
+            return cm
+
+        session = MagicMock()
+        session.post = MagicMock(side_effect=_make_post)
+
+        results = await asyncio.gather(
+            client.refresh_access_token(session),
+            client.refresh_access_token(session),
+        )
+
+        assert all(results)
+        assert post_count == 1
+
+
+class TestRefreshLockLazyInit:
+    """PY-CORE-05: the refresh lock is created lazily on the running loop."""
+
+    def test_lock_not_created_in_init(self):
+        """Constructing a Client must NOT build an asyncio.Lock (which on 3.9
+        binds the current event loop at construction and breaks setup-time
+        Client(...) + asyncio.run(...) usage)."""
+        client = Client(group=Group.NOGIZAKA46, access_token="test")
+        assert client._refresh_lock is None
+
+    @pytest.mark.asyncio
+    async def test_lock_created_on_first_use(self):
+        """The lock is created (once) inside a running coroutine and reused."""
+        client = Client(group=Group.NOGIZAKA46, access_token="test")
+        lock1 = client._get_refresh_lock()
+        lock2 = client._get_refresh_lock()
+        assert lock1 is client._refresh_lock
+        assert lock1 is lock2
 
 
 class TestClientDownloadFile:
@@ -433,3 +529,85 @@ class TestClientGetNews:
 
         call_kwargs = mock_session.get.call_args[1]
         assert call_kwargs["params"]["count"] == 50
+
+
+class TestFetchJsonTimeout:
+    """PY-CORE-02: request timeouts must surface as ApiError, not silent None."""
+
+    @pytest.fixture
+    def client(self):
+        return Client(group=Group.NOGIZAKA46, access_token="test")
+
+    @pytest.fixture
+    def mock_session(self):
+        session = MagicMock()
+        session.get.return_value.__aenter__.return_value = AsyncMock()
+        session.get.return_value.__aexit__.return_value = None
+        return session
+
+    @pytest.mark.asyncio
+    async def test_total_timeout_raises_apierror(self, client, mock_session):
+        """aiohttp's total timeout raises asyncio.TimeoutError (NOT a ClientError);
+        fetch_json must translate it to ApiError instead of swallowing to None."""
+        import asyncio
+
+        from pysaka import ApiError
+
+        mock_session.get.return_value.__aenter__.side_effect = asyncio.TimeoutError()
+
+        with pytest.raises(ApiError):
+            await client.fetch_json(mock_session, "/test")
+
+
+class TestDownloadMessageMediaSanitizesId:
+    """PY-SEC-01: server-controlled message['id'] must not build a traversal path."""
+
+    @pytest.fixture
+    def client(self):
+        return Client(group=Group.NOGIZAKA46, access_token="test")
+
+    @pytest.fixture
+    def mock_session(self):
+        session = MagicMock()
+        session.get.return_value.__aenter__.return_value = AsyncMock()
+        session.get.return_value.__aexit__.return_value = None
+        return session
+
+    @pytest.mark.asyncio
+    async def test_traversal_id_is_rejected(self, client, mock_session, tmp_path):
+        """A malicious non-integer id (path traversal) is rejected — no write
+        escapes output_dir and download_file is never invoked for it."""
+        msg = {
+            "id": "../../../../evil",
+            "type": "picture",
+            "file": "https://cdn.example.com/x.jpg",
+        }
+
+        with patch.object(client, "download_file", new=AsyncMock(return_value=True)) as mock_dl:
+            result = await client.download_message_media(mock_session, msg, tmp_path)
+
+        assert result is None
+        mock_dl.assert_not_called()
+        # Nothing was written outside the intended directory.
+        assert not (tmp_path.parent / "evil.jpg").exists()
+
+    @pytest.mark.asyncio
+    async def test_integer_id_still_works(self, client, mock_session, tmp_path):
+        """A well-formed integer id downloads to <output>/<type>/<id>.<ext>."""
+        msg = {"id": 12345, "type": "picture", "file": "https://cdn.example.com/x.jpg"}
+
+        with patch.object(client, "download_file", new=AsyncMock(return_value=True)) as mock_dl:
+            result = await client.download_message_media(mock_session, msg, tmp_path)
+
+        assert result == tmp_path / "picture" / "12345.jpg"
+        mock_dl.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_numeric_string_id_is_coerced(self, client, mock_session, tmp_path):
+        """A numeric string id is coerced to int and used safely."""
+        msg = {"id": "678", "type": "picture", "file": "https://cdn.example.com/x.jpg"}
+
+        with patch.object(client, "download_file", new=AsyncMock(return_value=True)):
+            result = await client.download_message_media(mock_session, msg, tmp_path)
+
+        assert result == tmp_path / "picture" / "678.jpg"

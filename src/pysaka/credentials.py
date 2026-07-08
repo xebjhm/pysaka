@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import platform
 import zlib
 from abc import ABC, abstractmethod
@@ -28,6 +29,31 @@ _ENTRY_USERNAME = "credential"
 def _service_for(group: str) -> str:
     """Keyring service name isolating a single credential group."""
     return f"{SERVICE_NAME}:{group}"
+
+
+# Environment variable that opts in to the insecure plaintext keyring fallback.
+# Set to "1"/"true"/"yes"/"on" to allow it when no secure backend is available.
+PLAINTEXT_FALLBACK_ENV = "PYSAKA_ALLOW_PLAINTEXT_KEYRING"
+
+
+class NoSecureKeyringError(SakaError):
+    """
+    Raised when no secure OS keyring backend is available and the insecure
+    plaintext fallback has not been explicitly opted in to.
+
+    The plaintext fallback (``keyrings.alt.file.PlaintextKeyring``) only
+    obfuscates data (base64+zlib) and is NOT encryption, so credentials would be
+    recoverable by any user-level read. To avoid silently downgrading, we refuse
+    to persist unless the caller opts in via the ``allow_plaintext_fallback``
+    flag or the ``PYSAKA_ALLOW_PLAINTEXT_KEYRING`` environment variable.
+    """
+
+    pass
+
+
+def _plaintext_fallback_env_enabled() -> bool:
+    """Return True if the plaintext fallback env var opts in to the fallback."""
+    return os.getenv(PLAINTEXT_FALLBACK_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _compress_data(data: str) -> str:
@@ -100,12 +126,32 @@ class CredentialStore(ABC):
 
 
 class KeyringStore(CredentialStore):
-    def __init__(self):
+    # Class default so instances built via __new__ (e.g. in tests that inject a
+    # fake backend) still expose the attribute; __init__ overrides it with the
+    # PlaintextKeyring instance only when the insecure fallback is actually used.
+    _plaintext_kr: Any = None
+
+    def __init__(self, allow_plaintext_fallback: bool = False):
+        """
+        Args:
+            allow_plaintext_fallback: If True (or the ``PYSAKA_ALLOW_PLAINTEXT_KEYRING``
+                environment variable is set), fall back to the insecure
+                ``keyrings.alt.file.PlaintextKeyring`` when no secure OS backend is
+                available. This only obfuscates credentials (base64+zlib), it is
+                NOT encryption, so it is disabled by default. When not allowed and
+                no secure backend exists, a :class:`NoSecureKeyringError` is raised
+                instead of silently writing plaintext (PY-I7/SEC-3).
+        """
+        allow_plaintext = allow_plaintext_fallback or _plaintext_fallback_env_enabled()
+        # Holds the PlaintextKeyring instance when the insecure fallback is in use,
+        # so we can re-enforce restrictive file permissions on each save.
+        self._plaintext_kr: Any = None
         try:
             import keyring
 
             # Linux Headless Fallback Logic
-            # We attempt to verify the backend works. If not, we try keyrings.alt.
+            # We attempt to verify the backend works. If not, we optionally try
+            # keyrings.alt — but only when the caller has explicitly opted in.
             try:
                 # Probe the backend with a write operation
                 keyring.set_password("pysaka_probe", "probe", "ok")
@@ -113,19 +159,46 @@ class KeyringStore(CredentialStore):
             except Exception as e:
                 logger.warning(f"Default keyring backend seems broken (headless?): {e}")
 
-                # Try fallback
+                if not allow_plaintext:
+                    # Do NOT silently downgrade to plaintext on disk. Refuse to
+                    # persist unless the caller opts in explicitly (PY-I7/SEC-3).
+                    logger.error(
+                        "No secure keyring backend available and plaintext fallback "
+                        "is not allowed. Credentials will not be written in plaintext."
+                    )
+                    raise NoSecureKeyringError(
+                        "No secure keyring backend is available (headless/CI/container "
+                        "or locked Secret Service). Refusing to store credentials in "
+                        "plaintext. To opt in to the insecure plaintext fallback "
+                        "(base64+zlib obfuscation, NOT encryption), pass "
+                        "allow_plaintext_fallback=True or set the environment variable "
+                        f"{PLAINTEXT_FALLBACK_ENV}=1."
+                    ) from e
+
+                # Opt-in plaintext fallback
                 try:
                     from keyrings.alt.file import PlaintextKeyring
 
-                    keyring.set_keyring(PlaintextKeyring())
-                    logger.warning("Switched to PlaintextKeyring (keyrings.alt) as fallback.")
+                    plaintext_kr = PlaintextKeyring()
+                    keyring.set_keyring(plaintext_kr)
+                    logger.warning(
+                        "Switched to insecure PlaintextKeyring (keyrings.alt) fallback. "
+                        "Credentials are only obfuscated (base64+zlib), NOT encrypted."
+                    )
 
                     # Verify fallback
                     keyring.set_password("pysaka_probe", "probe", "ok")
                     keyring.delete_password("pysaka_probe", "probe")
+
+                    # On POSIX, tighten permissions on the plaintext store file so
+                    # it is not world/group-readable.
+                    self._plaintext_kr = plaintext_kr
+                    self._secure_plaintext_file(plaintext_kr)
                 except ImportError:
                     logger.error("keyrings.alt not found. Cannot provide fallback.")
                     raise e from None
+                except NoSecureKeyringError:
+                    raise
                 except Exception as fallback_error:
                     logger.error(f"Fallback backend also failed: {fallback_error}")
                     raise e from None
@@ -133,6 +206,26 @@ class KeyringStore(CredentialStore):
             self._keyring = keyring
         except ImportError:
             raise SakaError("keyring package is not installed.") from None
+
+    @staticmethod
+    def _secure_plaintext_file(plaintext_kr: Any) -> None:
+        """
+        On POSIX, set restrictive (0600) permissions on the PlaintextKeyring store
+        file if it can be located. Best-effort: any failure is logged and ignored
+        (e.g. Windows has no POSIX permissions, file may not exist yet).
+        """
+        if is_windows():
+            return
+        try:
+            file_path = getattr(plaintext_kr, "file_path", None)
+            if not file_path:
+                return
+            path = Path(file_path)
+            if path.exists():
+                os.chmod(path, 0o600)
+                logger.debug("Restricted plaintext keyring file permissions to 0600", path=str(path))
+        except Exception as e:
+            logger.warning(f"Could not set restrictive permissions on plaintext keyring file: {e}")
 
     def save(self, group: str, token_data: dict[str, Any]) -> None:
         # Keyring stores strings - compress JSON to fit Windows Credential Manager limits
@@ -142,6 +235,11 @@ class KeyringStore(CredentialStore):
             self._keyring.set_password(_service_for(group), _ENTRY_USERNAME, compressed)
         except Exception as e:
             raise SakaError(f"Failed to save credentials to keyring: {e}") from e
+
+        # When the insecure plaintext fallback is in use, re-enforce restrictive
+        # permissions on the store file (it may have been (re)created by the write).
+        if self._plaintext_kr is not None:
+            self._secure_plaintext_file(self._plaintext_kr)
 
     def load(self, group: str) -> Optional[dict[str, Any]]:
         try:
@@ -155,7 +253,10 @@ class KeyringStore(CredentialStore):
                 json_data = _decompress_data(data)
                 return json.loads(json_data)
         except Exception as e:
-            logger.warning(f"Failed to load credentials for {group}: {e}")
+            # Greppable id so corrupt/undecodable stored data (a real problem) is
+            # distinguishable in logs from the legitimate "never stored" case, which
+            # returns None without logging here.
+            logger.warning("saka.cred.load_failed", group=group, error=str(e))
         return None
 
     def _migrate_legacy(self, group: str) -> Optional[str]:
@@ -164,14 +265,26 @@ class KeyringStore(CredentialStore):
         legacy = self._keyring.get_password(SERVICE_NAME, group)
         if legacy is None:
             return None
+        # Write the isolated copy FIRST. If this fails the migration did NOT happen:
+        # surface it (raise) rather than returning the credential as if migrated, and
+        # critically do NOT fall through to the delete below — deleting the legacy
+        # entry after a failed write would destroy the only surviving copy. Raising
+        # leaves the legacy entry intact so the next load retries the migration.
         try:
             self._keyring.set_password(_service_for(group), _ENTRY_USERNAME, legacy)
-            # delete_password's username guard only removes the matching entry,
-            # so this never disturbs another group still on the shared service.
+        except Exception as e:
+            logger.error("saka.cred.migrate_write_failed", group=group, error=str(e))
+            raise SakaError(f"Failed to migrate legacy credential for {group}: {e}") from e
+        # Isolated copy is safely written; the legacy entry can now be removed.
+        # delete_password's username guard only removes the matching entry, so this
+        # never disturbs another group still on the shared service. A delete failure
+        # only leaves harmless residue (the isolated copy is authoritative and new
+        # saves never touch the shared service), so log it but don't fail the load.
+        try:
             self._keyring.delete_password(SERVICE_NAME, group)
             logger.info("Migrated credential to isolated keyring service", group=group)
         except Exception as e:
-            logger.warning("Legacy credential migration failed", group=group, error=str(e))
+            logger.warning("saka.cred.migrate_delete_failed", group=group, error=str(e))
         return legacy
 
     def delete(self, group: str) -> None:
@@ -209,10 +322,15 @@ class TokenManager:
     Strictly requires a working keyring backend.
     """
 
-    def __init__(self):
+    def __init__(self, allow_plaintext_fallback: bool = False):
         try:
-            self.store = KeyringStore()
+            self.store = KeyringStore(allow_plaintext_fallback=allow_plaintext_fallback)
             logger.debug("Using KeyringStore")
+        except NoSecureKeyringError:
+            # Preserve the clear opt-in guidance instead of wrapping it in a
+            # generic message (PY-I7/SEC-3).
+            logger.error("Keyring initialization failed: no secure backend available")
+            raise
         except Exception as e:
             logger.error(f"Keyring initialization failed: {e}")
             raise SakaError(f"Secure storage (keyring) is required but failed to initialize: {e}") from e
@@ -250,14 +368,20 @@ class TokenManager:
 _token_manager: Optional[TokenManager] = None
 
 
-def get_token_manager() -> TokenManager:
+def get_token_manager(allow_plaintext_fallback: bool = False) -> TokenManager:
     """
     Get the singleton TokenManager instance.
 
     This avoids repeated keyring probe operations and log spam
     when TokenManager is accessed from multiple modules.
+
+    Args:
+        allow_plaintext_fallback: Opt in to the insecure plaintext keyring
+            fallback when no secure OS backend is available. Only applied when the
+            singleton is first created (also honored via the
+            ``PYSAKA_ALLOW_PLAINTEXT_KEYRING`` environment variable).
     """
     global _token_manager
     if _token_manager is None:
-        _token_manager = TokenManager()
+        _token_manager = TokenManager(allow_plaintext_fallback=allow_plaintext_fallback)
     return _token_manager

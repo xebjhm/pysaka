@@ -132,6 +132,15 @@ class Client:
         self.cookies = cookies
         self.auth_dir = Path(auth_dir) if auth_dir else None
 
+        # Single-flight guard for token refresh (PY-I5): concurrent 401s must not
+        # each POST /update_token with the same (soon-to-be-rotated) cookie.
+        # PY-CORE-05: created lazily on first use (see _get_refresh_lock) rather
+        # than here. On Python 3.9 (still supported) asyncio.Lock() binds the
+        # event loop at construction; a `Client(...)` built at import/setup time
+        # then awaited under asyncio.run() would raise "bound to a different event
+        # loop". Deferring creation to the running loop avoids that.
+        self._refresh_lock: Optional[asyncio.Lock] = None
+
         # Platform profile: "web" (default) mimics the browser client;
         # "android" mimics the Flutter/Dart app (different UA, host, headers).
         if platform not in ("web", "android"):
@@ -270,16 +279,74 @@ class Client:
         except aiohttp.ClientError as e:
             logger.error(f"Network error fetching {url}: {e}")
             raise ApiError(f"Network error: {e}") from e
+        except asyncio.TimeoutError as e:
+            # PY-CORE-02: aiohttp's TOTAL request timeout raises asyncio.TimeoutError,
+            # which is NOT an aiohttp.ClientError subclass. Without this branch a hung
+            # request would fall into the broad handler below and be swallowed into
+            # None — indistinguishable from "no data" — letting callers treat a
+            # transient timeout as an empty result. Surface it as an ApiError so the
+            # docstring contract (network problems raise) actually holds.
+            logger.error(f"Timeout fetching {url}: {e}")
+            raise ApiError(f"Timeout: {e}") from e
         except Exception as e:
             logger.error(f"Unexpected error fetching {url}: {e}")
             return None
 
+    def _get_refresh_lock(self) -> asyncio.Lock:
+        """Return the single-flight refresh lock, creating it lazily.
+
+        PY-CORE-05: the lock is created on first use (inside a running coroutine)
+        rather than in ``__init__`` so that on Python 3.9 it binds to the event
+        loop that actually awaits it, not whichever loop happened to exist at
+        construction time.
+        """
+        if self._refresh_lock is None:
+            self._refresh_lock = asyncio.Lock()
+        return self._refresh_lock
+
     async def refresh_access_token(self, session: aiohttp.ClientSession) -> bool:
         """
-        Attempt to refresh the access token using stored cookies.
+        Attempt to refresh the access token (refresh_token → cookies → headless).
+
+        Guarded by an ``asyncio.Lock`` so concurrent 401s do not race and rotate
+        the session cookie under each other (single-flight, PY-I5). After
+        acquiring the lock, re-checks whether another caller already refreshed
+        the token and returns early if so.
 
         Returns:
-            True if refresh was successful, False otherwise.
+            True if a refresh was performed (or another caller already refreshed
+            the token while this call waited on the lock); False otherwise.
+        """
+        # Snapshot the token before we contend for the lock. If it changes while
+        # we wait, another concurrent caller already refreshed → skip our attempt.
+        token_before_wait = self.access_token
+        async with self._get_refresh_lock():
+            # PY-CORE-01: The ONLY safe early-exit is "another in-flight caller
+            # already refreshed the token while we waited on the lock". Detect
+            # that by the token having actually CHANGED, not by the token merely
+            # looking valid: a server-revoked-but-unexpired JWT still has plenty
+            # of `exp` remaining, and short-circuiting on `remaining > 300` there
+            # would re-send the rejected token forever (and silently no-op a
+            # consumer's proactive refresh, e.g. SakaDesk's 10-minute refresh).
+            # So a genuine refresh request always reaches the server unless a
+            # concurrent refresh just succeeded.
+            if self.access_token != token_before_wait and self.access_token:
+                remaining = self.get_token_expiry_seconds()
+                # Only trust the concurrent refresh if it produced a token that
+                # isn't itself already inside the danger window (otherwise fall
+                # through and refresh again).
+                if remaining is None or remaining > 300:
+                    logger.debug(
+                        "Token already refreshed by another caller; skipping redundant refresh.",
+                        remaining_seconds=remaining,
+                    )
+                    return True
+            return await self._perform_refresh(session)
+
+    async def _perform_refresh(self, session: aiohttp.ClientSession) -> bool:
+        """Run the actual token refresh flow. Must be called with the refresh lock held.
+
+        See :meth:`refresh_access_token` for the return/raise contract.
         """
         has_refresh_token = bool(self.refresh_token)
         has_cookies = bool(self.cookies)
@@ -299,10 +366,17 @@ class Client:
             current_token_expiry_seconds=self.get_token_expiry_seconds(),
         )
 
-        # Early exit only if ALL refresh methods are unavailable
+        # Early exit only if ALL refresh methods are unavailable.
+        # PY-CORE-06: a token-only Client whose token expired has no way to
+        # refresh — surface that as an auth error so callers can prompt re-login,
+        # instead of returning False → fetch_json None → silent empty results
+        # forever. Mirrors the "all plans failed" RefreshFailedError below.
         if not self.refresh_token and not cookies_usable and not (self.auth_dir and self.auth_dir.exists()):
             logger.warning("No credentials (refresh_token/cookies/auth_dir) available for refresh.")
-            return False
+            raise RefreshFailedError(
+                "The access token expired and no refresh credentials "
+                "(refresh_token/cookies/auth_dir) are available. Please log in again."
+            )
 
         url = f"{self.api_base}/update_token"
 
@@ -357,11 +431,13 @@ class Client:
                         new_token = data.get("access_token")
                         if new_token:
                             old_expiry = self.get_token_expiry_seconds()
-                            await self.update_token(new_token)
-                            new_expiry = self.get_token_expiry_seconds()
 
-                            # CRITICAL: Capture new session cookies from response
-                            # The server rotates the session cookie on each update_token call
+                            # CRITICAL (PY-C2): Capture the rotated session cookies
+                            # from the response BEFORE persisting. The server
+                            # rotates the session cookie on each update_token call;
+                            # persisting before capture would store the
+                            # already-consumed cookie, forcing a re-login on the
+                            # next restart.
                             cookies_updated = []
                             if resp.cookies:
                                 for key, cookie in resp.cookies.items():
@@ -372,6 +448,10 @@ class Client:
                                     updated_cookies=cookies_updated,
                                     new_cookie_count=len(self.cookies),
                                 )
+
+                            # Persist token + freshly-rotated cookies together.
+                            await self.update_token(new_token)
+                            new_expiry = self.get_token_expiry_seconds()
 
                             logger.info(
                                 "Token refreshed successfully via session cookies",
@@ -399,11 +479,15 @@ class Client:
                     elif resp.status == 401:
                         logger.warning("Cookie refresh returned 401 - session cookies may be expired")
                     else:
-                        body_text = await resp.text()
+                        # PY-SEC-03: do NOT log the raw /update_token body — this
+                        # endpoint echoes fresh access_token/refresh_token, and a
+                        # non-standard status (e.g. a 403/5xx that still carries a
+                        # token) would write credential material to debug.log. Log
+                        # only the status; the 400 branch above already surfaces
+                        # the safe allowlisted fields (code/message).
                         logger.warning(
                             "Cookie refresh failed with unexpected status",
                             status=resp.status,
-                            response_body=body_text[:500],
                         )
             except SessionExpiredError:
                 raise
@@ -480,6 +564,10 @@ class Client:
 
         Raises:
             SessionExpiredError: If refresh fails due to invalidated session.
+            RefreshFailedError: If the token is expired and no refresh path is
+                available (no refresh_token/cookies/auth_dir), or all refresh
+                attempts fail. Callers doing proactive refresh should catch this
+                (in addition to SessionExpiredError) and prompt re-login.
         """
         remaining = self.get_token_expiry_seconds()
 
@@ -686,6 +774,22 @@ class Client:
 
             current_continuation = data.get("continuation")
             if not current_continuation or current_continuation == params.get("continuation"):
+                # A missing or repeated continuation on a non-empty page normally
+                # means end-of-timeline. But when a cursor is set and the oldest
+                # message on this page is STILL newer than the cursor, the timeline
+                # ran out before reaching it: the server offered no way to fetch the
+                # older-but-still-new messages between here and the cursor. Breaking
+                # would let the caller advance its cursor past that gap. Fail closed,
+                # mirroring the empty-page and failed-fetch guards above.
+                if effective_ts and messages:
+                    oldest_timestamp = messages[-1].get("published_at", "")
+                    if oldest_timestamp and oldest_timestamp > effective_ts:
+                        raise ApiError(
+                            f"Timeline pagination for group {group_id} ended with a "
+                            f"missing/duplicate continuation while the oldest fetched "
+                            f"message ({oldest_timestamp}) is still newer than the "
+                            f"cursor ({effective_ts}); refusing to skip a possible gap."
+                        )
                 break
 
             page += 1
@@ -804,11 +908,21 @@ class Client:
             return None
 
         try:
+            # PY-SEC-01: message["id"] is server-controlled and flows straight
+            # into an on-disk filename. Coerce it to an int so a tampered/
+            # malicious id (e.g. "../../evil") cannot escape target_dir via path
+            # traversal; a non-integer id means we can't safely name the file.
+            try:
+                message_id = int(message["id"])
+            except (KeyError, TypeError, ValueError):
+                logger.warning("Skipping media with non-integer message id", message_id=message.get("id"))
+                return None
+
             ext = get_media_extension(media_url, raw_type)
             target_dir = output_dir / msg_type
             target_dir.mkdir(parents=True, exist_ok=True)
 
-            filename = f"{message['id']}.{ext}"
+            filename = f"{message_id}.{ext}"
             filepath = target_dir / filename
 
             if await self.download_file(session, media_url, filepath):

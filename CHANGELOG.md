@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-07-08
+
+### Added
+- `BrowserAuth.refresh_token_headless` accepts a `channel` argument (also read
+  from the `PYSAKA_BROWSER_CHANNEL` env var) to drive the user's installed system
+  browser (e.g. `"chrome"`, `"msedge"`) for the silent token refresh. When set,
+  it tries that channel, falls back to Edge, and never downloads Chromium at
+  runtime — the download otherwise spawns a Node subprocess that pops a console
+  window inside a packaged GUI app. Unset (the default) preserves the previous
+  bundled-Chromium behaviour with `auto_install` as the fallback, so headless
+  server usage is unchanged.
+
+### Changed
+- **Breaking:** `TokenManager`, `get_token_manager`, and `KeyringStore` now raise
+  `NoSecureKeyringError` on hosts with no secure keyring backend (headless / CI /
+  container, or a locked Secret Service) instead of silently writing an
+  obfuscated plaintext file. **Migration:** opt in with
+  `allow_plaintext_fallback=True` or set `PYSAKA_ALLOW_PLAINTEXT_KEYRING=1` (and
+  install the `pysaka[headless]` extra) to keep the previous fallback behaviour,
+  or handle the exception and prompt for secure storage.
+- `SyncManager.scan_member_media` now returns an `error` field
+  (`None` / `"manifest_missing"` / `"manifest_unreadable"` / `"manifest_invalid"`)
+  so callers can distinguish an unsynced or corrupt member manifest from a
+  fully-present one. Previously an unreadable/missing manifest collapsed into a
+  clean-looking empty result that read as "all media present".
+- **Breaking:** `Client.refresh_access_token` and `Client.refresh_if_needed` now
+  raise `RefreshFailedError` when the token is expired and there is no usable
+  refresh path (no `refresh_token`/cookies/`auth_dir`), instead of returning
+  `False`. An unrefreshable session now surfaces as an auth error a caller can act
+  on rather than silently yielding empty results. **Migration:** proactive-refresh
+  callers should catch `RefreshFailedError` in addition to `SessionExpiredError`.
+
+### Fixed
+- **Data loss:** `SyncManager` no longer truncates a member's message history
+  during recovery. A readable-but-short or corrupt `messages.json` is now rebuilt
+  from the member's TRUE full history (fetched from the API, bypassing the
+  incremental `prefetched_messages` window) and merged add-only, instead of being
+  overwritten with just the incremental window.
+- **Data loss:** locally-derived media metadata (`width`, `height`,
+  `media_duration`, `is_muted`, and the `media_file` pointer) is now preserved
+  across re-syncs. These fields — which the message API never returns — were
+  dropped on every re-sync's whole-object upsert; `media_file` in particular is
+  now inherited so a withdrawn post (state `canceled`, URL stripped) keeps its
+  already-downloaded media reachable instead of orphaning the file.
+- `Client.refresh_access_token` is now single-flight: concurrent 401s no longer
+  each `POST /update_token` with the same soon-to-be-rotated cookie, and the
+  rotated cookie is persisted before the next request uses it.
+- `get_messages` also fails closed on a continuation gap detected *before* the
+  cursor is reached (in addition to the incomplete-pagination guard), so a
+  partial timeline can no longer advance the caller's cursor past unfetched
+  messages.
+- A failed legacy-credential migration is now surfaced (raises) instead of
+  returning the credential as if migrated, and corrupt/undecodable stored data
+  logs a greppable `saka.cred.load_failed` id distinct from the never-stored case.
+- Blog sync skips an individual deleted blog post (`BlogGoneError`) instead of
+  aborting the whole member's backfill.
+- `Client.refresh_access_token` now refreshes a server-revoked-but-unexpired token
+  instead of early-exiting on the remaining `exp`, so a rejected token is no longer
+  re-sent indefinitely and a consumer's proactive refresh is no longer silently
+  no-oped.
+- Blog incremental sync no longer permanently skips a second same-day post: a
+  date-only list date is now compared at day granularity against the
+  time-precision cursor. A date parse failure logs and returns `None` instead of
+  fabricating the current time (which had poisoned stored publish dates and the
+  cursor), and the page-cap failsafe is applied uniformly across all scrapers,
+  logging when it — rather than an empty page — ends pagination.
+- Hardened media download and logging: the on-disk media filename is derived from
+  a validated integer message id (path-traversal safety), secret redaction now
+  recurses nested structures, and the token-refresh error path no longer logs the
+  raw response body.
+
 ## [0.4.2] - 2026-07-04
 
 ### Fixed
@@ -184,7 +255,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Secure credential storage via system keyring
 - Token refresh without storing plaintext credentials
 
-[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/xebjhm/pysaka/compare/v0.4.2...v0.4.3
+[0.4.2]: https://github.com/xebjhm/pysaka/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/xebjhm/pysaka/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/xebjhm/pysaka/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/xebjhm/pysaka/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/xebjhm/pysaka/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/xebjhm/pysaka/compare/v0.1.0...v0.1.1
