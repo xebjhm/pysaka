@@ -564,6 +564,10 @@ class Client:
 
         Raises:
             SessionExpiredError: If refresh fails due to invalidated session.
+            RefreshFailedError: If the token is expired and no refresh path is
+                available (no refresh_token/cookies/auth_dir), or all refresh
+                attempts fail. Callers doing proactive refresh should catch this
+                (in addition to SessionExpiredError) and prompt re-login.
         """
         remaining = self.get_token_expiry_seconds()
 

@@ -789,6 +789,42 @@ def test_merge_fresh_media_file_wins():
 
 
 @pytest.mark.asyncio
+async def test_recovery_does_not_overwrite_when_full_fetch_is_empty(sync_manager):
+    """Review follow-up to PY-MGR-01: an empty full-history re-fetch during
+    recovery must NOT overwrite the file with an empty archive or advance the
+    cursor. An empty result can be a transient API failure (get_messages returns
+    [] on a first-page error), indistinguishable from a genuinely empty timeline
+    — so recovery must fail closed and retry next sync, never truncate."""
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp"}
+    member = {"id": 10, "name": "Mem"}
+    media_queue = []
+
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True, exist_ok=True)
+    json_path = member_dir / "messages.json"
+    corrupt = "{ not valid json"  # unreadable -> existing_msgs = [], corrupt=True
+    json_path.write_text(corrupt, encoding="utf-8")
+    sync_manager.update_sync_state(1, 10, 5, 5, last_ts="2023-01-05T00:00:00Z")
+
+    # Both the incremental and the recovery full-history fetch return [] (a
+    # transient failure get_messages cannot distinguish from an empty timeline).
+    async def fake_get_messages(sess, gid, since_ts=None, progress_callback=None):
+        return []
+
+    sync_manager.client.get_messages.side_effect = fake_get_messages
+
+    result = await sync_manager.sync_member(session, group, member, media_queue)
+
+    assert result == 0
+    # The corrupt file must be left untouched (NOT overwritten with an empty archive).
+    assert json_path.read_text(encoding="utf-8") == corrupt
+    # The cursor/count must NOT have advanced to an empty/normalized state.
+    assert sync_manager.sync_state["1_10"]["total_messages"] == 5
+    assert sync_manager.get_last_ts(1, 10) == "2023-01-05T00:00:00Z"
+
+
+@pytest.mark.asyncio
 async def test_sync_member_reraises_session_expired(sync_manager):
     """PY-I4: SessionExpiredError from get_messages must propagate, not be
     swallowed into a '0 new messages' result."""

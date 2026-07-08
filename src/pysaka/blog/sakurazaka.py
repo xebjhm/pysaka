@@ -190,6 +190,15 @@ class SakurazakaBlogScraper(BaseBlogScraper):
 
             async with self.session.get(url, params=params) as resp:
                 if resp.status != 200:
+                    # Log rather than silently ending pagination — a server hiccup
+                    # / soft-block would otherwise truncate the member's blog list
+                    # indistinguishably from a real end-of-list (mirrors hinatazaka).
+                    logger.warning(
+                        "blog_list_fetch_failed",
+                        status=resp.status,
+                        member_id=member_id,
+                        page=page,
+                    )
                     break
 
                 html = await resp.text()

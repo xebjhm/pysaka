@@ -294,6 +294,24 @@ class SyncManager:
                     preserved_existing=len(existing_msgs),
                 )
                 messages = await fetch_for_member(None, recovery=True)
+                # Fail closed: an empty full-history re-fetch is indistinguishable
+                # from a transient API failure (get_messages returns [] when the
+                # first page fails after its refresh retry — it cannot tell a
+                # genuinely-empty timeline from a hiccup). Writing here would
+                # overwrite a corrupt/short file with an EMPTY archive and advance
+                # the cursor — the exact truncation recovery exists to prevent. So
+                # skip the write and the cursor advance and retry next sync. Any
+                # readable existing_msgs stay on disk untouched. (Review follow-up
+                # to PY-MGR-01.)
+                if not messages:
+                    logger.error(
+                        "recovery_fetch_empty_skipping_write",
+                        member=mname,
+                        member_id=mid,
+                        group_id=gid,
+                        preserved_existing=len(existing_msgs),
+                    )
+                    return 0
 
             # No new messages and nothing to recover: nothing to write.
             if not messages and not recovering:
