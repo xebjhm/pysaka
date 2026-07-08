@@ -174,3 +174,57 @@ class TestRedactSecrets:
         result = _redact_secrets(None, "info", event_dict)
         assert result["items"] == ["a", "b", "c"]
         assert result["count"] == 42
+
+    def test_does_not_mutate_caller_owned_nested_dict_py_core_03(self):
+        """PY-CORE-03: redaction must NOT overwrite a live dict the caller passed
+        as a log kwarg — mutating self.headers/self.cookies in place would send
+        garbage credentials on every subsequent request."""
+        live_headers = {"Authorization": "Bearer real_token", "content-type": "application/json"}
+        event_dict = {"headers": live_headers, "event": "req"}
+
+        result = _redact_secrets(None, "info", event_dict)
+
+        # Output is redacted...
+        assert result["headers"]["Authorization"] == "***REDACTED***"
+        # ...but the caller's original object is untouched.
+        assert live_headers["Authorization"] == "Bearer real_token"
+        assert result["headers"] is not live_headers
+
+    def test_recurses_into_deeply_nested_dicts_py_sec_02(self):
+        """PY-SEC-02: sensitive keys nested 2+ levels deep are redacted."""
+        event_dict = {
+            "data": {"result": {"access_token": "deep_secret", "id": 5}},
+        }
+
+        result = _redact_secrets(None, "info", event_dict)
+
+        assert result["data"]["result"]["access_token"] == "***REDACTED***"
+        assert result["data"]["result"]["id"] == 5
+
+    def test_redacts_sensitive_keys_inside_lists_py_sec_02(self):
+        """PY-SEC-02: sensitive keys inside list/tuple values are redacted."""
+        event_dict = {
+            "sessions": [{"token": "t1"}, {"token": "t2", "user": "a"}],
+        }
+
+        result = _redact_secrets(None, "info", event_dict)
+
+        assert result["sessions"][0]["token"] == "***REDACTED***"
+        assert result["sessions"][1]["token"] == "***REDACTED***"
+        assert result["sessions"][1]["user"] == "a"
+
+    def test_scrubs_bearer_and_jwt_in_string_values_py_sec_02(self):
+        """PY-SEC-02: secrets interpolated into free strings (f-strings, bodies)
+        are scrubbed even when they don't sit under a sensitive key."""
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjE3MDAwMDAwMDB9.abcDEF123_-"
+        event_dict = {
+            "event": f"authorized with Bearer {jwt} now",
+            "body": f'{{"access_token": "{jwt}"}}',
+        }
+
+        result = _redact_secrets(None, "info", event_dict)
+
+        assert "Bearer " not in result["event"] or "***REDACTED***" in result["event"]
+        assert jwt not in result["event"]
+        assert jwt not in result["body"]
+        assert "***REDACTED***" in result["body"]

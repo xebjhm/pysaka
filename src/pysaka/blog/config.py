@@ -9,6 +9,10 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 # Japan Standard Time - used by all scrapers
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -26,11 +30,10 @@ DATE_FORMATS = [
 def parse_jst_datetime(
     date_text: str,
     formats: list[str] | None = None,
-) -> datetime:
+) -> datetime | None:
     """Parse a date string into a JST datetime.
 
     Tries multiple formats in order until one succeeds.
-    Falls back to current time if all formats fail.
 
     Args:
         date_text: The date string to parse.
@@ -38,7 +41,14 @@ def parse_jst_datetime(
                  Defaults to DATE_FORMATS if not provided.
 
     Returns:
-        Parsed datetime with JST timezone, or current JST time on failure.
+        Parsed datetime with JST timezone, or ``None`` if no format matched.
+
+    Note:
+        PY-MGR-04: on parse failure this returns ``None`` (and logs a warning
+        with the offending text) rather than fabricating ``datetime.now(JST)``.
+        A "now" fallback silently corrupts stored publish dates and poisons the
+        ``max(published_at)`` incremental cursor. Callers must treat ``None`` as
+        "unknown date" (never as a boundary for early-stop filtering).
     """
     if formats is None:
         formats = DATE_FORMATS
@@ -50,8 +60,42 @@ def parse_jst_datetime(
         except ValueError:
             continue
 
-    # Fallback to current time
-    return datetime.now(JST)
+    # PY-MGR-04: never fabricate now() for archival data. Log the unparsed text
+    # (site date-format drift is exactly what scrapers are exposed to) so the
+    # failure is diagnosable, and let the caller decide how to handle it.
+    logger.warning("blog_date_parse_failed", date_text=date_text)
+    return None
+
+
+def is_before_since_date(
+    published_at: datetime | None,
+    since_date: datetime | None,
+) -> bool:
+    """Decide whether a list entry is old enough to stop incremental pagination.
+
+    PY-MGR-03: list pages often expose only a *date* (midnight JST), while the
+    ``since_date`` cursor stored by consumers is derived from the detail page's
+    time-precision ``published_at``. A strict ``published_at < since_date``
+    compare then drops a same-day-but-newer blog forever (e.g. list date
+    2026/07/06 -> 00:00 JST < cursor 2026/07/06 21:05). To avoid that, compare
+    at *day* granularity: only report "before" when the entry's calendar day is
+    strictly earlier than the cursor's. Same-day entries are re-yielded and the
+    caller dedupes by id.
+
+    A ``None`` ``published_at`` (unparseable date, see PY-MGR-04) is never
+    treated as "before": we cannot know it is older, so we keep it rather than
+    silently truncating history.
+
+    Args:
+        published_at: The list entry's parsed publish datetime, or ``None``.
+        since_date: The incremental cursor, or ``None`` for a full fetch.
+
+    Returns:
+        ``True`` if pagination should early-return, ``False`` otherwise.
+    """
+    if since_date is None or published_at is None:
+        return False
+    return published_at.date() < since_date.date()
 
 
 # Pagination safety cap - prevents infinite loops if server behaves unexpectedly

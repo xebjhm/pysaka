@@ -358,9 +358,11 @@ class TestRefreshFailedError:
             with pytest.raises(RefreshFailedError, match="All token refresh attempts failed"):
                 await client.refresh_access_token(mock_session)
 
-    async def test_no_credentials_at_all_returns_false(self, mock_session):
-        """When no refresh_token, no cookies, no auth_dir exist at all,
-        we get False (early exit) not RefreshFailedError."""
+    async def test_no_credentials_at_all_raises_refresh_failed(self, mock_session):
+        """When no refresh_token, no cookies, no auth_dir exist at all, a token-only
+        client whose token expired has NO way to refresh — surface RefreshFailedError
+        so callers can prompt re-login, instead of returning False -> fetch_json None
+        -> silent empty results forever (PY-CORE-06)."""
         client = Client(
             group=Group.HINATAZAKA46,
             access_token="expired",
@@ -369,8 +371,8 @@ class TestRefreshFailedError:
             auth_dir=None,
         )
 
-        result = await client.refresh_access_token(mock_session)
-        assert result is False
+        with pytest.raises(RefreshFailedError, match="no refresh credentials"):
+            await client.refresh_access_token(mock_session)
 
     async def test_refresh_token_fails_cookies_fail_no_auth_dir_raises(self, mock_session):
         """When refresh_token and cookies both fail, and auth_dir is None,

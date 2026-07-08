@@ -16,6 +16,7 @@ from .config import (
     FULL_CONTENT_PAGE_DELAY,
     MAX_PAGES_SAFETY_CAP,
     PAGE_DELAY,
+    is_before_since_date,
     parse_jst_datetime,
 )
 
@@ -177,8 +178,13 @@ class NogizakaBlogScraper(BaseBlogScraper):
         page_size = 32
         seen_ids: set[str] = set()
         page_count = 0
+        # PY-MGR-05: apply the safety cap uniformly. It only clamps the loop when
+        # the caller's max_pages exceeds it (an "unbounded" full-history request);
+        # a bounded caller max_pages is honored exactly and is not a cap event.
+        effective_max = min(max_pages, MAX_PAGES_SAFETY_CAP)
+        capped = max_pages > MAX_PAGES_SAFETY_CAP
 
-        while page_count < max_pages:
+        while page_count < effective_max:
             url = f"{self.base_url}/s/n46/api/list/blog"
             params = {
                 "ct": member_id,
@@ -214,7 +220,11 @@ class NogizakaBlogScraper(BaseBlogScraper):
                     date_str = blog.get("date", "")
                     published_at = parse_jst_datetime(date_str)
 
-                    if since_date and published_at < since_date:
+                    # PY-MGR-03: compare at day granularity (Nogizaka dates are
+                    # time-precision, so this is equivalent for cross-day stops
+                    # but avoids skipping a same-day newer blog); None date
+                    # (PY-MGR-04) is never treated as "before".
+                    if is_before_since_date(published_at, since_date):
                         return
 
                     # Use main image as thumbnail - skip content image parsing
@@ -240,6 +250,17 @@ class NogizakaBlogScraper(BaseBlogScraper):
                 offset += page_size
                 page_count += 1
                 await asyncio.sleep(PAGE_DELAY)
+
+        # PY-MGR-05: warn when the safety cap (not an empty/short page) terminated
+        # a full-history request so silent truncation is visible.
+        if capped and page_count >= effective_max:
+            logger.warning(
+                "blog_pagination_safety_cap_hit",
+                member_id=member_id,
+                pages_fetched=page_count,
+                cap=MAX_PAGES_SAFETY_CAP,
+                method="get_blogs_metadata",
+            )
 
     async def get_blogs(
         self,
@@ -309,8 +330,14 @@ class NogizakaBlogScraper(BaseBlogScraper):
                     try:
                         entry = self._parse_blog_from_api(blog)
 
-                        # Check date filter
-                        if since_date and entry.published_at < since_date:
+                        # Check date filter with the time-precision API date. A
+                        # None date (unparseable, PY-MGR-04) is not treated as
+                        # "before" — yield it rather than truncating history.
+                        if (
+                            since_date is not None
+                            and entry.published_at is not None
+                            and entry.published_at < since_date
+                        ):
                             return
 
                         yield entry
@@ -327,6 +354,16 @@ class NogizakaBlogScraper(BaseBlogScraper):
                 offset += page_size
                 page_count += 1
                 await asyncio.sleep(FULL_CONTENT_PAGE_DELAY)
+
+        # PY-MGR-05: warn when the safety cap terminated a full-history fetch.
+        if page_count >= MAX_PAGES_SAFETY_CAP:
+            logger.warning(
+                "blog_pagination_safety_cap_hit",
+                member_id=member_id,
+                pages_fetched=page_count,
+                cap=MAX_PAGES_SAFETY_CAP,
+                method="get_blogs",
+            )
 
     async def get_blog_detail(self, blog_id: str, member_id: str | None = None) -> BlogEntry:
         """Fetch the full content of a specific blog post.
