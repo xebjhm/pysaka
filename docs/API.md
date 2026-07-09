@@ -5,21 +5,55 @@
 ### `BrowserAuth`
 Handles interactive login via Playwright.
 
-#### `login(group: Union[Group, str], headless: bool = False, user_data_dir: str = None, channel: str = None) -> Optional[dict]`
+#### `login(group: Union[Group, str], headless: bool = False, user_data_dir: str = None, channel: str = None) -> Optional[LoginCredentials]`
 - **group**: The target group (e.g., `Group.NOGIZAKA46` or `"nogizaka46"`).
-- **headless**: Run browser in background (default `False`).
-- **user_data_dir**: Path to persist browser profile.
-- **channel**: Browser channel (e.g., `'msedge'`, `'chrome'`).
-- **Returns**: Dictionary with `access_token`, `cookies`, `app_id`, `user_agent`.
+- **headless**: Run browser in background (default `False`). Interactive login
+  needs a visible window — a fresh cookie-less headless context has no way to
+  complete OAuth and times out. Use headless only for `refresh_token_headless`
+  with an existing persistent profile.
+- **user_data_dir**: Path to persist the browser profile. Required to keep a
+  reusable session for `refresh_token_headless`; a fresh non-persistent context
+  is launched when omitted.
+- **channel**: System browser channel (e.g., `'msedge'`, `'chrome'`).
+- **Returns**: A `LoginCredentials` dict with `access_token`, `refresh_token`
+  (`None` for web-only logins that never returned one), `cookies`, `app_id`,
+  `user_agent`; or `None` if login failed. `refresh_token` is the only path to
+  mobile-mode (`platform="android"`) token refresh.
+
+#### `refresh_token_headless(group: Group, auth_dir: Union[str, Path], auto_install: bool = True, channel: str = None) -> Optional[LoginCredentials]`
+Silently refresh an access token via a headless persistent context (no user
+interaction). Reuses the browser session stored in `auth_dir`.
+- **auth_dir**: Path to the persistent browser context directory (must already
+  exist with a logged-in session).
+- **auto_install**: If `True`, download Playwright's bundled Chromium when it is
+  missing. Ignored when a system `channel` is in effect.
+- **channel**: System browser channel to drive (e.g. `'chrome'`, `'msedge'`);
+  may also be supplied via the `PYSAKA_BROWSER_CHANNEL` environment variable.
+  When set, the refresh reuses the user's installed browser and never downloads
+  Chromium at runtime (that download pops a console window in a packaged GUI
+  app). Tries the requested channel, then Edge, then fails closed.
+- **Returns**: A `LoginCredentials` dict (with `refresh_token` set to `None`), or
+  `None` if the refresh failed/timed out.
 
 ## Client
 
 ### `Client`
 Main API client supporting all Sakamichi groups.
 
-#### `__init__(group: Group, access_token: str = None, refresh_token: str = None, cookies: dict = None, use_token_storage: bool = False)`
-- **group**: Target group (e.g., `Group.HINATAZAKA46`).
-- **use_token_storage**: If `True`, attempts to auto-load credentials from system keyring/file.
+#### `__init__(group: Union[Group, str] = Group.HINATAZAKA46, access_token: str = None, refresh_token: str = None, cookies: dict = None, app_id: str = None, user_agent: str = None, auth_dir: Union[str, Path] = None, use_token_storage: bool = False, platform: str = "web")`
+- **group**: Target group, enum or string (default `Group.HINATAZAKA46`).
+- **access_token** / **refresh_token** / **cookies**: Credentials from
+  `BrowserAuth.login`. `cookies` are required for the web-session refresh path.
+- **app_id**: `X-Talk-App-ID` header value (defaults to the group config).
+- **user_agent**: `User-Agent` header value (defaults to the platform profile).
+- **auth_dir**: Persistent browser-profile directory used by the Plan-C headless
+  refresh (`refresh_token_headless`) when cookie/refresh-token refresh fails.
+- **use_token_storage**: If `True`, attempts to auto-load credentials from the
+  system keyring (or opt-in file fallback).
+- **platform**: Request profile — `"web"` (default, browser-like) or `"android"`
+  (Flutter app: Dart UA, per-group mobile host, `x-talk-app-platform=android`).
+  Android mode refreshes via `refresh_token` only (never web cookies).
+- **Raises**: `ValueError` if an invalid group string is provided.
 
 #### `get_groups(session: aiohttp.ClientSession, include_inactive: bool = False) -> List[dict]`
 - **session**: Active aiohttp session.
@@ -30,11 +64,20 @@ Main API client supporting all Sakamichi groups.
 - **group_id**: Target group ID.
 - **Returns**: List of member objects.
 
-#### `get_messages(session, group_id: int, since_id: int = None, progress_callback = None) -> List[dict]`
+#### `get_messages(session, group_id: int, since_id: int = None, since_ts: str = None, max_id: int = None, progress_callback = None, clear_unread: bool = False) -> List[dict]`
 - **group_id**: Target group ID.
-- **since_id**: (Optional) Only fetch messages newer than this ID.
+- **since_ts**: (Primary cursor, since 0.3.0) ISO timestamp — fetch messages
+  published after this time. Prefer this for incremental sync.
+- **since_id**: (Deprecated) Message ID cursor. Ignored when `since_ts` is set;
+  when only `since_id` is given, the timestamp is discovered via a slower
+  fallback scan.
+- **max_id**: Accepted for compatibility; ignored by the API.
 - **progress_callback**: Async or sync function `(date_str, count)` called during pagination.
-- **Returns**: List of message objects (sorted ascending).
+- **clear_unread**: If `True`, the server clears the account's unread badge for
+  this group (the official app's chat-open signal). Defaults to `False` so a
+  background sync does **not** zero the user's unread count on the official
+  mobile app.
+- **Returns**: List of message objects (sorted by ID ascending).
 
 #### `download_file(session, url: str, filepath: Path, timestamp: str = None) -> bool`
 - **url**: Signed media URL.
@@ -101,6 +144,17 @@ Main API client supporting all Sakamichi groups.
 - **message_id**: The ID of the message to unfavorite.
 - **Returns**: `True` if successful, `False` otherwise.
 
+#### `mark_group_read(session, group_id: int) -> bool`
+- **group_id**: Target group ID.
+- Explicitly clears the room's unread count on the server (the official app's
+  room-open signal). Opt-in; background sync does not call this.
+- **Returns**: `True` if successful, `False` otherwise.
+
+#### `fetch_json(session, endpoint: str, params: dict = None) -> Optional[dict]`
+Low-level authenticated GET returning parsed JSON (used internally by the
+higher-level `get_*` methods). Handles token refresh and raises `ApiError` on
+non-recoverable HTTP errors. See the `ApiError` example below.
+
 #### `refresh_access_token(session) -> bool`
 - **session**: Active aiohttp session.
 - **Returns**: `True` if refresh succeeded, `False` if no credentials configured.
@@ -121,8 +175,12 @@ Manually save current session to storage if configured.
 
 ## Credentials
 
-### `get_token_manager() -> TokenManager`
-Get the singleton `TokenManager` instance. Avoids repeated keyring probe operations when accessed from multiple modules.
+### `get_token_manager(allow_plaintext_fallback: bool = False) -> TokenManager`
+Get the singleton `TokenManager` instance. Avoids repeated keyring probe
+operations when accessed from multiple modules. `allow_plaintext_fallback` is
+applied only when the singleton is first created (also honored via the
+`PYSAKA_ALLOW_PLAINTEXT_KEYRING` environment variable); on a host with no secure
+backend and no opt-in, the first call raises `NoSecureKeyringError`.
 
 ```python
 from pysaka.credentials import get_token_manager
@@ -138,25 +196,77 @@ High-level manager for syncing messages and media.
 
 #### `__init__(client: Client, output_dir: Path)`
 - **client**: Authenticated `Client` instance.
-- **output_dir**: Base directory for downloaded content.
+- **output_dir**: Base directory for downloaded content (already service-specific).
 
-#### `sync_messages(session, group_id: int, since_id: int = None) -> List[dict]`
-Sync messages for a group member.
+#### `sync_member(session, group: dict, member: dict, media_queue: list, progress_callback = None, prefetched_messages: list = None) -> int`
+Sync one member's messages and append their media downloads to `media_queue`.
+- **group** / **member**: Group and member object dicts (as returned by
+  `get_groups` / `get_members`).
+- **media_queue**: A caller-owned `list` that this method **appends** media
+  download descriptors to (dicts — see `process_media_queue`); it is drained
+  separately after syncing all members.
+- **prefetched_messages**: (Optional) A pre-fetched group timeline. When given,
+  the per-member API call is skipped and messages are filtered from this list.
+- **Returns**: The number of new messages processed for this member.
+- On a corrupt or count-short `messages.json`, `sync_member` re-fetches the
+  member's true full history from the API (bypassing `prefetched_messages`) and
+  merges add-only, so recovery never truncates the archive.
 
-#### `process_media_queue(session, media_queue: List[tuple]) -> dict[str, dict]`
-Download media files and extract dimensions.
-- **Returns**: Dictionary mapping `member_dir` to dimension updates for each message.
+#### `process_media_queue(session, queue: list, concurrency: int = 5, progress_callback = None) -> dict[Path, dict[int, dict]]`
+Download every media item in `queue` and extract media metadata.
+- **queue**: A list of media descriptor **dicts**, each with keys `url`, `path`
+  (`Path`), `timestamp`, `message_id`, `media_type`, and `member_dir` (`Path`).
+  (These are the dicts `sync_member` appended.)
+- **concurrency**: Deprecated and ignored — concurrency is governed by the
+  caller's session/pool wrapper.
+- **Returns**: A dict mapping each `member_dir` (`Path`) to
+  `{message_id: metadata}`, where `metadata` may contain `width`, `height`,
+  `media_duration`, and `is_muted`. Feed the per-member slice to
+  `update_message_metadata` to persist it.
 
-#### `update_message_dimensions(member_dir: Path, dimensions: dict)`
-Write extracted dimensions back to messages.json.
+#### `update_message_metadata(messages_file: Path, metadata: dict[int, dict])`
+Write extracted media metadata back into a member's `messages.json` (atomic write).
+- **messages_file**: Path to the member's `messages.json` (not the member dir).
+- **metadata**: `{message_id: {width?, height?, media_duration?, is_muted?}}`,
+  typically one member's slice of the `process_media_queue` result.
+
+#### `scan_member_media(member_dir: Path) -> dict`
+Offline scan of a member's `messages.json` for missing media (no network).
+- **Returns**: `{"checked": int, "missing": list[dict], "unresolved": list[dict],
+  "error": str | None}`. `missing` items are `{message_id, media_type, path,
+  timestamp}`; `unresolved` items (media-type messages with no recorded
+  `media_file`) are `{message_id, media_type, timestamp}`. `error` is `None` for
+  a readable manifest, else one of `"manifest_missing"` / `"manifest_unreadable"`
+  / `"manifest_invalid"` so an unsynced member is distinguishable from a fully
+  present one.
+
+#### `reconcile_member_media(session, member_dir: Path, missing: list, timeline_messages: list, progress_callback = None) -> dict`
+Backfill a member's missing media using fresh URLs from a re-fetched timeline,
+then re-check disk truth and persist any new dimension metadata.
+- **missing**: The `missing` list from `scan_member_media`.
+- **timeline_messages**: A freshly fetched member/group timeline supplying new
+  signed URLs keyed by `message_id`.
+- **Returns**: `{"repaired": int, "failed": int, "still_missing": int}`.
 
 ## Credentials
 
 ### `TokenManager`
 Secure credential storage using system keyring (Windows Credential Manager, macOS Keychain, Linux Secret Service).
 
-#### `__init__()`
-Initialize the token manager. Uses keyring for secure storage.
+#### `__init__(allow_plaintext_fallback: bool = False)`
+Initialize the token manager, backed by a secure OS keyring.
+- **allow_plaintext_fallback**: If `True` (or the
+  `PYSAKA_ALLOW_PLAINTEXT_KEYRING` environment variable is set to a truthy
+  value), fall back to the insecure `keyrings.alt` plaintext store when no secure
+  backend is available. This only obfuscates data (base64+zlib), it is **not**
+  encryption, so it is off by default.
+- **Raises**: `NoSecureKeyringError` when no secure backend exists and the
+  plaintext fallback has not been opted in — e.g. on headless/CI/container hosts.
+  Callers on such systems must opt in explicitly or handle this exception.
+
+Each credential is isolated under its own keyring service (`pysaka:<group>`);
+credentials written under the pre-0.4.2 shared-service layout are transparently
+migrated on first read.
 
 #### `save_session(group: str, access_token: str, refresh_token: str = None, cookies: dict = None)`
 - **group**: Group identifier (e.g., `"hinatazaka46"`).
@@ -204,6 +314,13 @@ Extract dimensions from an image file using Pillow.
 ### `get_video_dimensions(filepath: Path) -> tuple[Optional[int], Optional[int]]`
 Extract dimensions from a video file using pymediainfo.
 
+### `get_audio_metadata(filepath: Path, media_type: str) -> dict[str, float | bool | None]`
+Extract audio metadata from a video/voice file using pymediainfo.
+- **media_type**: `'video'` or `'voice'` (any other type returns the empty result).
+- **Returns**: `{"duration": <seconds | None>, "is_muted": <bool | None>}`.
+  `duration` is the General-track duration converted from ms to seconds;
+  `is_muted` is set only for `'video'` (`True` when the file has no audio track).
+
 ## Blog Scrapers
 
 Public blog scrapers for official member blogs. No authentication required.
@@ -226,7 +343,21 @@ All scrapers implement:
 ##### `get_members() -> dict[str, str]`
 - **Returns**: Dictionary mapping `member_id` to `member_name` for active members.
 
+##### `get_members_with_thumbnails() -> list[MemberInfo]`
+- **Returns**: List of `MemberInfo` (id, name, thumbnail_url) for active members.
+
+##### `get_blogs_metadata(member_id: str, since_date: datetime = None, max_pages: int = 3, member_name: str = None) -> AsyncIterator[BlogEntry]`
+Fast metadata-only listing (parses list pages only, **no** detail fetches).
+- **member_id**: The member's unique identifier.
+- **since_date**: (Optional) Only yield blogs published after this date.
+- **max_pages**: Maximum list pages to fetch per member (default 3).
+- **member_name**: (Optional) Filter to this member (some sites list "featured"
+  blogs from others).
+- **Yields**: `BlogEntry` objects with metadata only (`content` is empty).
+
 ##### `get_blogs(member_id: str, since_date: datetime = None) -> AsyncIterator[BlogEntry]`
+Full-content listing (**slow** — fetches detail per blog; for indexing use
+`get_blogs_metadata`).
 - **member_id**: The member's unique identifier.
 - **since_date**: (Optional) Stop when reaching blogs before this date.
 - **Yields**: `BlogEntry` objects for each blog post.
@@ -235,6 +366,12 @@ All scrapers implement:
 - **blog_id**: The unique identifier of the blog post.
 - **member_id**: (Optional) The member's identifier, used by some scrapers for URL construction.
 - **Returns**: A `BlogEntry` with full content.
+- **Raises**: `BlogGoneError` if the post was permanently removed (404/410);
+  `ValueError` if not found.
+
+##### `get_blog_detail_metadata(blog_id: str) -> tuple[str | None, datetime | None, str | None]`
+- Fetch authoritative `(thumbnail_url, published_at, title)` from a blog's detail
+  page — used when list pages have incomplete data.
 
 ### `BlogEntry`
 Dataclass representing a blog post.
@@ -333,6 +470,24 @@ except RefreshFailedError:
     print("Refresh failed unexpectedly. Please log in again.")
 ```
 
+### `NoSecureKeyringError`
+Subclass of `SakaError`. Raised by `TokenManager` / `get_token_manager` /
+`KeyringStore` when no secure OS keyring backend is available and the insecure
+plaintext fallback has not been opted in (headless/CI/container hosts, or a
+locked Secret Service). Opt in via `allow_plaintext_fallback=True` or the
+`PYSAKA_ALLOW_PLAINTEXT_KEYRING` environment variable, or install the
+`pysaka[headless]` extra and handle the exception.
+
+```python
+from pysaka.credentials import get_token_manager, NoSecureKeyringError
+
+try:
+    tm = get_token_manager()
+except NoSecureKeyringError:
+    # No secure keyring (e.g. server/container). Opt in explicitly if acceptable:
+    tm = get_token_manager(allow_plaintext_fallback=True)
+```
+
 ## Enums
 
 ### `Group`
@@ -352,3 +507,11 @@ from pysaka.client import GROUP_CONFIG, Group
 config = GROUP_CONFIG[Group.HINATAZAKA46]
 print(config["display_name"])  # "日向坂46"
 ```
+
+### Environment variables
+
+| Variable | Effect |
+|----------|--------|
+| `HAKO_ENV` | `development` (default): pretty console logs. `production`: JSON logs with secret redaction. |
+| `PYSAKA_ALLOW_PLAINTEXT_KEYRING` | Truthy (`1`/`true`/`yes`/`on`) opts in to the insecure `keyrings.alt` plaintext fallback when no secure keyring backend exists (see `NoSecureKeyringError`). Off by default. Requires the `pysaka[headless]` extra. |
+| `PYSAKA_BROWSER_CHANNEL` | System browser channel (e.g. `chrome`, `msedge`) for `refresh_token_headless`. When set, the silent refresh drives the installed browser and never downloads Chromium at runtime. |

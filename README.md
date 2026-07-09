@@ -39,20 +39,31 @@ pysaka provides a robust, type-hinted, and async interface to interact with the 
 - 🚀 **Async/Await**: Built on `aiohttp` for high-performance concurrent requests.
 - 📦 **Multi-Group**: Supports Nogizaka46, Sakurazaka46, Hinatazaka46, and Yodel out of the box.
 - 📝 **Blog Scraper**: Backup official blogs (HTML + images) for all three groups.
-- 🛠️ **Type Hinted**: 100% type coverage for better IDE support.
+- 🛠️ **Type Hinted**: Ships a PEP 561 `py.typed` marker so downstream `mypy`/`pyright` see the annotations. (A few internal modules — `blog.*`, `client`, `auth`, `logging` — still carry mypy overrides; see `pyproject.toml`.)
 
 ## Configuration
 
-pysaka uses `structlog` for observability. You can control the logging output via environment variables:
+pysaka uses `structlog` for observability and reads a small set of environment
+variables:
 
-- `HAKO_ENV=development` (default): Pretty-printed, colored console logs.
-- `HAKO_ENV=production`: Structured JSON logs with automatic secret redaction.
+| Variable | Effect |
+|----------|--------|
+| `HAKO_ENV` | `development` (default): pretty-printed, colored console logs. `production`: structured JSON logs with automatic secret redaction. |
+| `PYSAKA_ALLOW_PLAINTEXT_KEYRING` | Truthy (`1`/`true`/`yes`/`on`) opts in to the insecure `keyrings.alt` plaintext fallback when no secure OS keyring backend is available (headless/CI/container). Off by default — without it, `TokenManager` raises `NoSecureKeyringError` on such hosts. Requires the `[headless]` extra. |
+| `PYSAKA_BROWSER_CHANNEL` | System browser channel (e.g. `chrome`, `msedge`) used by `BrowserAuth.refresh_token_headless`. When set, the silent token refresh drives the installed browser and never downloads Chromium at runtime (avoids a console window in packaged GUI apps). |
 
 ## Installation
 
 Recommended install via `uv`:
 ```bash
 uv add pysaka
+```
+
+On a headless/server/CI host with no secure keyring, add the optional extra to
+enable the opt-in plaintext credential fallback:
+```bash
+uv add "pysaka[headless]"
+# then set PYSAKA_ALLOW_PLAINTEXT_KEYRING=1 to actually allow it
 ```
 
 For development:

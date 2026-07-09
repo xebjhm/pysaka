@@ -12,7 +12,10 @@ async def main():
     print("Logging in...")
     creds = await BrowserAuth.login(
         group=Group.HINATAZAKA46,
-        headless=False,  # Set to True for headless mode
+        # Interactive login must stay visible (headless=False): the user signs in
+        # by hand. headless=True only works for refreshing an existing session via
+        # BrowserAuth.refresh_token_headless with a persistent user_data_dir.
+        headless=False,
     )
 
     if creds:

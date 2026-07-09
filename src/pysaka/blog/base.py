@@ -41,7 +41,10 @@ class BlogEntry:
         id: Unique identifier for the blog post.
         title: Title of the blog post.
         content: HTML content of the blog post.
-        published_at: Publication timestamp.
+        published_at: Publication timestamp, or ``None`` when the source date
+            could not be parsed (PY-MGR-04: scrapers never fabricate ``now()``
+            for archival data — an unparseable date surfaces as ``None`` so
+            consumers can decide rather than silently storing a wrong date).
         url: Full URL to the original blog post.
         images: List of image URLs found in the content.
         member_id: ID of the member who wrote the post.
@@ -51,7 +54,7 @@ class BlogEntry:
     id: str
     title: str
     content: str
-    published_at: datetime
+    published_at: datetime | None
     url: str
     images: list[str] = field(default_factory=list)
     member_id: str = ""
