@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OnnxEmbedder` and a numpy-backed `NumpyVectorStore`. Not imported by
   `pysaka.knowledge` itself, so the default install stays lean.
 
+### Fixed
+- `pysaka.knowledge.validate()` no longer deletes correct non-Japanese answers:
+  the same-language containment gate now triggers only on sentences containing
+  kana (hiragana/katakana), not on any CJK character. Previously a synthesized
+  Chinese (han-only) sentence with a valid citation scored ~0 trigram
+  containment against its Japanese source and was silently dropped, flipping
+  whole answers to `no_evidence` even after retrieval succeeded. Han-only
+  sentences now pass through on the citation-resolution gate alone (same as
+  English); kana-bearing sentences are still containment-checked.
+
 ## [0.4.3] - 2026-07-08
 
 ### Added

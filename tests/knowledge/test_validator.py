@@ -8,12 +8,14 @@ verify against; without one, a literal cross-language snippet-match would
 withhold every English/Chinese answer (EN prose vs JP doc ~= 0 trigram overlap).
 Instead: (1) every citation must resolve to a doc_id the agent actually surfaced
 AND that still exists in the store: <=> "no fabricated/stale citations"; (2) for
-sentences containing CJK text, the sentence's own text must be trigram-contained
-(>=90%) in at least one of its cited docs' text: <=> "the claim's content is
-actually present in the source" (same-language grounding, since the LLM was
-instructed to quote JP verbatim). Cross-lingual sentences (no CJK) skip step 2
-as best-effort, since we cannot verify translated/paraphrased claims without a
-model-supplied quote.
+sentences containing KANA (hiragana/katakana -- Japanese-only script), the
+sentence's own text must be trigram-contained in at least one of its cited
+docs' text: <=> "the claim's content is actually present in the source"
+(same-language grounding). Sentences with no kana -- English prose AND
+synthesized Chinese (han-only) prose alike -- skip step 2 as best-effort, since
+we cannot verify translated/paraphrased claims without a model-supplied quote;
+kanji alone must not trigger the gate because the shared CJK ideograph range
+cannot distinguish a verbatim Japanese quote from synthesized Chinese.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from datetime import datetime, timezone
 from pysaka.knowledge.cleaner import SUBSCRIBER_SENTINEL, normalize_text
 from pysaka.knowledge.models import Answer, AnswerSentence, Document, SourceRef
 from pysaka.knowledge.store import DocumentStore
-from pysaka.knowledge.validator import _containment_ratio, _has_cjk, _trigrams, validate
+from pysaka.knowledge.validator import _containment_ratio, _has_kana, _trigrams, validate
 
 _SERVICE = "hinatazaka46"
 _NOW = datetime(2026, 7, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -88,19 +90,29 @@ def test_trigrams_empty_text_is_empty_set():
     assert _trigrams("") == set()
 
 
-# --- _has_cjk -----------------------------------------------------------
+# --- _has_kana ----------------------------------------------------------
 
 
-def test_has_cjk_true_for_kanji():
-    assert _has_cjk("今日は焼肉を食べました") is True
+def test_has_kana_true_for_hiragana():
+    assert _has_kana("とても") is True
 
 
-def test_has_cjk_true_for_kana_only():
-    assert _has_cjk("とても") is True
+def test_has_kana_true_for_katakana():
+    assert _has_kana("ラーメン") is True
 
 
-def test_has_cjk_false_for_ascii_prose():
-    assert _has_cjk("She ate yakiniku today.") is False
+def test_has_kana_true_for_mixed_kanji_and_kana():
+    assert _has_kana("今日は焼肉を食べました") is True
+
+
+def test_has_kana_false_for_han_only_chinese():
+    # Kanji/hanzi alone must NOT count as kana: a han-only sentence may be
+    # synthesized Chinese, which the containment gate cannot verify.
+    assert _has_kana("她說她吃了燒肉") is False
+
+
+def test_has_kana_false_for_ascii_prose():
+    assert _has_kana("She ate yakiniku today.") is False
 
 
 # --- validate: fabricated / unsurfaced / missing doc_id ----------------------
@@ -144,10 +156,10 @@ def test_validate_drops_only_the_bad_citation_when_a_valid_one_remains():
     assert result.no_evidence is False
 
 
-# --- validate: same-language (CJK) grounding gate ----------------------
+# --- validate: same-language (kana) grounding gate ----------------------
 
 
-def test_validate_keeps_cjk_sentence_whose_content_is_in_the_cited_doc():
+def test_validate_keeps_kana_sentence_whose_content_is_in_the_cited_doc():
     store = _store(_JP_DOC)
     answer = Answer(
         sentences=[AnswerSentence(text="今日は焼肉を食べました", citation_ids=[_JP_DOC.doc_id])], citations=[]
@@ -168,7 +180,7 @@ def test_validate_keeps_cjk_sentence_whose_content_is_in_the_cited_doc():
     assert citation.timestamp == _JP_DOC.timestamp
 
 
-def test_validate_drops_cjk_sentence_whose_content_is_not_in_the_cited_doc():
+def test_validate_drops_kana_sentence_whose_content_is_not_in_the_cited_doc():
     store = _store(_JP_DOC)
     answer = Answer(
         sentences=[AnswerSentence(text="明日はラーメンを作ります。とても楽しみです。", citation_ids=[_JP_DOC.doc_id])],
@@ -184,7 +196,7 @@ def test_validate_drops_cjk_sentence_whose_content_is_not_in_the_cited_doc():
     assert result.no_evidence is True
 
 
-def test_validate_cjk_gate_checks_best_match_across_multiple_citations():
+def test_validate_kana_gate_checks_best_match_across_multiple_citations():
     store = _store(_JP_DOC, _JP_DOC_2)
     # Exact phrase lives in _JP_DOC_2, not _JP_DOC -- the "best" of the two must win.
     answer = Answer(
@@ -203,7 +215,87 @@ def test_validate_cjk_gate_checks_best_match_across_multiple_citations():
     assert result.no_evidence is False
 
 
-# --- validate: cross-lingual pass-through (no CJK gate) ----------------------
+# --- validate: kana gate scope (Chinese/han-only must NOT be gated) ----------
+
+
+def test_validate_keeps_han_only_chinese_synthesized_sentence_with_valid_citation():
+    """The red repro for the kana-gate fix: a correct Traditional-Chinese
+    SYNTHESIZED sentence (han-only, zero kana) citing a valid surfaced doc is
+    as unverifiable against Japanese source text as English prose -- it must
+    survive gate 1 alone, not be trigram-gated to death (~0.0 containment)."""
+    store = _store(_JP_DOC)
+    answer = Answer(
+        sentences=[AnswerSentence(text="她說她吃了燒肉,覺得非常好吃。", citation_ids=[_JP_DOC.doc_id])],
+        citations=[],
+    )
+
+    result = validate(answer, surfaced_doc_ids={_JP_DOC.doc_id}, store=store)
+
+    assert len(result.sentences) == 1
+    assert result.sentences[0].text == "她說她吃了燒肉,覺得非常好吃。"
+    assert result.no_evidence is False
+    assert result.citations[0].doc_id == _JP_DOC.doc_id
+
+
+def test_validate_mixed_zh_prose_with_genuine_jp_quote_passes_containment():
+    """A mixed sentence (Chinese prose + short Japanese quoted span) contains
+    kana, so it IS containment-checked -- and a genuine quote from the cited
+    doc clears the lenient default threshold."""
+    store = _store(_JP_DOC)
+    answer = Answer(
+        sentences=[
+            AnswerSentence(
+                text="她在部落格中寫道「今日は焼肉を食べました」,看起來很開心。",
+                citation_ids=[_JP_DOC.doc_id],
+            )
+        ],
+        citations=[],
+    )
+
+    result = validate(answer, surfaced_doc_ids={_JP_DOC.doc_id}, store=store)
+
+    assert len(result.sentences) == 1
+    assert result.no_evidence is False
+
+
+def test_validate_mixed_zh_prose_with_fabricated_jp_quote_is_dropped():
+    """Kana presence triggers the containment check even inside Chinese prose:
+    a fabricated Japanese quoted span (not in the cited doc) is dropped."""
+    store = _store(_JP_DOC)
+    answer = Answer(
+        sentences=[
+            AnswerSentence(
+                text="她在部落格中寫道「カレーを作りました」,看起來很開心。",
+                citation_ids=[_JP_DOC.doc_id],
+            )
+        ],
+        citations=[],
+    )
+
+    result = validate(answer, surfaced_doc_ids={_JP_DOC.doc_id}, store=store)
+
+    assert result.sentences == []
+    assert result.no_evidence is True
+
+
+def test_validate_ungrounded_kana_answer_still_flips_to_no_evidence():
+    """Genuinely ungrounded kana answers keep the old behavior: every sentence
+    fails the containment gate at the DEFAULT threshold -> no_evidence."""
+    store = _store(_JP_DOC)
+    answer = Answer(
+        sentences=[
+            AnswerSentence(text="カレーを作って公園を散歩しました", citation_ids=[_JP_DOC.doc_id]),
+            AnswerSentence(text="ピアノの練習をがんばりました", citation_ids=[_JP_DOC.doc_id]),
+        ],
+        citations=[],
+    )
+
+    result = validate(answer, surfaced_doc_ids={_JP_DOC.doc_id}, store=store)
+
+    assert result == Answer(sentences=[], citations=[], no_evidence=True)
+
+
+# --- validate: cross-lingual pass-through (no kana gate) ----------------------
 
 
 def test_validate_keeps_english_sentence_citing_a_valid_surfaced_jp_doc():

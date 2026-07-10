@@ -13,15 +13,20 @@ such answer, which defeats the point of the validator. Instead this module:
 1. **Surfaced-citation gate** (language-agnostic): a citation only counts if its
    `doc_id` was actually surfaced to the agent this turn (`surfaced_doc_ids`)
    *and* still resolves in the `DocumentStore` -- this alone rules out
-   fabricated and stale doc_ids regardless of language.
-2. **Same-language containment gate** (best-effort, CJK-only): when the
-   sentence itself contains CJK text, the model was instructed to quote
-   Japanese verbatim (see `agent.SYSTEM_PROMPT`), so the sentence's own text
-   is checked for character-trigram containment (>= `threshold`) in at least
-   one cited doc's text. A CJK sentence failing this is very likely a
-   paraphrase or hallucination and is dropped. A sentence with no CJK (e.g. an
-   English summary of Japanese evidence) cannot be verified this way -- it
-   skips this gate and relies solely on gate 1.
+   fabricated and stale doc_ids regardless of language. This is the HARD
+   grounding guarantee and applies to every sentence.
+2. **Same-language containment gate** (best-effort, kana-only): when the
+   sentence contains KANA (hiragana/katakana), it is at least partly Japanese
+   -- the corpus language -- so its own text is checked for character-trigram
+   containment (>= `threshold`) in at least one cited doc's text. A kana
+   sentence failing this is very likely a mischaracterization or hallucination
+   and is dropped. A sentence with NO kana -- English prose, but equally a
+   *synthesized Chinese (han-only) sentence* -- cannot be verified this way
+   (cross-language trigram overlap is ~0, so gating it would delete every
+   correct Chinese answer); it skips this gate and relies solely on gate 1.
+   Kanji alone must NOT trigger the gate: the shared CJK ideograph range
+   cannot distinguish a verbatim Japanese quote from synthesized Chinese
+   prose, but kana is Japanese-only.
 """
 
 from __future__ import annotations
@@ -30,9 +35,9 @@ from .cleaner import normalize_text, strip_sentinel
 from .models import Answer, AnswerSentence, Citation, Document
 from .store import DocumentStore
 
-_CJK_RANGES = (
-    (0x4E00, 0x9FFF),  # CJK Unified Ideographs
-    (0x3040, 0x30FF),  # Hiragana + Katakana
+_KANA_RANGES = (
+    (0x3040, 0x309F),  # Hiragana
+    (0x30A0, 0x30FF),  # Katakana
 )
 
 
@@ -54,9 +59,19 @@ def _containment_ratio(a: str, b: str) -> float:
     return len(trigrams_a & _trigrams(b)) / len(trigrams_a)
 
 
-def _has_cjk(s: str) -> bool:
-    """True if `s` contains any CJK ideograph or kana character."""
-    return any(any(lo <= ord(ch) <= hi for lo, hi in _CJK_RANGES) for ch in s)
+def _has_kana(s: str) -> bool:
+    """True if `s` contains any hiragana or katakana character.
+
+    Kana is the trigger for the same-language containment gate: a kana-bearing
+    sentence is (at least partly) Japanese and can be trigram-checked against
+    the cited Japanese docs. A han-only sentence may be synthesized Chinese --
+    as unverifiable against a Japanese source as English prose -- so it must
+    NOT trigger the gate. A MIXED sentence (e.g. Chinese prose embedding a
+    short Japanese quoted span such as 「デート」) still triggers the check on
+    the whole sentence text; scoping the check to just the quoted 「」 span is
+    future work.
+    """
+    return any(any(lo <= ord(ch) <= hi for lo, hi in _KANA_RANGES) for ch in s)
 
 
 def validate(answer: Answer, surfaced_doc_ids: set[str], store: DocumentStore, threshold: float = 0.15) -> Answer:
@@ -65,8 +80,9 @@ def validate(answer: Answer, surfaced_doc_ids: set[str], store: DocumentStore, t
     For each sentence: citations are pruned to those actually surfaced this turn
     and still present in `store` (gate 1 -- the HARD grounding guarantee: no
     fabricated/unsurfaced citation can reach the user). If nothing survives, the
-    sentence is dropped. If the sentence text contains CJK, its best trigram-
-    containment ratio against its (now-valid) cited docs must reach `threshold`
+    sentence is dropped. If the sentence text contains kana (see `_has_kana` --
+    kanji alone deliberately does NOT count), its best trigram-containment
+    ratio against its (now-valid) cited docs must reach `threshold`
     (gate 2 -- a LENIENT mischaracterization guard). NOTE: the agent emits
     *synthesized/summarized* prose, not verbatim quotes, so a summary is never
     fully trigram-contained in one source; the default `threshold` is therefore
@@ -91,7 +107,7 @@ def validate(answer: Answer, surfaced_doc_ids: set[str], store: DocumentStore, t
         if not valid_docs:
             continue
 
-        if _has_cjk(sentence.text):
+        if _has_kana(sentence.text):
             best = max(_containment_ratio(sentence.text, doc.text) for _cid, doc in valid_docs)
             if best < threshold:
                 continue
