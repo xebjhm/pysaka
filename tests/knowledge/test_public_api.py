@@ -32,6 +32,7 @@ PUBLIC_NAMES = [
     "normalize_text",
     "strip_sentinel",
     "SUBSCRIBER_SENTINEL",
+    "INGEST_NORMALIZE_VERSION",
     "ingest_blog",
     "ingest_messages",
     "chunk_documents",

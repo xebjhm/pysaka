@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OnnxEmbedder` and a numpy-backed `NumpyVectorStore`. Not imported by
   `pysaka.knowledge` itself, so the default install stays lean.
 
+- `pysaka.knowledge.INGEST_NORMALIZE_VERSION` (int): version of the
+  `normalize_text` pipeline, for apps to fold into their index fingerprint so
+  a normalization change triggers a reindex instead of serving stale text.
+
 ### Changed
 - `KnowledgeAgent`'s system prompt now tells the model the corpus is Japanese
   (search `query` values are written in Japanese, with kanji/kana/synonym
@@ -37,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returning `no_evidence` only if that turn produces nothing.
 
 ### Fixed
+- `normalize_text` now masks the full-width subscriber-name placeholder
+  `％％％` (present in real synced data) as well as ASCII `%%%`. Previously
+  only the ASCII form was masked before NFKC, so `％％％` folded into a
+  literal `%%%` in indexed text and leaked into snippets and answers.
+  Reindex ingested corpora to pick this up (see `INGEST_NORMALIZE_VERSION`).
 - `pysaka.knowledge.validate()` no longer deletes correct non-Japanese answers:
   the same-language containment gate now triggers only on sentences containing
   kana (hiragana/katakana), not on any CJK character. Previously a synthesized
