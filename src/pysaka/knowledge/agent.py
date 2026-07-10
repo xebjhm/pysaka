@@ -18,6 +18,7 @@ import json
 from datetime import datetime, timezone, tzinfo
 from typing import Callable
 
+from .cleaner import NICKNAME_TOKEN
 from .llm import LLMClient, ToolCall
 from .models import Answer, AnswerSentence, Scope
 from .tools import TOOL_SCHEMAS, ToolRunner
@@ -168,7 +169,7 @@ class KnowledgeAgent:
         arguments won't reliably produce a usable answer either.
         """
         messages: list[dict] = [{"role": "system", "content": self._system_prompt()}]
-        messages.extend(history or [])
+        messages.extend(_retokenize_history(history or [], self._tools.subscriber_name))
         messages.append({"role": "user", "content": question})
 
         surfaced: set[str] = set()
@@ -286,11 +287,50 @@ class KnowledgeAgent:
         `should_abort` is passed straight through to `ask()` -- see there for the
         cooperative-cancel seam it implements. If `ask()` raises `AskCancelled`,
         it propagates here uncaught (there is no partial answer to validate).
+
+        Subscriber-name handling (user-facing half of the privacy design; the
+        LLM-facing half lives in `ToolRunner`): the runner's `subscriber_name`
+        is threaded into `validate()` so `Citation.quoted_snippet` renders the
+        real name, and any `NICKNAME_TOKEN` the model reproduced in sentence
+        text is substituted with the real name AFTER validation -- containment
+        comparisons therefore always run in token/sentinel space, never
+        against the real name.
         """
         from .validator import validate
 
+        subscriber_name = self._tools.subscriber_name
         raw, surfaced = await self.ask(question, scope, history, should_abort=should_abort)
-        return validate(raw, surfaced, self._tools.store)
+        validated = validate(raw, surfaced, self._tools.store, subscriber_name=subscriber_name)
+        if not validated.sentences:
+            return validated
+        return Answer(
+            sentences=[
+                AnswerSentence(text=s.text.replace(NICKNAME_TOKEN, subscriber_name), citation_ids=s.citation_ids)
+                for s in validated.sentences
+            ],
+            citations=validated.citations,
+            no_evidence=validated.no_evidence,
+        )
+
+
+def _retokenize_history(history: list[dict], subscriber_name: str) -> list[dict]:
+    """Replace the real subscriber name in prior-turn contents with `NICKNAME_TOKEN`.
+
+    Prior answers shown to the user carry the REAL subscriber name (substituted
+    by `KnowledgeAgent.answer`); feeding them back verbatim as history would
+    leak that name to the LLM. Only applied for a non-default name of length
+    >= 2 -- replacing the default ("you") or a single character would mangle
+    ordinary prose. Never mutates the caller's message dicts.
+    """
+    if subscriber_name == "you" or len(subscriber_name) < 2:
+        return list(history)
+    retokenized: list[dict] = []
+    for message in history:
+        content = message.get("content")
+        if isinstance(content, str) and subscriber_name in content:
+            message = {**message, "content": content.replace(subscriber_name, NICKNAME_TOKEN)}
+        retokenized.append(message)
+    return retokenized
 
 
 def _surfaced_doc_ids(result: dict) -> set[str]:

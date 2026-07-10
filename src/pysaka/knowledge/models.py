@@ -83,7 +83,7 @@ class Hit:
     source_ref: SourceRef
     author: str  # canonical author name
     timestamp: datetime
-    snippet: str
+    snippet: str  # raw chunk/doc text; may carry SUBSCRIBER_SENTINEL (unmasked only at output boundaries)
     score: float
 
 
@@ -91,7 +91,7 @@ class Hit:
 class Citation:
     doc_id: str
     source_ref: SourceRef
-    quoted_snippet: str  # verbatim JP substring of the cited doc's cleaned text
+    quoted_snippet: str  # verbatim JP substring of the cited doc's cleaned text; sentinel -> subscriber name
     member: str
     timestamp: datetime
 

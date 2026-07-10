@@ -42,3 +42,11 @@ def test_normalize_is_nfkc_and_width_folded():
 
 def test_strip_sentinel_renders_you():
     assert strip_sentinel(SUBSCRIBER_SENTINEL + "元気？") == "you元気？"
+
+
+def test_nickname_token_constant_value():
+    # LLM-facing boundaries unmask the sentinel to this literal token so the
+    # real subscriber name is never sent to a cloud LLM.
+    from pysaka.knowledge.cleaner import NICKNAME_TOKEN
+
+    assert NICKNAME_TOKEN == "{{NICKNAME}}"

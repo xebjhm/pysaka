@@ -31,7 +31,7 @@ such answer, which defeats the point of the validator. Instead this module:
 
 from __future__ import annotations
 
-from .cleaner import normalize_text, strip_sentinel
+from .cleaner import NICKNAME_TOKEN, SUBSCRIBER_SENTINEL, normalize_text, strip_sentinel
 from .models import Answer, AnswerSentence, Citation, Document
 from .store import DocumentStore
 
@@ -74,7 +74,14 @@ def _has_kana(s: str) -> bool:
     return any(any(lo <= ord(ch) <= hi for lo, hi in _KANA_RANGES) for ch in s)
 
 
-def validate(answer: Answer, surfaced_doc_ids: set[str], store: DocumentStore, threshold: float = 0.15) -> Answer:
+def validate(
+    answer: Answer,
+    surfaced_doc_ids: set[str],
+    store: DocumentStore,
+    threshold: float = 0.15,
+    *,
+    subscriber_name: str = "you",
+) -> Answer:
     """Drop ungrounded sentences/citations from `answer`; see module docstring for the rules.
 
     For each sentence: citations are pruned to those actually surfaced this turn
@@ -91,6 +98,14 @@ def validate(answer: Answer, surfaced_doc_ids: set[str], store: DocumentStore, t
     quotes (a v1.1 change). Surviving sentences keep only their valid citation
     ids; a deduped, doc_id-sorted `Citation` list is built from them. If no
     sentence survives, returns `Answer(sentences=[], citations=[], no_evidence=True)`.
+
+    `subscriber_name` is the real subscriber display name rendered into
+    `Citation.quoted_snippet` (a USER-facing boundary) in place of the
+    subscriber sentinel. Sentence TEXTS are left untouched: the LLM writes
+    `NICKNAME_TOKEN` where evidence carried the sentinel, and the containment
+    comparison maps that token back to the sentinel so it is checked in
+    token/sentinel space -- the real name is substituted into sentences only
+    AFTER validation, by `KnowledgeAgent.answer`.
     """
     kept_sentences: list[AnswerSentence] = []
     citations_by_doc_id: dict[str, Citation] = {}
@@ -108,7 +123,10 @@ def validate(answer: Answer, surfaced_doc_ids: set[str], store: DocumentStore, t
             continue
 
         if _has_kana(sentence.text):
-            best = max(_containment_ratio(sentence.text, doc.text) for _cid, doc in valid_docs)
+            # Compare in token/sentinel space: the LLM saw (and reproduces) the
+            # NICKNAME_TOKEN where the stored doc text carries the sentinel.
+            comparable = sentence.text.replace(NICKNAME_TOKEN, SUBSCRIBER_SENTINEL)
+            best = max(_containment_ratio(comparable, doc.text) for _cid, doc in valid_docs)
             if best < threshold:
                 continue
 
@@ -120,9 +138,9 @@ def validate(answer: Answer, surfaced_doc_ids: set[str], store: DocumentStore, t
             citations_by_doc_id[cid] = Citation(
                 doc_id=cid,
                 source_ref=doc.source_ref,
-                # un-mask the `%%%` subscriber sentinel: `quoted_snippet` is user/LLM-facing
-                # output; the sentinel stays in `doc.text` (the stored/indexed copy) untouched.
-                quoted_snippet=strip_sentinel(doc.text[:240]),
+                # USER-facing boundary: un-mask the subscriber sentinel to the REAL subscriber
+                # name; the sentinel stays in `doc.text` (the stored/indexed copy) untouched.
+                quoted_snippet=strip_sentinel(doc.text[:240], subscriber_name),
                 member=doc.author_id,
                 timestamp=doc.timestamp,
             )

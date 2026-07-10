@@ -363,6 +363,47 @@ def test_validate_dedupes_citations_by_doc_id_and_sorts_them():
 # --- validate: quoted_snippet un-masks the `%%%` subscriber sentinel --------
 
 
+def test_validate_quoted_snippet_substitutes_real_subscriber_name():
+    """USER-facing boundary: `Citation.quoted_snippet` renders the REAL
+    subscriber name passed via `subscriber_name`, not the sentinel and not the
+    LLM-facing `{{NICKNAME}}` token."""
+    sentinel_doc = _doc("blog:hinatazaka46:5", normalize_text("%%%さん、こんにちは"))
+    store = _store(sentinel_doc)
+    answer = Answer(
+        sentences=[AnswerSentence(text="A greeting was posted.", citation_ids=[sentinel_doc.doc_id])], citations=[]
+    )
+
+    result = validate(answer, surfaced_doc_ids={sentinel_doc.doc_id}, store=store, subscriber_name="浩(ハオ)@台湾")
+
+    assert "浩(ハオ)@台湾" in result.citations[0].quoted_snippet
+    assert SUBSCRIBER_SENTINEL not in result.citations[0].quoted_snippet
+    assert "{{NICKNAME}}" not in result.citations[0].quoted_snippet
+
+
+def test_validate_kana_sentence_with_nickname_token_passes_strict_containment():
+    """Regression for the token/sentinel comparison space: a kana sentence
+    quoting a sentinel-bearing passage arrives from the LLM with the
+    `{{NICKNAME}}` token where the doc has the sentinel. The containment gate
+    must map token -> sentinel before comparing (real-name substitution
+    happens AFTER validation, in `KnowledgeAgent.answer()`), so this passes
+    even at a strict threshold -- and the kept sentence still carries the
+    token untouched."""
+    sentinel_doc = _doc("blog:hinatazaka46:6", normalize_text("%%%さん、今日は焼肉を食べました"))
+    store = _store(sentinel_doc)
+    answer = Answer(
+        sentences=[
+            AnswerSentence(text="{{NICKNAME}}さん、今日は焼肉を食べました", citation_ids=[sentinel_doc.doc_id])
+        ],
+        citations=[],
+    )
+
+    result = validate(answer, surfaced_doc_ids={sentinel_doc.doc_id}, store=store, threshold=0.9)
+
+    assert len(result.sentences) == 1
+    assert result.sentences[0].text == "{{NICKNAME}}さん、今日は焼肉を食べました"
+    assert result.no_evidence is False
+
+
 def test_validate_unmasks_subscriber_sentinel_in_quoted_snippet_but_not_stored_doc_text():
     sentinel_doc = _doc("blog:hinatazaka46:5", normalize_text("%%%さん、こんにちは"))
     store = _store(sentinel_doc)

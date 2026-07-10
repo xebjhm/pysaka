@@ -33,6 +33,7 @@ PUBLIC_NAMES = [
     "strip_sentinel",
     "SUBSCRIBER_SENTINEL",
     "INGEST_NORMALIZE_VERSION",
+    "NICKNAME_TOKEN",
     "ingest_blog",
     "ingest_messages",
     "chunk_documents",

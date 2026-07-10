@@ -262,20 +262,24 @@ def test_captionless_doc_is_recent_retrievable_but_not_query_matched():
     assert [hit.doc_id for hit in relevant_hits] == [with_text.doc_id]
 
 
-# --- snippet un-masks the `%%%` subscriber sentinel (stored text stays masked) ---
+# --- snippet keeps the subscriber sentinel raw (unmasking moved downstream) ---
 
 
-def test_hit_snippet_unmasks_subscriber_sentinel_that_stays_masked_in_stored_text():
+def test_hit_snippet_keeps_subscriber_sentinel_raw():
+    """Breaking (vs the earlier in-retriever unmask): `Hit.snippet` now carries
+    the raw `SUBSCRIBER_SENTINEL` so each output boundary can choose its own
+    substitution -- `ToolRunner` unmasks to the LLM-facing `{{NICKNAME}}` token,
+    the validator's `Citation.quoted_snippet` to the real subscriber name."""
     store = DocumentStore()
     doc = _doc("blog:hinatazaka46:1", text=normalize_text("%%%さん、こんにちは"))
     store.upsert([doc])
     # sort="recent" bypasses ranking/indexing entirely, so `_build_hit` falls back to
-    # `doc.text` as the snippet source -- exercising the un-masking at that boundary.
+    # `doc.text` as the snippet source.
     retriever = HybridRetriever(store, PureLexicalIndex(), FakeVectorStore(), FakeEmbedder({}))
 
     hits = retriever.search(_filters(sort="recent", query=None, limit=10))
 
     assert SUBSCRIBER_SENTINEL in doc.text  # stored/indexed text is untouched
     assert len(hits) == 1
-    assert "you" in hits[0].snippet
-    assert SUBSCRIBER_SENTINEL not in hits[0].snippet
+    assert SUBSCRIBER_SENTINEL in hits[0].snippet
+    assert "you" not in hits[0].snippet

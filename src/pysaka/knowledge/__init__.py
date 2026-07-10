@@ -19,6 +19,7 @@ from pysaka.knowledge.callnames import CallNameTable
 from pysaka.knowledge.chunking import chunk_documents
 from pysaka.knowledge.cleaner import (
     INGEST_NORMALIZE_VERSION,
+    NICKNAME_TOKEN,
     SUBSCRIBER_SENTINEL,
     html_to_text,
     normalize_text,
@@ -70,6 +71,7 @@ __all__ = [
     "Member",
     "MemberRegistry",
     "MentionDetector",
+    "NICKNAME_TOKEN",
     "PureLexicalIndex",
     "SUBSCRIBER_SENTINEL",
     "Scope",

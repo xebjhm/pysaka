@@ -17,6 +17,7 @@ import pytest
 
 from pysaka.knowledge.agent import SYSTEM_PROMPT, AskCancelled, KnowledgeAgent, ToolCallingUnreliableError
 from pysaka.knowledge.aliases import AliasTable
+from pysaka.knowledge.cleaner import SUBSCRIBER_SENTINEL, normalize_text
 from pysaka.knowledge.lexical import PureLexicalIndex
 from pysaka.knowledge.llm import FakeLLMClient, LLMResponse, ToolCall
 from pysaka.knowledge.models import Answer, Chunk, Document, Scope, SourceRef
@@ -93,7 +94,7 @@ class FakeVectorStore:
 # --- fixture builder ----------------------------------------------------------
 
 
-def _build_tools() -> tuple[ToolRunner, Document]:
+def _build_tools(*, text: str = "ライブ最高でした", subscriber_name: str = "you") -> tuple[ToolRunner, Document]:
     reg = MemberRegistry.from_members_json(_MEMBERS, _SERVICE)
     aliases = AliasTable.seed_from_registry(reg)
     aliases.load_curated({"members": {"hinatazaka46:12": {"aliases": ["みくちゃん"]}}})
@@ -107,7 +108,7 @@ def _build_tools() -> tuple[ToolRunner, Document]:
         timestamp=_NOW,
         type="blog",
         is_favorite=False,
-        text="ライブ最高でした",
+        text=text,
         has_text=True,
     )
     store.upsert([doc])
@@ -116,7 +117,7 @@ def _build_tools() -> tuple[ToolRunner, Document]:
     retriever = HybridRetriever(store, PureLexicalIndex(), FakeVectorStore(), FakeEmbedder(vectors))
     retriever.index([Chunk(chunk_id=f"{doc.doc_id}#0", doc_id=doc.doc_id, text=doc.text, context_text=doc.text)])
 
-    runner = ToolRunner(aliases, reg, retriever, store)
+    runner = ToolRunner(aliases, reg, retriever, store, subscriber_name=subscriber_name)
     return runner, doc
 
 
@@ -668,3 +669,104 @@ async def test_answer_keeps_a_citation_to_a_doc_id_ask_did_surface():
     assert validated.sentences[0].citation_ids == [doc.doc_id]
     assert len(validated.citations) == 1
     assert validated.citations[0].doc_id == doc.doc_id
+
+
+# --- subscriber-name privacy: {{NICKNAME}} to the LLM, real name to the user ---
+
+_REAL_NAME = "浩(ハオ)@台湾"
+
+
+async def test_answer_threads_custom_subscriber_name_end_to_end():
+    """Full privacy round-trip: evidence contains the subscriber sentinel; the
+    LLM only ever sees the `{{NICKNAME}}` token (never the real name); the
+    validated answer and its citation snippets render the REAL name."""
+    doc_text = normalize_text("%%%さん、今日は焼肉を食べました")
+    tools, doc = _build_tools(text=doc_text, subscriber_name=_REAL_NAME)
+    script = [
+        LLMResponse(tool_calls=[ToolCall("get_document", {"doc_id": doc.doc_id}, id="call_1")]),
+        LLMResponse(
+            text=json.dumps(
+                {"sentences": [{"text": "{{NICKNAME}}さん、今日は焼肉を食べました", "citation_ids": [doc.doc_id]}]}
+            )
+        ),
+    ]
+    fake = FakeLLMClient(script)
+    agent = KnowledgeAgent(fake, tools)
+
+    validated = await agent.answer("她說了什麼？", _SCOPE)
+
+    # LLM-facing: no message content ever carries the real name; the tool
+    # result carries the token instead of the sentinel.
+    for messages, _tools_schema in fake.calls:
+        for message in messages:
+            content = message.get("content") or ""
+            assert _REAL_NAME not in content
+    tool_turn = next(m for m in fake.calls[1][0] if m.get("role") == "tool")
+    assert "{{NICKNAME}}" in tool_turn["content"]
+    assert SUBSCRIBER_SENTINEL not in tool_turn["content"]
+
+    # USER-facing: token substituted with the real name AFTER validation.
+    assert validated.no_evidence is False
+    assert validated.sentences[0].text == f"{_REAL_NAME}さん、今日は焼肉を食べました"
+    assert "{{NICKNAME}}" not in validated.sentences[0].text
+    assert _REAL_NAME in validated.citations[0].quoted_snippet
+    assert SUBSCRIBER_SENTINEL not in validated.citations[0].quoted_snippet
+
+
+async def test_answer_replaces_nickname_token_with_default_you():
+    """Default behavior unchanged for API consumers: with no subscriber_name
+    configured, user-facing output says "you" (the pre-existing rendering)."""
+    doc_text = normalize_text("%%%さん、今日は焼肉を食べました")
+    tools, doc = _build_tools(text=doc_text)
+    script = [
+        LLMResponse(tool_calls=[ToolCall("get_document", {"doc_id": doc.doc_id}, id="call_1")]),
+        LLMResponse(
+            text=json.dumps(
+                {"sentences": [{"text": "{{NICKNAME}}さん、今日は焼肉を食べました", "citation_ids": [doc.doc_id]}]}
+            )
+        ),
+    ]
+    agent = KnowledgeAgent(FakeLLMClient(script), tools)
+
+    validated = await agent.answer("what did she say", _SCOPE)
+
+    assert validated.sentences[0].text == "youさん、今日は焼肉を食べました"
+    assert "you" in validated.citations[0].quoted_snippet
+
+
+async def test_ask_retokenizes_subscriber_name_in_history_before_llm():
+    """History hygiene: prior turns shown to the user carry the REAL name;
+    feeding them back verbatim would leak it to the LLM, so it is replaced
+    with the `{{NICKNAME}}` token before the messages are sent."""
+    tools, _doc = _build_tools(subscriber_name=_REAL_NAME)
+    script = [LLMResponse(text=json.dumps({"no_evidence": True}))]
+    fake = FakeLLMClient(script)
+    agent = KnowledgeAgent(fake, tools)
+    history = [
+        {"role": "user", "content": "previous question"},
+        {"role": "assistant", "content": f"{_REAL_NAME}さん、こんにちは"},
+    ]
+
+    await agent.ask("follow up", _SCOPE, history=history)
+
+    messages, _tools_schema = fake.calls[0]
+    assert messages[1] == {"role": "user", "content": "previous question"}
+    assert messages[2] == {"role": "assistant", "content": "{{NICKNAME}}さん、こんにちは"}
+    # The caller's own history list must not be mutated.
+    assert history[1]["content"] == f"{_REAL_NAME}さん、こんにちは"
+
+
+async def test_ask_does_not_retokenize_history_for_default_or_short_names():
+    """Guard against mangling ordinary prose: no replacement for the default
+    name ("you" appears in normal English) or a name shorter than 2 chars."""
+    default_tools, _doc = _build_tools()
+    fake_default = FakeLLMClient([LLMResponse(text=json.dumps({"no_evidence": True}))])
+    history_you = [{"role": "assistant", "content": "you said hello"}]
+    await KnowledgeAgent(fake_default, default_tools).ask("q", _SCOPE, history=history_you)
+    assert fake_default.calls[0][0][1] == {"role": "assistant", "content": "you said hello"}
+
+    short_tools, _doc = _build_tools(subscriber_name="浩")
+    fake_short = FakeLLMClient([LLMResponse(text=json.dumps({"no_evidence": True}))])
+    history_short = [{"role": "assistant", "content": "浩さん、こんにちは"}]
+    await KnowledgeAgent(fake_short, short_tools).ask("q", _SCOPE, history=history_short)
+    assert fake_short.calls[0][0][1] == {"role": "assistant", "content": "浩さん、こんにちは"}

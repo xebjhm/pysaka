@@ -26,8 +26,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pysaka.knowledge.INGEST_NORMALIZE_VERSION` (int): version of the
   `normalize_text` pipeline, for apps to fold into their index fingerprint so
   a normalization change triggers a reindex instead of serving stale text.
+- Privacy-preserving subscriber-name substitution: `ToolRunner` accepts a
+  keyword-only `subscriber_name` (default `"you"`, exposed as a read-only
+  property), and `validate()` accepts a keyword-only `subscriber_name`.
+  LLM-facing text (`get_document` results, serialized search-hit snippets)
+  unmasks the subscriber sentinel to the literal `NICKNAME_TOKEN`
+  (`"{{NICKNAME}}"`, newly exported) so the real name is never sent to a
+  cloud LLM; `KnowledgeAgent.answer()` substitutes the real name into
+  sentence texts and `Citation.quoted_snippet` after validation, and
+  re-tokenizes the real name in incoming `history` back to the token before
+  sending it to the LLM.
 
 ### Changed
+- **Breaking:** `Hit.snippet` now carries the raw subscriber sentinel
+  (U+E000) instead of unmasking it to `"you"`; unmasking moved to the output
+  boundaries (`ToolRunner` serializes it as `{{NICKNAME}}` for the LLM, the
+  validator renders the real subscriber name in `Citation.quoted_snippet`).
+  **Migration:** callers reading `Hit.snippet` directly must apply
+  `strip_sentinel(snippet, name_or_token)` themselves.
 - `KnowledgeAgent`'s system prompt now tells the model the corpus is Japanese
   (search `query` values are written in Japanese, with kanji/kana/synonym
   retries), to always answer in the language of the user's question, and to

@@ -18,7 +18,7 @@ from datetime import datetime, timezone, tzinfo
 import structlog
 
 from .aliases import AliasTable
-from .cleaner import normalize_text, strip_sentinel
+from .cleaner import NICKNAME_TOKEN, normalize_text, strip_sentinel
 from .llm import ToolCall
 from .models import Document, Hit, Scope, SearchFilters
 from .registry import MemberRegistry
@@ -126,6 +126,7 @@ class ToolRunner:
         store: DocumentStore,
         *,
         tz: tzinfo | None = None,
+        subscriber_name: str = "you",
     ) -> None:
         self._aliases = aliases
         self._registry = registry
@@ -137,6 +138,12 @@ class ToolRunner:
         # else UTC (matches every indexed `Document.timestamp`, which is always
         # tz-aware UTC -- see `ingest.py`).
         self._tz = tz if tz is not None else timezone.utc
+        # The real subscriber display name, used ONLY at user-facing boundaries
+        # (`KnowledgeAgent.answer` threads it into the validator and the final
+        # answer text). LLM-facing tool results NEVER carry it -- they unmask
+        # the subscriber sentinel to `NICKNAME_TOKEN` instead, so the real name
+        # is never sent to a (cloud) LLM.
+        self._subscriber_name = subscriber_name
 
     @property
     def store(self) -> DocumentStore:
@@ -146,6 +153,16 @@ class ToolRunner:
         validation without threading it through separately.
         """
         return self._store
+
+    @property
+    def subscriber_name(self) -> str:
+        """Read-only access to the subscriber display name this runner was built with.
+
+        Lets `KnowledgeAgent.answer` substitute the real name into user-facing
+        output (and re-tokenize incoming history) without threading it through
+        separately. Never used in LLM-facing tool results.
+        """
+        return self._subscriber_name
 
     def run(self, call: ToolCall, scope: Scope) -> dict:
         """Dispatch `call` (by `call.name`, args in `call.arguments`) and return a JSON-serializable dict.
@@ -227,7 +244,7 @@ class ToolRunner:
             limit=args.get("limit", 10),
         )
         hits = self._retriever.search(filters)
-        return {"hits": [_hit_to_dict(hit) for hit in hits]}
+        return {"hits": [self._hit_to_dict(hit) for hit in hits]}
 
     def _get_document(self, args: dict) -> dict:
         doc_id = args["doc_id"]
@@ -236,9 +253,10 @@ class ToolRunner:
             return {"error": "not found", "doc_id": doc_id}
         return {
             "doc_id": doc.doc_id,
-            # un-mask the `%%%` subscriber sentinel: this text is quoted verbatim by the LLM/user,
-            # so it's an output boundary -- `doc.text` itself (the stored/indexed copy) is untouched.
-            "text": strip_sentinel(doc.text),
+            # LLM-facing boundary: un-mask the subscriber sentinel to NICKNAME_TOKEN -- never the
+            # real subscriber name (privacy) -- `doc.text` itself (the stored/indexed copy) is
+            # untouched. `KnowledgeAgent.answer` substitutes the real name after validation.
+            "text": strip_sentinel(doc.text, NICKNAME_TOKEN),
             "source_ref": asdict(doc.source_ref),
             "author": doc.author_id,
             "timestamp": doc.timestamp.isoformat(),
@@ -261,6 +279,19 @@ class ToolRunner:
             normalized_query = normalize_text(query)
             docs = [doc for doc in docs if normalized_query in normalize_text(doc.text)]
         return {"count": len(docs), "by_bucket": _bucket_counts(docs, args.get("group_by"), self._tz)}
+
+    def _hit_to_dict(self, hit: Hit) -> dict:
+        return {
+            "doc_id": hit.doc_id,
+            "source_ref": asdict(hit.source_ref),
+            "author": hit.author,
+            "timestamp": hit.timestamp.isoformat(),
+            # LLM-facing boundary: `Hit.snippet` carries the RAW subscriber sentinel (the
+            # retriever no longer un-masks); serialize it with NICKNAME_TOKEN -- never the real
+            # subscriber name (privacy).
+            "snippet": strip_sentinel(hit.snippet, NICKNAME_TOKEN),
+            "score": hit.score,
+        }
 
 
 # A bare ISO date with no time component, e.g. "2026-06-30" -- the shape a model
@@ -324,12 +355,3 @@ def _bucket_key(doc: Document, group_by: str, tz: tzinfo) -> str:
     return doc.type
 
 
-def _hit_to_dict(hit: Hit) -> dict:
-    return {
-        "doc_id": hit.doc_id,
-        "source_ref": asdict(hit.source_ref),
-        "author": hit.author,
-        "timestamp": hit.timestamp.isoformat(),
-        "snippet": hit.snippet,
-        "score": hit.score,
-    }

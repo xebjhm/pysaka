@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from pysaka.knowledge.aliases import AliasTable
-from pysaka.knowledge.cleaner import SUBSCRIBER_SENTINEL, normalize_text
+from pysaka.knowledge.cleaner import NICKNAME_TOKEN, SUBSCRIBER_SENTINEL, normalize_text
 from pysaka.knowledge.lexical import PureLexicalIndex
 from pysaka.knowledge.llm import ToolCall
 from pysaka.knowledge.models import Chunk, Document, Scope, SourceRef
@@ -131,7 +131,7 @@ def _chunk(doc: Document) -> Chunk:
 
 
 def _build_fixture(
-    *, tz=None, extra_docs: list[Document] | None = None
+    *, tz=None, extra_docs: list[Document] | None = None, subscriber_name: str = "you"
 ) -> tuple[ToolRunner, MemberRegistry, AliasTable, DocumentStore, Document, Document, Document]:
     reg = _registry()
     aliases = AliasTable.seed_from_registry(reg)
@@ -158,7 +158,7 @@ def _build_fixture(
     retriever = HybridRetriever(store, PureLexicalIndex(), FakeVectorStore(), FakeEmbedder(vectors))
     retriever.index([_chunk(doc) for doc in docs])
 
-    runner = ToolRunner(aliases, reg, retriever, store, tz=tz)
+    runner = ToolRunner(aliases, reg, retriever, store, tz=tz, subscriber_name=subscriber_name)
     return runner, reg, aliases, store, old, new, other
 
 
@@ -336,16 +336,56 @@ def test_get_document_returns_error_for_unknown_id():
     assert result == {"error": "not found", "doc_id": "does-not-exist"}
 
 
-def test_get_document_unmasks_subscriber_sentinel_but_not_stored_doc_text():
-    runner, reg, aliases, store, old, new, other = _build_fixture()
+def test_get_document_unmasks_subscriber_sentinel_to_nickname_token():
+    """LLM-facing boundary: `get_document` text carries the `{{NICKNAME}}`
+    token, NEVER the real subscriber name (privacy: the real name must not be
+    sent to a cloud LLM) and never the raw sentinel."""
+    runner, reg, aliases, store, old, new, other = _build_fixture(subscriber_name="浩(ハオ)@台湾")
     sentinel_doc = _doc("blog:hinatazaka46:99", text=normalize_text("%%%さん、こんにちは"))
     store.upsert([sentinel_doc])
 
     result = runner.run(ToolCall("get_document", {"doc_id": sentinel_doc.doc_id}), _SCOPE)
 
     assert SUBSCRIBER_SENTINEL in sentinel_doc.text  # stored/indexed text is untouched
-    assert "you" in result["text"]
+    assert NICKNAME_TOKEN in result["text"]
     assert SUBSCRIBER_SENTINEL not in result["text"]
+    assert "浩(ハオ)@台湾" not in result["text"]
+
+
+def test_tool_runner_subscriber_name_defaults_to_you_and_is_read_only():
+    runner, *_ = _build_fixture()
+    assert runner.subscriber_name == "you"
+
+    named_runner, *_ = _build_fixture(subscriber_name="浩(ハオ)@台湾")
+    assert named_runner.subscriber_name == "浩(ハオ)@台湾"
+    try:
+        named_runner.subscriber_name = "other"  # type: ignore[misc]
+    except AttributeError:
+        pass
+    else:  # pragma: no cover - defends the read-only contract
+        raise AssertionError("subscriber_name must be read-only")
+
+
+def test_search_hit_snippet_unmasks_sentinel_to_nickname_token():
+    """LLM-facing boundary: the serialized search-hit `snippet` carries the
+    `{{NICKNAME}}` token -- the unmasking happens in ToolRunner, not in the
+    retriever (`Hit.snippet` itself keeps the raw sentinel)."""
+    sentinel_doc = _doc(
+        "blog:hinatazaka46:99",
+        text=normalize_text("%%%さん、ライブ最高でした"),
+        timestamp=_NOW + timedelta(days=1),
+    )
+    runner, reg, aliases, store, old, new, other = _build_fixture(
+        extra_docs=[sentinel_doc], subscriber_name="浩(ハオ)@台湾"
+    )
+
+    result = runner.run(ToolCall("search", {"sort": "recent", "limit": 1}), _SCOPE)
+
+    hit = result["hits"][0]
+    assert hit["doc_id"] == sentinel_doc.doc_id
+    assert NICKNAME_TOKEN in hit["snippet"]
+    assert SUBSCRIBER_SENTINEL not in hit["snippet"]
+    assert "浩(ハオ)@台湾" not in hit["snippet"]
 
 
 # --- aggregate ---------------------------------------------------------------

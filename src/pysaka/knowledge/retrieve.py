@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import structlog
 
-from .cleaner import strip_sentinel
 from .models import Chunk, Document, Hit, SearchFilters
 from .protocols import Embedder, LexicalIndex, VectorStore
 from .store import DocumentStore
@@ -95,9 +94,11 @@ class HybridRetriever:
             source_ref=doc.source_ref,
             author=doc.author_id,  # canonical id; display-name resolution belongs to the presentation layer
             timestamp=doc.timestamp,
-            # un-mask the `%%%` subscriber sentinel: the snippet is user/LLM-facing output, but the
-            # sentinel must stay in indexed/stored text -- only this output boundary un-masks it.
-            snippet=strip_sentinel(snippet_source[:_SNIPPET_LEN]),
+            # `snippet` carries the RAW subscriber sentinel: the retriever is not an output
+            # boundary. Each boundary picks its own substitution -- `ToolRunner` unmasks to the
+            # LLM-facing `{{NICKNAME}}` token, the validator's `Citation.quoted_snippet` to the
+            # real subscriber name.
+            snippet=snippet_source[:_SNIPPET_LEN],
             score=score,
         )
 

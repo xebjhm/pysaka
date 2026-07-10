@@ -6,6 +6,13 @@ import unicodedata
 from bs4 import BeautifulSoup
 
 SUBSCRIBER_SENTINEL = ""  # private-use char; never in real content
+# LLM-facing stand-in for the subscriber's name. Evidence text leaving the
+# engine toward a (cloud) LLM has SUBSCRIBER_SENTINEL unmasked to this literal
+# token -- NEVER to the real subscriber name (privacy: mirrors the translation
+# feature's precedent). The real name is substituted only at USER-facing
+# boundaries, after grounding validation (see `KnowledgeAgent.answer`).
+NICKNAME_TOKEN = "{{NICKNAME}}"
+
 # Version of the text-normalization pipeline below. Bump whenever
 # `normalize_text` can produce different output for the same input, so an app
 # embedding this in its index fingerprint reindexes instead of serving stale,
