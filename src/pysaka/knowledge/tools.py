@@ -55,7 +55,13 @@ TOOL_SCHEMAS: list[dict] = [
                         "Filter to posts/messages that mention this member (name, nickname, or canonical id)."
                     ),
                 },
-                "query": {"type": "string", "description": "Free-text search query."},
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Free-text search query -- write it in Japanese (the corpus language); "
+                        "short noun phrases work best."
+                    ),
+                },
                 "date_from": {"type": "string", "description": "ISO 8601 start date/time, inclusive."},
                 "date_to": {"type": "string", "description": "ISO 8601 end date/time, inclusive."},
                 "type": {"type": "string", "description": "Document type filter, e.g. blog, text_msg, picture_msg."},
@@ -67,7 +73,7 @@ TOOL_SCHEMAS: list[dict] = [
     },
     {
         "name": "get_document",
-        "description": "Fetch the full text of one document by id, to quote verbatim in an answer.",
+        "description": "Fetch the full text of one document by id, to read a hit's full context.",
         "parameters": {
             "type": "object",
             "properties": {

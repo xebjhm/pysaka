@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OnnxEmbedder` and a numpy-backed `NumpyVectorStore`. Not imported by
   `pysaka.knowledge` itself, so the default install stays lean.
 
+### Changed
+- `KnowledgeAgent`'s system prompt now tells the model the corpus is Japanese
+  (search `query` values are written in Japanese, with kanji/kana/synonym
+  retries), to always answer in the language of the user's question, and to
+  synthesize a short direct-answer-first narrative instead of enumerating
+  dated verbatim quotes. The old "quote Japanese snippets verbatim -- do not
+  paraphrase or translate" instruction is gone. The `search` tool's `query`
+  schema description now also steers the model to Japanese.
+- `KnowledgeAgent(max_steps=...)` default raised from 6 to 8, and exhausting
+  the budget no longer silently returns a `no_evidence` answer: the agent now
+  runs one final no-tools synthesis turn over the evidence gathered so far,
+  returning `no_evidence` only if that turn produces nothing.
+
 ### Fixed
 - `pysaka.knowledge.validate()` no longer deletes correct non-Japanese answers:
   the same-language containment gate now triggers only on sentences containing

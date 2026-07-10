@@ -194,6 +194,16 @@ def test_tool_schemas_search_and_aggregate_have_no_required_fields():
         assert schema["parameters"]["required"] == []
 
 
+def test_tool_schemas_search_query_description_says_write_japanese():
+    """The corpus is Japanese; the schema itself must steer the model to write
+    `query` in Japanese (the system prompt alone is not enough at tool-call
+    time)."""
+    schema = next(s for s in TOOL_SCHEMAS if s["name"] == "search")
+    description = schema["parameters"]["properties"]["query"]["description"]
+    assert "Japanese" in description
+    assert "noun phrases" in description
+
+
 # --- resolve_member ------------------------------------------------------
 
 

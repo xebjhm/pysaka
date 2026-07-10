@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from pysaka.knowledge.agent import AskCancelled, KnowledgeAgent, ToolCallingUnreliableError
+from pysaka.knowledge.agent import SYSTEM_PROMPT, AskCancelled, KnowledgeAgent, ToolCallingUnreliableError
 from pysaka.knowledge.aliases import AliasTable
 from pysaka.knowledge.lexical import PureLexicalIndex
 from pysaka.knowledge.llm import FakeLLMClient, LLMResponse, ToolCall
@@ -332,22 +332,91 @@ async def test_ask_falls_back_to_uncited_sentence_when_sentence_missing_text_key
     assert answer.sentences[0].citation_ids == []
 
 
-# --- max_steps bound -----------------------------------------------------------
+# --- system prompt content (corpus language, answer language, style) ------------
 
 
-async def test_ask_stops_after_max_steps_without_exhausting_script():
+def test_system_prompt_instructs_japanese_queries_and_question_language_answers():
+    """The prompt must tell the model (i) the corpus is Japanese and `query`
+    values are written in Japanese, (ii) to answer in the user's question
+    language, (iii) to synthesize rather than dump dated quotes -- and the old
+    verbatim-quote command (which manufactured the quote-dump style) is gone."""
+    assert "The corpus is JAPANESE" in SYSTEM_PROMPT
+    assert "`query` in Japanese" in SYSTEM_PROMPT
+    assert "kana/synonym variants" in SYSTEM_PROMPT
+    assert "ALWAYS answer in the language of the user's question" in SYSTEM_PROMPT
+    assert "do NOT enumerate" in SYSTEM_PROMPT
+    assert "{{NICKNAME}}" in SYSTEM_PROMPT
+    # The verbatim-quote-dump command must be gone.
+    assert "Quote Japanese snippets verbatim" not in SYSTEM_PROMPT
+    assert "paraphrase or translate" not in SYSTEM_PROMPT
+
+
+# --- max_steps bound: forced final synthesis turn -------------------------------
+
+
+async def test_ask_forces_final_no_tools_synthesis_turn_after_max_steps():
+    """Exhausting the tool-call budget must NOT silently return no_evidence:
+    the agent gets ONE final no-tools turn to synthesize from the evidence
+    gathered so far, and a grounded final answer from that turn is returned."""
+    tools, doc = _build_tools()
+    script = [
+        LLMResponse(tool_calls=[ToolCall("get_document", {"doc_id": doc.doc_id}, id="call_1")]),
+        LLMResponse(tool_calls=[ToolCall("aggregate", {}, id="call_2")]),
+        # The forced-synthesis response: grounded in the step-1 evidence.
+        LLMResponse(text=json.dumps({"sentences": [{"text": "synthesized", "citation_ids": [doc.doc_id]}]})),
+    ]
+    fake = FakeLLMClient(script)
+    agent = KnowledgeAgent(fake, tools, max_steps=2)
+
+    answer, surfaced = await agent.ask("question that runs out of budget", _SCOPE)
+
+    assert len(fake.calls) == 3  # 2 budgeted steps + 1 forced synthesis turn
+    final_messages, final_tools = fake.calls[2]
+    assert final_tools is None  # the synthesis turn offers NO tools
+    # The synthesis instruction was appended for that final turn.
+    assert any(m.get("role") == "user" and "final answer" in (m.get("content") or "") for m in final_messages)
+    assert answer.no_evidence is False
+    assert answer.sentences[0].text == "synthesized"
+    assert doc.doc_id in surfaced
+
+
+async def test_ask_forced_synthesis_turn_with_no_text_returns_no_evidence():
+    """If even the forced no-tools synthesis turn produces nothing (no text --
+    e.g. the model still tries to emit tool calls), THEN the ask resolves to
+    no_evidence."""
     tools, _doc = _build_tools()
-    # More scripted tool-call-only responses than max_steps allows.
+    # More scripted tool-call-only responses than max_steps allows; the 4th
+    # (the synthesis turn) also carries no text.
     script = [LLMResponse(tool_calls=[ToolCall("aggregate", {}, id=f"call_{i}")]) for i in range(10)]
     fake = FakeLLMClient(script)
     agent = KnowledgeAgent(fake, tools, max_steps=3)
 
     answer, surfaced = await agent.ask("runaway tool caller", _SCOPE)
 
-    assert len(fake.calls) == 3
+    assert len(fake.calls) == 4  # 3 budgeted steps + 1 forced synthesis turn
+    assert fake.calls[3][1] is None  # synthesis turn offers no tools
     assert answer.no_evidence is True
     assert answer.sentences == []
     assert isinstance(surfaced, set)
+
+
+async def test_ask_default_max_steps_allows_eight_llm_rounds():
+    """The default budget is 8 steps (raised from 6): seven tool-call rounds
+    followed by a final in-loop answer must complete WITHOUT triggering the
+    forced-synthesis turn."""
+    tools, doc = _build_tools()
+    script = [
+        LLMResponse(tool_calls=[ToolCall("get_document", {"doc_id": doc.doc_id}, id=f"call_{i}")]) for i in range(7)
+    ]
+    script.append(LLMResponse(text=json.dumps({"sentences": [{"text": "found", "citation_ids": [doc.doc_id]}]})))
+    fake = FakeLLMClient(script)
+    agent = KnowledgeAgent(fake, tools)
+
+    answer, _surfaced = await agent.ask("question needing many rounds", _SCOPE)
+
+    assert len(fake.calls) == 8
+    assert fake.calls[7][1] is not None  # still an in-budget step, tools offered
+    assert answer.sentences[0].text == "found"
 
 
 # --- invalid tool calls (malformed LLM tool-call arguments) ---------------------
