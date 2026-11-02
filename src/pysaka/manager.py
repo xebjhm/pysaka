@@ -179,9 +179,16 @@ class SyncManager:
         and rewriting the file yourself: a sync running at the same moment would
         otherwise lose either its new messages or your change.
 
+        ``message_id`` is compared as-is with the stored ids, so pass an ``int``
+        (a ``str`` never matches).
+
         Returns:
             True if the message was found and the file was written; False if the
             file is missing, the id is absent, or the write failed.
+
+        Raises:
+            ValueError: the file exists but is unreadable JSON.
+            OSError: the file exists but could not be read.
         """
 
         def mutate(current: Optional[Any]) -> tuple[Optional[Any], bool]:
@@ -198,7 +205,11 @@ class SyncManager:
 
     @staticmethod
     async def update_message_fields(messages_file: Path, message_id: int, fields: dict[str, Any]) -> bool:
-        """Async form of :meth:`update_message_fields_sync` (runs it in a thread)."""
+        """Async form of :meth:`update_message_fields_sync` (runs it in a thread).
+
+        Same return value, ``message_id`` handling and exceptions (``ValueError``
+        on unreadable JSON, ``OSError`` on read errors).
+        """
         return await asyncio.to_thread(SyncManager.update_message_fields_sync, messages_file, message_id, fields)
 
     def update_sync_state(
@@ -365,6 +376,15 @@ class SyncManager:
 
         Returns:
             Number of messages that were not in the archive before.
+
+        Raises:
+            SessionExpiredError: authentication failed (also
+                ``RefreshFailedError``); the flag is left unset.
+            OSError: reading or writing ``messages.json`` or its media failed
+                after the fetch (other unexpected errors after the fetch also
+                propagate), so callers should wrap the call. An unreadable
+                ``messages.json`` or a failed fetch does not raise: it logs and
+                returns 0.
         """
         gid, mid = group["id"], member["id"]
         key = f"{gid}_{mid}"

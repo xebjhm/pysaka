@@ -3,7 +3,7 @@ import contextlib
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Literal, Optional, Union, overload
 
 import aiofiles
 import aiohttp
@@ -1186,6 +1186,16 @@ class Client:
         if data and "letters" in data:
             return data["letters"]
         return []
+
+    @overload
+    async def get_past_messages(
+        self, session: aiohttp.ClientSession, group_id: int, *, strict: Literal[False] = ...
+    ) -> list[dict[str, Any]]: ...
+
+    @overload
+    async def get_past_messages(
+        self, session: aiohttp.ClientSession, group_id: int, *, strict: Literal[True]
+    ) -> Optional[list[dict[str, Any]]]: ...
 
     async def get_past_messages(
         self, session: aiohttp.ClientSession, group_id: int, *, strict: bool = False

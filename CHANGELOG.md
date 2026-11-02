@@ -21,7 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-subscription messages and their media once per member, without moving the
   cursor.
 - `Client.get_past_messages(..., strict=True)` returns None on a failed request
-  instead of `[]`.
+  instead of `[]`. The default (`strict=False`) is unchanged and typed as
+  `list[dict]`; only `strict=True` is typed `Optional[list[dict]]`.
+- `member_info` passed to `on_new_messages` has `initial_sync`, True when the
+  member's `messages.json` was created by that sync (the callback then gets the
+  whole fetched history); ignore those calls when sending notifications.
 
 ### Fixed
 - **A favorite (or any local `messages.json` edit) made while a sync was writing
@@ -30,11 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `update_message_metadata` now merge under the same per-file lock as
   `update_message_fields`.
 - `SyncManager.update_sync_state` keeps keys it does not own in the member's
-  entry instead of replacing the whole entry.
+  entry (such as `past_backfilled_at`) instead of replacing the whole entry;
+  corrupt-file or count-mismatch recovery clears `past_backfilled_at` so
+  `backfill_past_messages` merges the pre-subscription messages again.
 - `Client.get_messages` no longer raises `ApiError` forever for a room whose
   whole history is an exact multiple of 200 messages: a full last page without a
-  continuation is accepted when an `order=asc` probe shows the room's first
-  message was collected.
+  continuation is accepted when an `order=asc` probe returns the smallest id
+  collected, i.e. the room's first message.
 
 ## [0.4.4] - 2026-11-02
 
