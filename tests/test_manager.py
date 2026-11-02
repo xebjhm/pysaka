@@ -147,6 +147,19 @@ async def test_sync_member_flow(sync_manager):
 
 
 @pytest.mark.asyncio
+async def test_sync_member_renames_group_folder_when_room_renamed(sync_manager):
+    old_dir = sync_manager.output_dir / "messages" / "1 Old" / "10 Mem"
+    old_dir.mkdir(parents=True)
+    (old_dir / "keep.txt").write_text("x", encoding="utf-8")
+    sync_manager.client.get_messages.return_value = []
+
+    await sync_manager.sync_member(AsyncMock(), {"id": 1, "name": "New"}, {"id": 10, "name": "Mem"}, [])
+
+    assert [p.name for p in (sync_manager.output_dir / "messages").iterdir()] == ["1 New"]
+    assert (sync_manager.output_dir / "messages" / "1 New" / "10 Mem" / "keep.txt").exists()
+
+
+@pytest.mark.asyncio
 async def test_sync_member_write_failure_does_not_advance_cursor(sync_manager, monkeypatch):
     """If the messages.json write fails, the cursor must NOT advance — otherwise the
     next sync would skip the unwritten messages permanently."""

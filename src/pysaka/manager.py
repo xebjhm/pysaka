@@ -279,6 +279,25 @@ class SyncManager:
             / f"{member['id']} {sanitize_name(member['name'])}"
         )
 
+    def _ensure_group_dir(self, group: dict[str, Any]) -> Path:
+        """Return ``messages/<gid> <name>``, renaming a room folder left under an old name.
+
+        If the room was renamed on the server (e.g. "12th Single" -> "16th Single")
+        and only a ``messages/<gid> <old name>`` folder exists, it is renamed
+        instead of leaving a duplicate. Call this before creating anything under
+        the group directory; it does not create the directory itself.
+        """
+        gid = group["id"]
+        messages_dir = self.output_dir / "messages"
+        group_dir = messages_dir / f"{gid} {sanitize_name(group['name'])}"
+        if not group_dir.exists() and messages_dir.exists():
+            for existing in messages_dir.iterdir():
+                if existing.is_dir() and existing.name.startswith(f"{gid} "):
+                    logger.info("Group renamed on server, renaming directory", old=existing.name, new=group_dir.name)
+                    existing.rename(group_dir)
+                    break
+        return group_dir
+
     @staticmethod
     def _type_counts(messages: list[dict[str, Any]]) -> dict[str, int]:
         counts = {"text": 0, "video": 0, "picture": 0, "voice": 0}
@@ -467,7 +486,9 @@ class SyncManager:
         A letter whose ``id`` is not an integer is skipped (logged by error type).
         Works for expired subscriptions (the server still returns their letters).
         Never touches the message cursor and never fires ``on_new_messages``.
-        ``letters.json`` is rewritten only when its content changes.
+        ``letters.json`` is rewritten only when its content changes. A room
+        folder left under an old room name is renamed first, so letters and
+        messages share one folder.
 
         Raises:
             SessionExpiredError, RefreshFailedError: auth failures propagate.
@@ -554,6 +575,7 @@ class SyncManager:
                 merged = {"version": 1, "letters": letters}
                 return (None if merged == current else merged), new_count
 
+            self._ensure_group_dir(group)  # rename a renamed room's folder before creating anything
             member_dir.mkdir(parents=True, exist_ok=True)
             try:
                 wrote, added = await asyncio.to_thread(self._locked_update, member_dir / "letters.json", mutate)
@@ -725,22 +747,11 @@ class SyncManager:
         """
         gid = group["id"]
         mid = member["id"]
-        gname = sanitize_name(group["name"])
         mname = sanitize_name(member["name"])
 
         # output_dir is already service-specific (e.g., output/日向坂46/)
         # so we only need to add messages/ and the group directory
-        messages_dir = self.output_dir / "messages"
-        group_dir = messages_dir / f"{gid} {gname}"
-
-        # If group was renamed on server (e.g., "12th Single" → "16th Single"),
-        # rename the existing directory instead of creating a duplicate.
-        if not group_dir.exists() and messages_dir.exists():
-            for existing in messages_dir.iterdir():
-                if existing.is_dir() and existing.name.startswith(f"{gid} "):
-                    logger.info("Group renamed on server, renaming directory", old=existing.name, new=group_dir.name)
-                    existing.rename(group_dir)
-                    break
+        group_dir = self._ensure_group_dir(group)
 
         member_dir = group_dir / f"{mid} {mname}"
         member_dir.mkdir(parents=True, exist_ok=True)

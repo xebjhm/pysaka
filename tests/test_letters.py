@@ -283,3 +283,20 @@ async def test_identical_second_sync_does_not_rewrite_letters_json(manager):
     manager.sync_state["90_90"].pop("letters_updated_at")  # force a full refetch
     assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 0
     assert path.stat().st_mtime_ns == before
+
+
+async def test_letters_after_room_rename_share_the_renamed_folder(manager, tmp_path):
+    """sync_letters must not create the new-name folder before the rename logic ran."""
+    old_member_dir = tmp_path / "messages" / "90 Old Name" / "90 高井 俐香"
+    old_member_dir.mkdir(parents=True)
+    (old_member_dir / "messages.json").write_text('{"messages": []}', encoding="utf-8")
+    manager.client.get_letters = FakeLetterApi([_letter(1, _ts(1))]).as_mock()
+
+    renamed = {"id": 90, "name": "New Name"}
+    assert await manager.sync_letters(AsyncMock(), renamed, MEMBER) == 1
+
+    assert [p.name for p in (tmp_path / "messages").iterdir()] == ["90 New Name"]
+    member_dir = tmp_path / "messages" / "90 New Name" / "90 高井 俐香"
+    assert (member_dir / "messages.json").exists()
+    assert (member_dir / "letters.json").exists()
+    assert (member_dir / "letters" / "1.jpg").exists()

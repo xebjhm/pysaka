@@ -281,6 +281,8 @@ URL) on the next call. A member with no letters in the room still advances it af
 fetch. A letter whose `id` is not an integer is skipped. Fetches up to 50 pages of 200 letters per
 call, chaining each page from the last letter's `created_at` (not `updated_at`, which a later
 favorite would push past letters not yet fetched); `letters.json` is rewritten only when its content changes.
+A room folder left under an old room name is renamed first (as `sync_member` does), so letters and
+messages share one folder.
 
 `letters.json` shape, sorted by `created_at`:
 `{"version": 1, "letters": [{"id", "member_id", "text", "created_at", "updated_at", "is_favorite",
