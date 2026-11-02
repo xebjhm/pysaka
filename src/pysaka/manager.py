@@ -1,11 +1,12 @@
 import asyncio
 import json
 import os
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar
 
 import aiofiles
 import aiohttp
@@ -23,6 +24,27 @@ logger = structlog.get_logger()
 # treated as a potential real gap and surfaced in `unresolved`, so completeness is
 # never overclaimed on an unexpected/transient state (e.g. "processing").
 _MEDIA_STRIPPING_STATES = frozenset({"canceled", "cancelled"})
+
+T = TypeVar("T")
+
+# One lock per messages.json (or any JSON file updated via _locked_update). Thread
+# locks, not asyncio locks: SakaDesk's favorite toggle and the sync write both run
+# their file work in worker threads (asyncio.to_thread), which an asyncio.Lock
+# would not serialise. In-process only — cross-process writers are excluded by the
+# consumer (SakaDesk's DataDirLock).
+_FILE_LOCKS: dict[str, threading.Lock] = {}
+_FILE_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(path: Path) -> threading.Lock:
+    """Return the process-wide lock for ``path`` (case-normalised on Windows)."""
+    key = os.path.normcase(str(path.resolve()))
+    with _FILE_LOCKS_GUARD:
+        lock = _FILE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _FILE_LOCKS[key] = lock
+        return lock
 
 
 class SyncManager:
@@ -105,6 +127,75 @@ class SyncManager:
                 tmp.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    @staticmethod
+    def _locked_update(
+        path: Path,
+        mutate: Callable[[Optional[Any]], tuple[Optional[Any], T]],
+        *,
+        corrupt_ok: bool = False,
+    ) -> tuple[bool, T]:
+        """Read-modify-write a JSON file under its process-wide lock.
+
+        Synchronous and blocking — call via ``asyncio.to_thread`` from async code.
+        ``mutate`` receives the parsed file (``None`` if the file is missing, or if
+        it is unreadable and ``corrupt_ok`` is True) and returns ``(data, result)``.
+        ``data is None`` means "nothing to write". Every writer of a given file must
+        go through this method, otherwise a concurrent read-modify-write can
+        overwrite the other's changes.
+
+        Returns:
+            ``(write_ok, result)``. ``write_ok`` is False only when a write was
+            attempted and ``_atomic_write_json`` failed.
+
+        Raises:
+            ValueError: the file is unreadable JSON and ``corrupt_ok`` is False.
+        """
+        with _lock_for(path):
+            current: Optional[Any] = None
+            if path.exists():
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        current = json.load(f)
+                except ValueError:
+                    if not corrupt_ok:
+                        raise
+                    current = None
+            data, result = mutate(current)
+            if data is None:
+                return True, result
+            return SyncManager._atomic_write_json(path, data), result
+
+    @staticmethod
+    def update_message_fields_sync(messages_file: Path, message_id: int, fields: dict[str, Any]) -> bool:
+        """Set ``fields`` on one message of a ``messages.json``, under the file lock.
+
+        Blocking — for callers already running in a worker thread. From async
+        code use :meth:`update_message_fields`. Use one of these instead of reading
+        and rewriting the file yourself: a sync running at the same moment would
+        otherwise lose either its new messages or your change.
+
+        Returns:
+            True if the message was found and the file was written; False if the
+            file is missing, the id is absent, or the write failed.
+        """
+
+        def mutate(current: Optional[Any]) -> tuple[Optional[Any], bool]:
+            if not isinstance(current, dict):
+                return None, False
+            for msg in current.get("messages", []):
+                if msg.get("id") == message_id:
+                    msg.update(fields)
+                    return current, True
+            return None, False
+
+        wrote, found = SyncManager._locked_update(messages_file, mutate)
+        return found and wrote
+
+    @staticmethod
+    async def update_message_fields(messages_file: Path, message_id: int, fields: dict[str, Any]) -> bool:
+        """Async form of :meth:`update_message_fields_sync` (runs it in a thread)."""
+        return await asyncio.to_thread(SyncManager.update_message_fields_sync, messages_file, message_id, fields)
 
     def update_sync_state(
         self, group_id: int, member_id: int, last_msg_id: int, count: int, last_ts: Optional[str] = None
@@ -204,9 +295,7 @@ class SyncManager:
         state_key = f"{gid}_{mid}"
         existing_file = member_dir / "messages.json"
 
-        async def fetch_for_member(
-            since_ts: Optional[str], *, recovery: bool = False
-        ) -> list[dict[str, Any]]:
+        async def fetch_for_member(since_ts: Optional[str], *, recovery: bool = False) -> list[dict[str, Any]]:
             """Fetch this member's messages, filtered by the ``since_ts`` cursor.
 
             Normal path: when a shared ``prefetched_messages`` timeline was supplied,
@@ -505,9 +594,7 @@ class SyncManager:
     _LOCAL_DERIVED_FIELDS = ("width", "height", "media_duration", "is_muted", "media_file")
 
     @staticmethod
-    def _merge_messages(
-        existing_msgs: list[dict[str, Any]], processed: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    def _merge_messages(existing_msgs: list[dict[str, Any]], processed: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Upsert ``processed`` over ``existing_msgs`` (prefer fresh API data),
         carrying forward locally-derived media metadata the API cannot supply.
 
