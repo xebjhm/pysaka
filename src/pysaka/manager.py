@@ -230,6 +230,14 @@ class SyncManager:
         self.sync_state[key] = entry
         self.save_sync_state()
 
+    def update_total_messages(self, group_id: int, member_id: int, count: int) -> None:
+        """Update only ``total_messages`` for a member (cursor fields untouched)."""
+        key = f"{group_id}_{member_id}"
+        entry = dict(self.sync_state.get(key) or {})
+        entry["total_messages"] = count
+        self.sync_state[key] = entry
+        self.save_sync_state()
+
     def get_last_ts(self, group_id: int, member_id: int) -> Optional[str]:
         """
         Get the last synced timestamp cursor for a member.
@@ -330,6 +338,84 @@ class SyncManager:
         )
         await self._archive_profile_images_safely(session, group, member)
         return processed
+
+    async def backfill_past_messages(
+        self, session: aiohttp.ClientSession, group: dict[str, Any], member: dict[str, Any]
+    ) -> int:
+        """Merge the room's pre-subscription messages into the member's archive.
+
+        Runs once per member: after it completes, ``past_backfilled_at`` is set in
+        the member's sync_state entry and later calls return immediately. Requires
+        a prior successful :meth:`sync_member` (no entry or no ``messages.json`` →
+        skipped). Downloads its own media, because Verify & Fix takes fresh URLs
+        from the timeline, which never contains these messages. The flag is set
+        only when the request succeeded and every queued file is on disk; on any
+        failure the next call retries (merging is idempotent). Cursor fields are
+        never touched and ``on_new_messages`` is never fired.
+
+        Returns:
+            Number of messages that were not in the archive before.
+        """
+        gid, mid = group["id"], member["id"]
+        key = f"{gid}_{mid}"
+        entry = self.sync_state.get(key)
+        if not entry or entry.get("past_backfilled_at"):
+            return 0
+        member_dir = self._member_dir_path(group, member)
+        messages_file = member_dir / "messages.json"
+        if not messages_file.exists():
+            return 0
+
+        try:
+            past = await self.client.get_past_messages(session, gid, strict=True)
+        except (SessionExpiredError, RefreshFailedError):
+            raise
+        except Exception as e:
+            logger.warning("Past message fetch failed", group_id=gid, error_type=type(e).__name__)
+            return 0
+        if past is None:
+            logger.warning("Past message fetch failed", group_id=gid)
+            return 0
+
+        mine = [m for m in past if m.get("member_id") == mid]
+        queue: list[dict[str, Any]] = []
+        processed, earliest_failed_ts, _ = self.prepare_messages(mine, member_dir, queue)
+
+        added = 0
+        if processed:
+
+            def mutate(current: Optional[Any]) -> tuple[Optional[Any], tuple[int, int]]:
+                if not isinstance(current, dict):
+                    return None, (0, -1)
+                base = current.get("messages", [])
+                base_ids = {m.get("id") for m in base}
+                new_count = sum(1 for m in processed if m["id"] not in base_ids)
+                merged = self._merge_messages(base, processed)
+                merged.sort(key=lambda x: x.get("timestamp") or "")
+                current["messages"] = merged
+                current["total_messages"] = len(merged)
+                current["message_type_counts"] = self._type_counts(merged)
+                return current, (new_count, len(merged))
+
+            try:
+                wrote, (added, total) = await asyncio.to_thread(self._locked_update, messages_file, mutate)
+            except ValueError:
+                logger.warning("Backfill skipped: messages.json unreadable", group_id=gid, member_id=mid)
+                return 0
+            if not wrote or total < 0:
+                return 0
+            self.update_total_messages(gid, mid, total)
+
+        metadata = await self.process_media_queue(session, queue)
+        if metadata.get(member_dir):
+            await self.update_message_metadata(messages_file, metadata[member_dir])
+
+        complete = earliest_failed_ts is None and all(media_file_is_present(item["path"]) for item in queue)
+        if complete:
+            self.sync_state[key]["past_backfilled_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self.save_sync_state()
+        logger.info("Past messages backfilled", group_id=gid, member_id=mid, added=added, complete=complete)
+        return added
 
     async def archive_profile_images(
         self,

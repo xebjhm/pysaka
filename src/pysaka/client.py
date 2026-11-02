@@ -1161,21 +1161,30 @@ class Client:
             return data["letters"]
         return []
 
-    async def get_past_messages(self, session: aiohttp.ClientSession, group_id: int) -> list[dict[str, Any]]:
+    async def get_past_messages(
+        self, session: aiohttp.ClientSession, group_id: int, *, strict: bool = False
+    ) -> Optional[list[dict[str, Any]]]:
         """
         Fetch historical messages (before user's subscription start date).
 
-        Note: This returns messages the user has access to but were sent
-        before their subscription began. Does NOT mark messages as read.
+        Returns the roughly 1–1.5 days of messages immediately before the
+        account's first subscription to the room. The server keeps returning
+        them after the subscription lapses or is renewed. Does NOT mark messages
+        as read.
 
         Args:
             session: Active aiohttp ClientSession.
             group_id: The ID of the group/member.
+            strict: If True, return None when the request failed, so callers can
+                tell a failure apart from a room with no earlier messages.
 
         Returns:
-            List of historical message objects.
+            List of historical message objects (possibly empty); None only when
+            ``strict`` is True and the request failed.
         """
         data = await self.fetch_json(session, f"/groups/{group_id}/past_messages")
+        if data is None and strict:
+            return None
         if data and "messages" in data:
             return data["messages"]
         return []

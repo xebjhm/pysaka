@@ -271,6 +271,15 @@ class TestGetPastMessages:
             result = await client.get_past_messages(MagicMock(), 123)
             assert result == []
 
+    @pytest.mark.asyncio
+    async def test_get_past_messages_strict_distinguishes_failure(self, client):
+        with patch.object(client, "fetch_json", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = None
+            assert await client.get_past_messages(MagicMock(), 123) == []
+            assert await client.get_past_messages(MagicMock(), 123, strict=True) is None
+            mock_fetch.return_value = {"messages": []}
+            assert await client.get_past_messages(MagicMock(), 123, strict=True) == []
+
 
 class TestGetSubscriptionStreak:
     """Tests for get_subscription_streak method."""
