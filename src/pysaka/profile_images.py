@@ -38,7 +38,7 @@ def relative_file(kind: str, url: str) -> Optional[str]:
     """
     basename = urlparse(url).path.rsplit("/", 1)[-1]
     safe = sanitize_name(basename)
-    if not safe:
+    if not safe or safe == ".":
         return None
     return f"{kind}/{safe}"
 
@@ -52,13 +52,15 @@ def merge_index(
     """Return the updated index, or None if nothing changed.
 
     Args:
-        current: Parsed existing ``index.json`` (None or invalid → start fresh).
+        current: Parsed existing ``index.json`` (None, or invalid — not a dict, no
+            ``images`` list, or a non-dict entry in it — → start fresh).
         archived: kind → (relative file, url) for images present on disk now.
         current_urls: kind → URL from the latest API data (recorded even when the
             download has not succeeded yet, so consumers know what is current).
         now_iso: UTC timestamp recorded as ``first_seen`` for new entries.
     """
-    valid = isinstance(current, dict) and isinstance(current.get("images"), list)
+    images = current.get("images") if isinstance(current, dict) else None
+    valid = isinstance(images, list) and all(isinstance(e, dict) for e in images)
     if not valid and not archived and not current_urls:
         return None
     index: dict[str, Any]

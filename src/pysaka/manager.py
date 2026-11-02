@@ -472,7 +472,7 @@ class SyncManager:
             if report["downloaded"] or report["failed"]:
                 logger.info("Profile images archived", member_id=member.get("id"), **report)
         except Exception as e:
-            logger.warning("Profile image archiving failed", member_id=member.get("id"), error=str(e))
+            logger.warning("Profile image archiving failed", member_id=member.get("id"), error_type=type(e).__name__)
 
     async def _sync_member_messages(
         self,

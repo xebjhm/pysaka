@@ -4,6 +4,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from pysaka import profile_images as pi
 from pysaka.client import Client, Group
@@ -31,6 +32,7 @@ def test_image_urls_skips_empty():
         ("https://cdn/a/x.jpeg?sig=1#f", "thumbnail/x.jpeg"),
         ("https://cdn/a/..", "thumbnail/_"),
         ("https://cdn/a/", None),
+        ("https://cdn/a/.", None),
     ],
 )
 def test_relative_file(url, expected):
@@ -65,6 +67,12 @@ def test_merge_index_nothing_to_record_returns_none():
 def test_merge_index_replaces_invalid_existing():
     idx = pi.merge_index(["bad"], {}, {"thumbnail": "u"}, NOW)
     assert idx["current"] == {"thumbnail": "u"} and idx["images"] == []
+
+
+def test_merge_index_replaces_index_with_non_dict_image_entries():
+    corrupt = {"version": 1, "current": {}, "images": ["junk"]}
+    idx = pi.merge_index(corrupt, {"thumbnail": ("thumbnail/a.jpg", "u/a.jpg")}, {"thumbnail": "u/a.jpg"}, NOW)
+    assert idx["images"] == [{"kind": "thumbnail", "file": "thumbnail/a.jpg", "url": "u/a.jpg", "first_seen": NOW}]
 
 
 @pytest.fixture
@@ -137,6 +145,16 @@ async def test_sync_member_survives_archiving_crash(manager, monkeypatch):
     ]
     assert await manager.sync_member(AsyncMock(), GROUP, MEMBER, []) == 1
     assert manager.get_last_ts(79, 134) == "2026-01-01T00:00:00Z"
+
+
+async def test_archiving_crash_logs_error_type_not_message(manager, monkeypatch):
+    secret = "https://cdn/x.jpg?sig=SECRET"
+    monkeypatch.setattr(manager, "archive_profile_images", AsyncMock(side_effect=RuntimeError(secret)))
+    with capture_logs() as logs:
+        await manager._archive_profile_images_safely(AsyncMock(), GROUP, MEMBER)
+    (entry,) = [e for e in logs if e["event"] == "Profile image archiving failed"]
+    assert entry["error_type"] == "RuntimeError"
+    assert "SECRET" not in repr(logs)
 
 
 async def test_archive_url_without_basename_counts_as_failed(manager, tmp_path):
