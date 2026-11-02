@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `SyncManager.update_message_fields(messages_file, message_id, fields)` (and the
+  blocking `update_message_fields_sync`) update one message under a per-file
+  lock. Use them for any local edit of `messages.json`.
+- `SyncManager.sync_member(..., on_new_messages=callback)` reports the messages
+  that were not on disk before, with the member's `phone_image`, for
+  notifications.
+- `sync_member` now archives the member's list icon, chat icon and call-screen
+  image into `profile_images/` with an `index.json` history
+  (`SyncManager.archive_profile_images`).
+- `SyncManager.backfill_past_messages(session, group, member)` adds the room's
+  pre-subscription messages and their media once per member, without moving the
+  cursor.
+- `Client.get_past_messages(..., strict=True)` returns None on a failed request
+  instead of `[]`.
+
+### Fixed
+- **A favorite (or any local `messages.json` edit) made while a sync was writing
+  the same file could drop the newly synced messages permanently**, because the
+  cursor had already advanced past them. `sync_member` and
+  `update_message_metadata` now merge under the same per-file lock as
+  `update_message_fields`.
+- `SyncManager.update_sync_state` keeps keys it does not own in the member's
+  entry instead of replacing the whole entry.
+- `Client.get_messages` no longer raises `ApiError` forever for a room whose
+  whole history is an exact multiple of 200 messages: a full last page without a
+  continuation is accepted when an `order=asc` probe shows the room's first
+  message was collected.
+
 ## [0.4.4] - 2026-11-02
 
 ### Fixed

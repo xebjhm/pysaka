@@ -77,7 +77,9 @@ Main API client supporting all Sakamichi groups.
   this group (the official app's chat-open signal). Defaults to `False` so a
   background sync does **not** zero the user's unread count on the official
   mobile app.
-- **Returns**: List of message objects (sorted by ID ascending).
+- **Returns**: List of message objects (sorted by ID ascending). A full last
+  page without a continuation is accepted as the start of the timeline when the
+  room's first message (an `order=asc` probe) was collected.
 
 #### `download_file(session, url: str, filepath: Path, timestamp: str = None) -> bool`
 - **url**: Signed media URL.
@@ -119,9 +121,11 @@ Main API client supporting all Sakamichi groups.
 - **count**: Number of letters to fetch (default 200).
 - **Returns**: List of letter objects.
 
-#### `get_past_messages(session, group_id: int) -> List[dict]`
+#### `get_past_messages(session, group_id: int, *, strict: bool = False) -> Optional[List[dict]]`
+Messages from the ~1–1.5 days before the account's first subscription to the room (still returned
+after the subscription lapses or is renewed). With `strict=True`, returns None when the request failed.
 - **group_id**: Target group ID.
-- **Returns**: List of historical message objects (before subscription start date).
+- **Returns**: List of historical message objects; `None` only when `strict=True` and the request failed.
 
 #### `get_subscription_streak(session, group_id: int) -> Optional[dict]`
 - **group_id**: Target group ID.
@@ -198,8 +202,8 @@ High-level manager for syncing messages and media.
 - **client**: Authenticated `Client` instance.
 - **output_dir**: Base directory for downloaded content (already service-specific).
 
-#### `sync_member(session, group: dict, member: dict, media_queue: list, progress_callback = None, prefetched_messages: list = None) -> int`
-Sync one member's messages and append their media downloads to `media_queue`.
+#### `sync_member(session, group: dict, member: dict, media_queue: list, progress_callback = None, prefetched_messages: list = None, *, on_new_messages = None) -> int`
+Sync one member's messages, queue their media, and archive the member's profile images.
 - **group** / **member**: Group and member object dicts (as returned by
   `get_groups` / `get_members`).
 - **media_queue**: A caller-owned `list` that this method **appends** media
@@ -207,10 +211,41 @@ Sync one member's messages and append their media downloads to `media_queue`.
   separately after syncing all members.
 - **prefetched_messages**: (Optional) A pre-fetched group timeline. When given,
   the per-member API call is skipped and messages are filtered from this list.
-- **Returns**: The number of new messages processed for this member.
+- **on_new_messages**: (Optional) `callback(member_info, new_messages)`, sync or
+  async, called once after a successful write when messages that were not on
+  disk before were added. `member_info` has `group_id`, `group_name`,
+  `member_id`, `member_name`, `member_dir` (`Path`) and `phone_image`. Not called
+  during corrupt-file/count-mismatch recovery or by `backfill_past_messages`.
+  It is awaited inline, so a slow callback delays that member's sync (hand heavy
+  work off, e.g. schedule a task). Its exceptions are logged and swallowed.
+- **Returns**: The number of messages **processed** (re-fetched overlap
+  included, so not a count of new messages).
 - On a corrupt or count-short `messages.json`, `sync_member` re-fetches the
   member's true full history from the API (bypassing `prefetched_messages`) and
   merges add-only, so recovery never truncates the archive.
+
+#### `update_message_fields(messages_file: Path, message_id: int, fields: dict) -> bool` (async, static) / `update_message_fields_sync(messages_file, message_id, fields) -> bool` (blocking, static)
+Set fields on one message under the file's lock. Use this for every local edit of `messages.json`
+(e.g. favorites) so a concurrent sync cannot lose either change. The blocking form is for callers
+already in a worker thread; the async form runs it in a thread. Returns False if the file or id is
+missing or the write failed.
+
+#### `archive_profile_images(session, group: dict, member: dict, member_dir: Path) -> dict`
+Download the current list icon (`group.thumbnail`), chat icon (`member.thumbnail`) and call-screen
+image (`member.phone_image`) into `member_dir/profile_images/<kind>/<basename>` and record them in
+`profile_images/index.json`:
+`{"version": 1, "current": {kind: url}, "images": [{"kind", "file", "url", "first_seen"}]}`
+(`current` maps each kind to its latest URL; `images` is the history of distinct files). Kinds are
+`thumbnail`, `phone_image` and `group_thumbnail`. Called automatically by `sync_member`, where a
+failure is logged and never affects the result or the cursor. Returns `{"downloaded", "skipped", "failed"}`.
+
+#### `backfill_past_messages(session, group: dict, member: dict) -> int`
+Merge the room's pre-subscription messages (`Client.get_past_messages`) into the member's archive
+and download their media. Requires a prior successful `sync_member` for the member. Runs once per
+member: `past_backfilled_at` is set in sync_state only when the request succeeded, no message failed
+to normalize and every queued media file is on disk; otherwise the next call retries (merging is
+idempotent). Never moves the cursor and never fires `on_new_messages`. Returns the number of
+messages added.
 
 #### `process_media_queue(session, queue: list, concurrency: int = 5, progress_callback = None) -> dict[Path, dict[int, dict]]`
 Download every media item in `queue` and extract media metadata.
@@ -225,7 +260,8 @@ Download every media item in `queue` and extract media metadata.
   `update_message_metadata` to persist it.
 
 #### `update_message_metadata(messages_file: Path, metadata: dict[int, dict])`
-Write extracted media metadata back into a member's `messages.json` (atomic write).
+Write extracted media metadata back into a member's `messages.json` (atomic write, under the same
+per-file lock as `update_message_fields` and `sync_member`).
 - **messages_file**: Path to the member's `messages.json` (not the member dir).
 - **metadata**: `{message_id: {width?, height?, media_duration?, is_muted?}}`,
   typically one member's slice of the `process_media_queue` result.
