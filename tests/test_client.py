@@ -238,7 +238,10 @@ async def test_get_messages_cursor_overlap_before_oldest_message_does_not_deadlo
     oldest message in the room (2026-04-11T10:30:14Z); the caller subtracted a 5-minute
     overlap, so the effective cursor (10:25:14Z) predated every message. Pagination
     reached the true end of the timeline and get_messages raised on EVERY sync, so the
-    room never received new messages again. It must return the full set instead."""
+    room never received new messages again. It must return the full set instead, and
+    leave a warning breadcrumb."""
+    from structlog.testing import capture_logs
+
     client.fetch_json = AsyncMock(
         side_effect=[
             {
@@ -258,21 +261,30 @@ async def test_get_messages_cursor_overlap_before_oldest_message_does_not_deadlo
         ]
     )
 
-    msgs = await client.get_messages(mock_session, group_id=72, since_ts="2026-04-11T10:25:14Z")
+    with capture_logs() as logs:
+        msgs = await client.get_messages(mock_session, group_id=72, since_ts="2026-04-11T10:25:14Z")
     assert [m["id"] for m in msgs] == [500, 501, 502, 503]
+    assert any(
+        e["event"] == "Timeline starts after cursor" and e["log_level"] == "warning" and e["group_id"] == 72
+        for e in logs
+    )
 
 
 def _page(start_id: int, n: int, day: int) -> list[dict]:
-    """``n`` desc-ordered messages, ids ``start_id`` downward, all on 2026-01-``day``."""
-    return [{"id": start_id - i, "published_at": f"2026-01-{day:02d}T{23 - i % 24:02d}:00:00Z"} for i in range(n)]
+    """``n`` messages, newest first: ids descend from ``start_id`` and timestamps
+    descend one minute apart from 2026-01-``day``T23:59 (``n`` <= 1440)."""
+    return [
+        {"id": start_id - i, "published_at": f"2026-01-{day:02d}T{(1439 - i) // 60:02d}:{(1439 - i) % 60:02d}:00Z"}
+        for i in range(n)
+    ]
 
 
 @pytest.mark.asyncio
 async def test_get_messages_raises_on_duplicate_continuation_before_cursor(client, mock_session):
-    """A FULL page (``count`` messages) of NEW messages that hands back the SAME
-    continuation it was given means pagination is stuck mid-timeline: more pages
-    exist but the server will not advance. Breaking while the oldest fetched message
-    is still newer than the cursor skips a gap — fail closed."""
+    """A FULL page that hands back the SAME continuation it was given means
+    pagination is stuck mid-timeline: more pages should exist but the server will not
+    advance. Breaking while the oldest fetched message is still newer than the cursor
+    skips a gap — fail closed."""
     from pysaka.exceptions import ApiError
 
     client.fetch_json = AsyncMock(
@@ -289,11 +301,36 @@ async def test_get_messages_raises_on_duplicate_continuation_before_cursor(clien
 
 
 @pytest.mark.asyncio
+async def test_get_messages_raises_on_full_page_without_continuation_before_cursor(client, mock_session):
+    """A FULL page (``count`` messages) with NO continuation while the cursor is
+    unreached is ambiguous: more data should follow a full page, so the token may
+    have been dropped. Treating it as the timeline start would let the caller advance
+    its cursor past everything older — fail closed. (A genuine last page of exactly
+    ``count`` messages self-heals once the room gets a new message.)"""
+    from pysaka.exceptions import ApiError
+
+    client.fetch_json = AsyncMock(return_value={"messages": _page(1000, 200, 10), "continuation": None})
+
+    with pytest.raises(ApiError):
+        await client.get_messages(mock_session, group_id=1, since_ts="2026-01-01T00:00:00Z")
+
+
+@pytest.mark.asyncio
+async def test_get_messages_full_page_without_continuation_no_cursor_is_clean_end(client, mock_session):
+    """With no cursor (full fetch) there is no gap to protect: a full last page with
+    no continuation simply ends pagination."""
+    client.fetch_json = AsyncMock(return_value={"messages": _page(1000, 200, 10), "continuation": None})
+
+    msgs = await client.get_messages(mock_session, group_id=1)
+    assert len(msgs) == 200
+
+
+@pytest.mark.asyncio
 async def test_get_messages_duplicate_continuation_on_partial_page_is_timeline_start(client, mock_session):
     """A server may mark the LAST page by echoing the continuation instead of
-    omitting it. A partial page (fewer than ``count`` messages) cannot be followed by
-    more data, so even before the cursor this is the start of the timeline — raising
-    would deadlock the room exactly like the 0.4.3 missing-continuation bug."""
+    omitting it. A partial page (fewer than ``count`` messages) of NEW messages cannot
+    be followed by more data, so even before the cursor this is the start of the
+    timeline — raising would deadlock the room exactly like the 0.4.3 bug."""
     client.fetch_json = AsyncMock(
         side_effect=[
             {"messages": _page(1000, 200, 10), "continuation": "tok1"},
@@ -308,11 +345,10 @@ async def test_get_messages_duplicate_continuation_on_partial_page_is_timeline_s
 
 @pytest.mark.asyncio
 async def test_get_messages_raises_when_server_replays_full_page_before_cursor(client, mock_session):
-    """A server that ignores the continuation re-serves the newest FULL page with
-    the same token. That is NOT the end of the timeline — older messages exist but
-    are unreachable this run. Treating it as the end would return only the newest
-    page and let the caller advance its cursor past everything older, so fail
-    closed and retry next sync."""
+    """A server that ignores the continuation re-serves the newest page with the same
+    token. That is NOT the end of the timeline — older messages exist but are
+    unreachable this run. Treating it as the end would return only the newest page and
+    let the caller advance its cursor past everything older, so fail closed."""
     from pysaka.exceptions import ApiError
 
     first = _page(1000, 200, 10)
@@ -328,10 +364,31 @@ async def test_get_messages_raises_when_server_replays_full_page_before_cursor(c
 
 
 @pytest.mark.asyncio
+async def test_get_messages_raises_when_server_replays_partial_page_before_cursor(client, mock_session):
+    """A replay is a replay regardless of page size: a short page that only re-serves
+    already-collected messages with the same token is the server ignoring the token,
+    not a last page — fail closed while the cursor is unreached."""
+    from pysaka.exceptions import ApiError
+
+    first = _page(1000, 150, 10)
+    client.fetch_json = AsyncMock(
+        side_effect=[
+            {"messages": first, "continuation": "tok1"},
+            {"messages": list(first), "continuation": "tok1"},
+        ]
+    )
+
+    with pytest.raises(ApiError):
+        await client.get_messages(mock_session, group_id=1, since_ts="2026-01-01T00:00:00Z")
+
+
+@pytest.mark.asyncio
 async def test_get_messages_duplicate_continuation_without_cursor_is_clean_end(client, mock_session):
-    """A repeated continuation on a full page of new messages with NO cursor (full
-    fetch) has no gap to protect: stop paginating (avoiding an infinite loop) and
-    return what was collected."""
+    """A repeated continuation on a full page with NO cursor (full fetch) has no gap
+    to protect: stop paginating (avoiding an infinite loop), return what was
+    collected, and warn that pagination looked stuck."""
+    from structlog.testing import capture_logs
+
     client.fetch_json = AsyncMock(
         side_effect=[
             {"messages": _page(1000, 200, 10), "continuation": "tok1"},
@@ -339,9 +396,42 @@ async def test_get_messages_duplicate_continuation_without_cursor_is_clean_end(c
         ]
     )
 
-    msgs = await client.get_messages(mock_session, group_id=1)
+    with capture_logs() as logs:
+        msgs = await client.get_messages(mock_session, group_id=1)
     assert len(msgs) == 400
     assert client.fetch_json.await_count == 2
+    assert any(e["event"].startswith("Timeline pagination stuck") and e["log_level"] == "warning" for e in logs)
+
+
+@pytest.mark.asyncio
+async def test_get_messages_legacy_since_id_raises_on_stuck_full_page_before_id_found(client, mock_session):
+    """Legacy ``since_id`` path: while the since_id message has not been seen, the
+    cursor is unreached even though no timestamp is known yet. A stuck full page must
+    fail closed rather than return only the newest pages (the caller would advance
+    ``last_id`` past the unfetched messages)."""
+    from pysaka.exceptions import ApiError
+
+    client.fetch_json = AsyncMock(
+        side_effect=[
+            {"messages": _page(1000, 200, 10), "continuation": "tok1"},
+            {"messages": _page(800, 200, 9), "continuation": "tok1"},
+        ]
+    )
+
+    with pytest.raises(ApiError):
+        await client.get_messages(mock_session, group_id=1, since_id=5)
+
+
+@pytest.mark.asyncio
+async def test_get_messages_legacy_since_id_partial_last_page_is_clean_end(client, mock_session):
+    """Legacy ``since_id`` path: a partial last page with no continuation is the
+    timeline start even if the since_id message was never found (e.g. deleted);
+    return everything newer than since_id."""
+    client.fetch_json = AsyncMock(return_value={"messages": _page(1000, 10, 10), "continuation": None})
+
+    # since_id 5 is not on the page (never found): falls back to the id filter.
+    msgs = await client.get_messages(mock_session, group_id=1, since_id=5)
+    assert [m["id"] for m in msgs] == list(range(991, 1001))
 
 
 @pytest.mark.asyncio

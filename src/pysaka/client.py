@@ -687,16 +687,17 @@ class Client:
 
         Returns:
             List of message dicts, sorted by ID ascending. When the timeline ends
-            (no continuation, or a last page that echoes its continuation) before
-            reaching ``since_ts``, that is the start of the timeline and every
-            fetched message is returned.
+            on a partial page (no continuation, or one echoing its continuation)
+            before reaching the cursor (``since_ts``, or one found via
+            ``since_id``), that is the start of the timeline and every fetched
+            message is returned.
 
         Raises:
             ApiError: If pagination stops in a way that could hide unfetched
                 messages — a failed page fetch or an empty page carrying a
-                continuation after earlier pages were collected, or (while the
-                ``since_ts`` cursor is still unreached) a full page that repeats
-                its continuation.
+                continuation after earlier pages were collected, or, while the
+                cursor is still unreached, a full page with a missing or repeated
+                continuation or a page that replays already-collected messages.
         """
         all_messages: dict[int, dict[str, Any]] = {}
         page = 0
@@ -761,6 +762,7 @@ class Client:
                     )
                 break
 
+            known_before_page = len(all_messages)
             for m in messages:
                 all_messages[m["id"]] = m
 
@@ -785,39 +787,43 @@ class Client:
             current_continuation = data.get("continuation")
             oldest_timestamp = messages[-1].get("published_at", "")
             before_cursor = bool(effective_ts and oldest_timestamp and oldest_timestamp > effective_ts)
+            # Cursor not reached yet: a timestamp cursor still older than this page,
+            # or a legacy since_id whose message has not been seen yet.
+            cursor_unreached = before_cursor or need_discover_ts
             repeated = bool(current_continuation) and current_continuation == params.get("continuation")
-            # A partial page (fewer than ``count``) cannot be followed by more data:
-            # the server is marking its LAST page, whether it omits the continuation
-            # or echoes the one it was given. A FULL page that echoes its token is NOT
-            # treated as the end — a server ignoring the continuation re-serves the
-            # newest page forever, and breaking there would drop everything older.
-            last_page = len(messages) < params["count"]
-            if repeated and not last_page:
-                # A full page of NEW messages handing back the token it was given:
-                # pagination is stuck mid-timeline. If the cursor was not reached yet,
-                # the older-but-still-new messages between here and the cursor are
-                # unfetched — breaking would let the caller advance its cursor past
-                # that gap. Fail closed so the next sync retries.
-                if before_cursor:
-                    raise ApiError(
-                        f"Timeline pagination for group {group_id} returned a duplicate "
-                        f"continuation on a full page while the oldest fetched message "
-                        f"({oldest_timestamp}) is still newer than the cursor "
-                        f"({effective_ts}); refusing to skip a possible gap."
-                    )
-                break
             if not current_continuation or repeated:
-                # End of timeline: the server has nothing older — this is the START of
-                # the timeline, even when the cursor predates it (e.g. a caller's
-                # overlap window subtracted from a cursor pinned at the room's oldest
-                # message). Nothing older can be fetched, so raising here would only
-                # fail every future sync and freeze the room permanently.
+                # The server offers no further page. That is the genuine START of the
+                # timeline only on a partial page (fewer than ``count``) — whether the
+                # server omits the token or echoes it — and only if the page is not a
+                # replay of messages already collected. A FULL page means more data
+                # should follow (the token was dropped), and a replay means the server
+                # ignored the token; breaking on either would let the caller advance
+                # its cursor past everything older, so fail closed while the cursor is
+                # unreached and retry next sync.
+                replayed = repeated and len(all_messages) == known_before_page
+                timeline_start = len(messages) < params["count"] and not replayed
+                if cursor_unreached and not timeline_start:
+                    raise ApiError(
+                        f"Timeline pagination for group {group_id} ended (missing or "
+                        f"repeated continuation) on a full or replayed page while the "
+                        f"cursor (since_ts={effective_ts}, since_id={since_id}) is "
+                        f"still unreached; refusing to skip a possible gap."
+                    )
                 if before_cursor:
-                    logger.info(
+                    # Routine, not a gap: e.g. a caller's overlap window subtracted
+                    # from a cursor pinned at the room's oldest message. Nothing older
+                    # exists, so raising would fail every sync and freeze the room.
+                    logger.warning(
                         "Timeline starts after cursor",
                         group_id=group_id,
                         oldest=oldest_timestamp,
                         cursor=effective_ts,
+                    )
+                elif repeated and not timeline_start:
+                    logger.warning(
+                        "Timeline pagination stuck without a cursor; returning collected pages",
+                        group_id=group_id,
+                        collected=len(all_messages),
                     )
                 break
 
