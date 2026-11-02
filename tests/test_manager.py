@@ -623,7 +623,8 @@ async def test_sync_member_recovers_full_history_on_count_mismatch(sync_manager)
 
     sync_manager.client.get_messages.side_effect = fake_get_messages
 
-    await sync_manager.sync_member(session, group, member, media_queue)
+    on_new_messages = MagicMock()
+    await sync_manager.sync_member(session, group, member, media_queue, on_new_messages=on_new_messages)
 
     # File must contain the COMPLETE history, not just the truncated single msg.
     with open(json_path, encoding="utf-8") as f:
@@ -634,6 +635,8 @@ async def test_sync_member_recovers_full_history_on_count_mismatch(sync_manager)
     assert any(call.kwargs.get("since_ts") is None for call in sync_manager.client.get_messages.call_args_list)
     # Recovered state reflects the full count.
     assert sync_manager.sync_state["1_10"]["total_messages"] == 3
+    # Recovery must not fire the new-messages callback.
+    on_new_messages.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -969,6 +972,24 @@ async def test_update_message_metadata_goes_through_lock(sync_manager, tmp_path)
     before = p.stat().st_mtime_ns
     await sync_manager.update_message_metadata(p, {99: {"width": 1}})  # no match: no write
     assert p.stat().st_mtime_ns == before
+
+
+@pytest.mark.asyncio
+async def test_update_message_metadata_ignores_non_dict_file(sync_manager, tmp_path):
+    p = tmp_path / "messages.json"
+    p.write_text("[]", encoding="utf-8")
+    await sync_manager.update_message_metadata(p, {1: {"width": 10}})
+    assert p.read_text(encoding="utf-8") == "[]"
+
+
+@pytest.mark.asyncio
+async def test_update_message_metadata_logs_when_write_fails(sync_manager, tmp_path, monkeypatch):
+    p = tmp_path / "messages.json"
+    p.write_text(json.dumps({"messages": [{"id": 1}]}), encoding="utf-8")
+    monkeypatch.setattr(SyncManager, "_atomic_write_json", staticmethod(lambda target, data: False))
+    await sync_manager.update_message_metadata(p, {1: {"width": 10}})  # must not raise
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert "width" not in data["messages"][0]
 
 
 def test_member_dir_path_matches_sync_layout(sync_manager):

@@ -310,7 +310,9 @@ class SyncManager:
                 (sync or async) called once after a successful write when at
                 least one message was not on disk before. Not called during
                 corrupt-file / count-mismatch recovery. Exceptions it raises are
-                logged and swallowed.
+                logged and swallowed. The callback is awaited inline, so a slow
+                callback delays that member's sync; hand heavy work off (e.g.
+                schedule a task).
 
         Returns:
             Number of messages processed in this run (includes re-fetched
@@ -349,7 +351,8 @@ class SyncManager:
         Message part of :meth:`sync_member` (see there for arguments).
 
         Returns:
-            Number of new messages processed.
+            Number of messages processed in this run (re-fetched overlap
+            included).
         """
         gid = group["id"]
         mid = member["id"]
