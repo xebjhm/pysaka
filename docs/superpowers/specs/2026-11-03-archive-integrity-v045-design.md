@@ -118,15 +118,15 @@ Result: the new messages are gone from disk but the cursor has moved past them �
 Total 98 messages / 8 rooms. Response items carry the same fields as timeline messages.
 
 ### Design
-- New public `async SyncManager.backfill_past_messages(session, group, member, media_queue) -> int`:
-  1. Skip (return 0) if `sync_state[f"{gid}_{mid}"]["past_backfilled_at"]` is set.
+- New public `async SyncManager.backfill_past_messages(session, group, member) -> int`:
+  1. Skip (return 0) if the member has no sync_state entry yet (backfill runs only after a first successful `sync_member`) or `past_backfilled_at` is set.
   2. `client.get_past_messages(session, gid)`, filter by `member_id == mid` (same rule as `sync_member`).
-  3. `prepare_messages(...)` — media enters the normal queue.
+  3. `prepare_messages(...)` into a **private** queue, then `process_media_queue` + `update_message_metadata` inline. Backfill is small (≤ ~30 items per room, once), and it must own its media: Verify & Fix (`reconcile_member_media`) takes fresh URLs from the timeline, which never contains pre-subscription messages, so it could not repair them.
   4. `_locked_update` merge (same `_merge_messages`; ids already present are upserted as usual).
-  5. Update `total_messages` in sync_state **without touching** `last_message_id` / `last_sync_ts` (new helper `update_total_messages`); set `past_backfilled_at` (UTC ISO). Persist with `save_sync_state`.
+  5. Update `total_messages` in sync_state **without touching** `last_message_id` / `last_sync_ts` (new helper `update_total_messages`). Set `past_backfilled_at` (UTC ISO) **only if** the API answered and every queued media file is present on disk afterwards. Persist with `save_sync_state`.
   6. Return the number of messages added.
-- An empty response is a valid final answer (room subscribed at opening) → flag is still set. An API error/exception → flag **not** set, retried next sync.
-- Media that fails to download is recovered by the existing `reconcile_member_media` / Verify & Fix path (messages carry `media_file`); no cursor involvement because backfilled messages are older than the cursor.
+- An empty response is a valid final answer (room subscribed at opening) → flag is set. An API error or any missing media → flag **not** set; the next sync retries (merge is idempotent, `download_file` skips files already present).
+- No cursor involvement: backfilled messages are older than the cursor.
 - Does **not** fire `on_new_messages`. Backfilled ids are smaller than any read pointer, so they do not appear as unread in SakaDesk.
 - Called by consumers (SakaDesk sync orchestration, once per member per sync; the flag makes later calls free). saka-cli may adopt it later; not required for this release.
 
