@@ -661,6 +661,24 @@ async def test_download_file_logs_never_contain_signed_query(tmp_path, client, m
     assert "/x.jpg" in dumped
 
 
+def test_redact_url_tolerates_unparseable_urls():
+    from pysaka.client import _redact_url
+
+    assert _redact_url("http://[abc/x.jpg?sig=SECRET") == "<unparseable url>"
+
+
+@pytest.mark.asyncio
+async def test_download_file_with_unparseable_url_fails_cleanly(tmp_path, client, mock_session):
+    from structlog.testing import capture_logs
+
+    mock_session.get.return_value.__aenter__.return_value.status = 403
+    with capture_logs() as logs:
+        ok = await client.download_file(mock_session, "http://[abc/x.jpg?sig=SECRET", tmp_path / "x.jpg", retries=1)
+    assert ok is False
+    dumped = str(logs)
+    assert "SECRET" not in dumped and "<unparseable url>" in dumped
+
+
 def _desc_page(start_id, n, ts_fn):
     # Newest first (order=desc), like the API.
     return [{"id": i, "published_at": ts_fn(i)} for i in range(start_id + n - 1, start_id - 1, -1)]

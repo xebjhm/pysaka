@@ -21,9 +21,13 @@ def _redact_url(url: str) -> str:
     """Return ``scheme://host/path`` of ``url`` for logging.
 
     Signed media URLs carry their credentials in the query string, so the query
-    and fragment are dropped.
+    and fragment are dropped. A URL that cannot be parsed is replaced by
+    ``"<unparseable url>"`` so that logging never raises.
     """
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<unparseable url>"
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
