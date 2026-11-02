@@ -660,6 +660,18 @@ class Client:
         result = await self.fetch_json(session, f"/groups/{group_id}/members")
         return result or []
 
+    async def _timeline_first_id(self, session: aiohttp.ClientSession, group_id: int) -> Optional[int]:
+        """Id of the room's very first message (``order=asc``, one item), or None
+        if the probe failed. Used to tell the true start of a timeline apart from
+        a dropped continuation on a full page."""
+        data = await self.fetch_json(
+            session,
+            f"/groups/{group_id}/timeline",
+            {"count": 1, "order": "asc", "clear_unread": "false"},
+        )
+        messages = (data or {}).get("messages") or []
+        return messages[0].get("id") if messages else None
+
     async def get_messages(
         self,
         session: aiohttp.ClientSession,
@@ -690,7 +702,9 @@ class Client:
             on a partial page (no continuation, or one echoing its continuation)
             before reaching the cursor (``since_ts``, or one found via
             ``since_id``), that is the start of the timeline and every fetched
-            message is returned.
+            message is returned. A full last page without a continuation is also
+            accepted as the start of the timeline when the room's first message
+            (probed with ``order=asc``) is among the collected messages.
 
         Raises:
             ApiError: If pagination stops in a way that could hide unfetched
@@ -802,6 +816,13 @@ class Client:
                 # unreached and retry next sync.
                 replayed = repeated and len(all_messages) == known_before_page
                 timeline_start = len(messages) < params["count"] and not replayed
+                if cursor_unreached and not timeline_start and not replayed and not repeated:
+                    # A FULL last page with no continuation is ambiguous: dropped
+                    # token, or a history that is an exact multiple of the page
+                    # size. Ask the server for the room's first message; if we
+                    # already hold it, nothing older exists (KNOWN_BUGS #1).
+                    first_id = await self._timeline_first_id(session, group_id)
+                    timeline_start = first_id is not None and first_id in all_messages
                 if cursor_unreached and not timeline_start:
                     raise ApiError(
                         f"Timeline pagination for group {group_id} ended (missing or "

@@ -306,10 +306,17 @@ async def test_get_messages_raises_on_full_page_without_continuation_before_curs
     unreached is ambiguous: more data should follow a full page, so the token may
     have been dropped. Treating it as the timeline start would let the caller advance
     its cursor past everything older — fail closed. (A genuine last page of exactly
-    ``count`` messages self-heals once the room gets a new message.)"""
+    ``count`` messages self-heals once the room gets a new message.) The
+    ``order=asc`` probe returns an uncollected (older) first message, so the page is
+    not confirmed as the timeline start."""
     from pysaka.exceptions import ApiError
 
-    client.fetch_json = AsyncMock(return_value={"messages": _page(1000, 200, 10), "continuation": None})
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return {"messages": [{"id": 1, "published_at": "2025-12-01T00:00:00Z"}]}
+        return {"messages": _page(1000, 200, 10), "continuation": None}
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
 
     with pytest.raises(ApiError):
         await client.get_messages(mock_session, group_id=1, since_ts="2026-01-01T00:00:00Z")
@@ -630,3 +637,69 @@ async def test_download_file_retries_then_succeeds(tmp_path, client, mock_sessio
     ok = await client.download_file(mock_session, "https://cdn/3.jpg", dest, retries=3)
     assert ok is True
     assert dest.read_bytes() == b"OK"
+
+
+def _desc_page(start_id, n, ts_fn):
+    # Newest first (order=desc), like the API.
+    return [{"id": i, "published_at": ts_fn(i)} for i in range(start_id + n - 1, start_id - 1, -1)]
+
+
+def _sec_ts(i):
+    return f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}Z"
+
+
+@pytest.mark.asyncio
+async def test_full_last_page_at_timeline_start_is_not_a_gap(monkeypatch):
+    """History is exactly 400 messages: the second page is full (200) and has no
+    continuation. When the room's first message (order=asc probe) is in the
+    collected set, this is the start of the timeline — return, don't raise."""
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
+    client = Client(group=Group.HINATAZAKA46, access_token="t")
+    pages = [
+        {"messages": _desc_page(201, 200, _sec_ts), "continuation": "c1"},
+        {"messages": _desc_page(1, 200, _sec_ts)},  # full, no continuation
+    ]
+    calls = []
+
+    async def fetch(session, endpoint, params=None):
+        calls.append(params)
+        if params.get("order") == "asc":
+            return {"messages": [{"id": 1, "published_at": _sec_ts(1)}]}
+        return pages.pop(0)
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
+    msgs = await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
+    assert len(msgs) == 400
+    assert any(p.get("order") == "asc" for p in calls)
+
+
+@pytest.mark.asyncio
+async def test_full_last_page_still_raises_when_first_message_not_collected(monkeypatch):
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
+    client = Client(group=Group.HINATAZAKA46, access_token="t")
+    pages = [{"messages": _desc_page(201, 200, _sec_ts)}]  # full, no continuation, but id 1 never seen
+
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return {"messages": [{"id": 1, "published_at": _sec_ts(1)}]}
+        return pages.pop(0)
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
+    with pytest.raises(ApiError):
+        await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
+
+
+@pytest.mark.asyncio
+async def test_full_last_page_raises_when_probe_fails(monkeypatch):
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
+    client = Client(group=Group.HINATAZAKA46, access_token="t")
+    pages = [{"messages": _desc_page(1, 200, _sec_ts)}]
+
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return None
+        return pages.pop(0)
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
+    with pytest.raises(ApiError):
+        await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
