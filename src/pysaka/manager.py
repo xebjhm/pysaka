@@ -649,10 +649,16 @@ class SyncManager:
         only — birthday, sex, subdivision and FC accounts are personal data the
         app does not need and are never stored or logged) and archives the avatar
         under ``account/profile_images/`` with the same index/history as member
-        images. Auth errors propagate; anything else is logged by type.
+        images. A missing or non-string ``name``/``updated_at`` keeps the stored
+        value (``""``/``None`` on first write); only a non-empty string
+        ``thumbnail`` is archived. Auth errors (``SessionExpiredError``,
+        ``RefreshFailedError``) propagate; any other error, from the fetch or
+        from the file/avatar work after it, is logged by exception type only
+        (never the nickname or avatar URL) and yields all-zero counts.
 
         Returns:
-            ``{"downloaded": n, "skipped": n, "failed": n}`` for the avatar.
+            ``{"downloaded": n, "skipped": n, "failed": n}`` for the avatar
+            (all zero when nothing was archived or a non-auth error occurred).
         """
         empty = {"downloaded": 0, "skipped": 0, "failed": 0}
         try:
@@ -665,16 +671,34 @@ class SyncManager:
         if not isinstance(profile, dict):
             return empty
 
-        account_dir = self.output_dir / "account"
-        account_dir.mkdir(parents=True, exist_ok=True)
-        record = {"version": 1, "name": profile.get("name") or "", "updated_at": profile.get("updated_at")}
+        name = profile.get("name")
+        updated_at = profile.get("updated_at")
+        thumbnail = profile.get("thumbnail")
+        urls = {"thumbnail": thumbnail} if isinstance(thumbnail, str) and thumbnail else {}
 
         def mutate(current: Optional[Any]) -> tuple[Optional[Any], None]:
+            stored = current if isinstance(current, dict) else {}
+            kept_name = stored.get("name")
+            kept_updated_at = stored.get("updated_at")
+            record = {
+                "version": 1,
+                "name": name if isinstance(name, str) and name else (kept_name if isinstance(kept_name, str) else ""),
+                "updated_at": updated_at
+                if isinstance(updated_at, str)
+                else (kept_updated_at if isinstance(kept_updated_at, str) else None),
+            }
             return (None if current == record else record), None
 
-        await asyncio.to_thread(self._locked_update, account_dir / "profile.json", mutate, corrupt_ok=True)
-        urls = {"thumbnail": profile["thumbnail"]} if profile.get("thumbnail") else {}
-        return await self._archive_image_set(session, account_dir / profile_images.DIR_NAME, urls)
+        try:
+            account_dir = self.output_dir / "account"
+            account_dir.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(self._locked_update, account_dir / "profile.json", mutate, corrupt_ok=True)
+            return await self._archive_image_set(session, account_dir / profile_images.DIR_NAME, urls)
+        except (SessionExpiredError, RefreshFailedError):
+            raise
+        except Exception as e:
+            logger.warning("Account profile archiving failed", error_type=type(e).__name__)
+            return empty
 
     async def _sync_member_messages(
         self,

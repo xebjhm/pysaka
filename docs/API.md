@@ -299,12 +299,15 @@ history as member profile images, so an app can show the user's avatar beside th
 The same current-image rule as for `archive_profile_images` applies to `account/profile_images/index.json`:
 match the `images[]` entry by `kind` and `file` (via `profile_images.relative_file`), never by full URL.
 Birthday, sex, subdivision (region) and FC accounts are returned by `/profile` too but are
-deliberately **not** stored or logged. A missing profile writes nothing. Idempotent: an avatar
+deliberately **not** stored or logged. A missing profile writes nothing. A missing or non-string
+`name`/`updated_at` keeps the stored value (`""`/`null` on the first write), and only a non-empty
+string `thumbnail` is archived. Idempotent: an avatar
 already on disk is skipped, a changed avatar adds a history entry. Returns
 `{"downloaded", "skipped", "failed"}` for the avatar. Not called by `sync_member`; call it once per
 service.
-- **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. Any other fetch error is
-  logged by type and returns all-zero counts.
+- **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. Any other error (the fetch,
+  or the file and avatar work after it, e.g. `OSError`) is logged by exception type only (never
+  the nickname or avatar URL) and returns all-zero counts.
 
 #### `process_media_queue(session, queue: list, concurrency: int = 5, progress_callback = None) -> dict[Path, dict[int, dict]]`
 Download every media item in `queue` and extract media metadata.

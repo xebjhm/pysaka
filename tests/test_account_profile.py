@@ -4,6 +4,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from pysaka.client import Client, Group
 from pysaka.exceptions import SessionExpiredError
@@ -74,8 +75,84 @@ async def test_missing_profile_writes_nothing(manager):
 
 
 async def test_auth_error_propagates_other_errors_swallowed(manager):
+    empty = {"downloaded": 0, "skipped": 0, "failed": 0}
     manager.client.get_profile = AsyncMock(side_effect=SessionExpiredError("x"))
     with pytest.raises(SessionExpiredError):
         await manager.archive_account_profile(AsyncMock())
     manager.client.get_profile = AsyncMock(side_effect=RuntimeError("boom"))
-    assert (await manager.archive_account_profile(AsyncMock()))["failed"] == 0
+    assert await manager.archive_account_profile(AsyncMock()) == empty
+    assert not (manager.output_dir / "account").exists()
+
+
+async def test_profile_without_thumbnail_archives_no_avatar(manager):
+    manager.client.get_profile.return_value = {k: v for k, v in PROFILE.items() if k != "thumbnail"}
+    assert await manager.archive_account_profile(AsyncMock()) == {"downloaded": 0, "skipped": 0, "failed": 0}
+    account = manager.output_dir / "account"
+    assert _read(account / "profile.json")["name"] == "ハオ🐱"
+    assert not (account / "profile_images").exists()
+    manager.client.download_file.assert_not_called()
+
+
+@pytest.mark.parametrize("thumbnail", [None, "", 123, ["x"], {"a": "b"}])
+async def test_non_string_thumbnail_is_ignored(manager, thumbnail):
+    manager.client.get_profile.return_value = {**PROFILE, "thumbnail": thumbnail}
+    assert await manager.archive_account_profile(AsyncMock()) == {"downloaded": 0, "skipped": 0, "failed": 0}
+    assert not (manager.output_dir / "account" / "profile_images").exists()
+    manager.client.download_file.assert_not_called()
+
+
+@pytest.mark.parametrize("name", [None, "", 42])
+async def test_missing_or_invalid_name_keeps_stored_name(manager, name):
+    await manager.archive_account_profile(AsyncMock())
+    manager.client.get_profile.return_value = {**PROFILE, "name": name}
+    if name is None:
+        del manager.client.get_profile.return_value["name"]
+    await manager.archive_account_profile(AsyncMock())
+    assert _read(manager.output_dir / "account" / "profile.json")["name"] == "ハオ🐱"
+
+
+async def test_invalid_updated_at_keeps_stored_or_none(manager):
+    manager.client.get_profile.return_value = {**PROFILE, "updated_at": 5}
+    await manager.archive_account_profile(AsyncMock())
+    path = manager.output_dir / "account" / "profile.json"
+    assert _read(path)["updated_at"] is None  # first write: nothing stored yet
+    manager.client.get_profile.return_value = dict(PROFILE)
+    await manager.archive_account_profile(AsyncMock())
+    assert _read(path)["updated_at"] == "2026-10-01T00:00:00Z"
+    manager.client.get_profile.return_value = {k: v for k, v in PROFILE.items() if k != "updated_at"}
+    await manager.archive_account_profile(AsyncMock())
+    assert _read(path)["updated_at"] == "2026-10-01T00:00:00Z"
+
+
+async def test_missing_name_on_first_write_is_empty(manager):
+    manager.client.get_profile.return_value = {k: v for k, v in PROFILE.items() if k != "name"}
+    await manager.archive_account_profile(AsyncMock())
+    assert _read(manager.output_dir / "account" / "profile.json")["name"] == ""
+
+
+async def test_post_fetch_oserror_is_swallowed(manager, monkeypatch):
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(type(manager.output_dir), "mkdir", boom)
+    assert await manager.archive_account_profile(AsyncMock()) == {"downloaded": 0, "skipped": 0, "failed": 0}
+
+
+async def test_archive_failure_is_swallowed_and_auth_still_propagates(manager):
+    manager._archive_image_set = AsyncMock(side_effect=RuntimeError("boom"))
+    assert await manager.archive_account_profile(AsyncMock()) == {"downloaded": 0, "skipped": 0, "failed": 0}
+    manager._archive_image_set = AsyncMock(side_effect=SessionExpiredError("x"))
+    with pytest.raises(SessionExpiredError):
+        await manager.archive_account_profile(AsyncMock())
+
+
+async def test_logs_never_contain_nickname_or_avatar_url(manager):
+    manager._archive_image_set = AsyncMock(side_effect=RuntimeError(f"{PROFILE['name']} {PROFILE['thumbnail']}"))
+    with capture_logs() as logs:
+        await manager.archive_account_profile(AsyncMock())
+    assert logs, "failure path should log something"
+    blob = json.dumps(logs, ensure_ascii=False, default=str)
+    assert PROFILE["name"] not in blob
+    assert PROFILE["thumbnail"] not in blob
+    assert "abc" not in blob
+    assert any(e.get("error_type") == "RuntimeError" for e in logs)
