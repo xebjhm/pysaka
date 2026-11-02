@@ -739,8 +739,11 @@ class SyncManager:
         value (``""``/``None`` on first write); only a non-empty string
         ``thumbnail`` is archived. Auth errors (``SessionExpiredError``,
         ``RefreshFailedError``) propagate; any other error, from the fetch or
-        from the file/avatar work after it, is logged by exception type only
-        (never the nickname or avatar URL) and yields all-zero counts.
+        from the file/avatar work after it, yields all-zero counts and this
+        method's own error log carries the exception type only (never the
+        nickname). A failed avatar download is logged by
+        :meth:`Client.download_file` with the URL's scheme, host and path (the
+        signed query string is redacted).
 
         Returns:
             ``{"downloaded": n, "skipped": n, "failed": n}`` for the avatar

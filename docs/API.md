@@ -315,8 +315,9 @@ already on disk is skipped, a changed avatar adds a history entry. Returns
 `{"downloaded", "skipped", "failed"}` for the avatar. Not called by `sync_member`; call it once per
 service.
 - **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. Any other error (the fetch,
-  or the file and avatar work after it, e.g. `OSError`) is logged by exception type only (never
-  the nickname or avatar URL) and returns all-zero counts.
+  or the file and avatar work after it, e.g. `OSError`) returns all-zero counts, and this method's
+  own error log carries the exception type only (never the nickname). A failed avatar download is
+  logged by `Client.download_file` with the URL's scheme, host and path (query string redacted).
 
 #### `process_media_queue(session, queue: list, concurrency: int = 5, progress_callback = None) -> dict[Path, dict[int, dict]]`
 Download every media item in `queue` and extract media metadata.

@@ -166,7 +166,7 @@ Otherwise the item is dropped from 0.4.5 and `KNOWN_BUGS.md` stays as-is. Either
 
 - New public `async SyncManager.archive_account_profile(session) -> dict` (`{"downloaded","skipped","failed"}`): `client.get_profile()`; keeps **only** `name` and `thumbnail` — birthday, sex, subdivision and FC account ids are personal data the app does not need and are neither stored nor logged.
 - Writes `<output_dir>/account/profile.json` (`{"version": 1, "name", "updated_at"}`) and archives the avatar with the same mechanism and index format as §2 (`<output_dir>/account/profile_images/thumbnail/<basename>` + `index.json`, kind `thumbnail`), so avatar history comes for free.
-- `output_dir` is per service, so each group's own avatar is kept separately (users can set different ones). Failures are logged by type and never raise except auth errors.
+- `output_dir` is per service, so each group's own avatar is kept separately (users can set different ones). Failures never raise except auth errors; this method's own error log carries the exception type only, and a failed avatar download is logged by `Client.download_file` with the URL's scheme/host/path (query redacted).
 
 ## 7. Testing
 
