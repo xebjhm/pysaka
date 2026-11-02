@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `Client.get_messages` no longer raises `ApiError` when the timeline ends
+  before reaching a `since_ts` cursor — no `continuation`, or a last page
+  (fewer than `count` messages) that echoes the continuation it was given. That case is the start of the room's timeline, not
+  a gap — e.g. a caller's overlap window subtracted from a cursor pinned at the
+  room's oldest message. Since 0.4.3 it raised on every call, so `SyncManager`
+  callers never advanced the cursor and the room stopped receiving new messages
+  permanently. It now returns the messages and logs `Timeline starts after
+  cursor`. A **full page** that repeats its continuation before the cursor
+  still raises `ApiError` (pagination is stuck; retry next sync).
+
 ## [0.4.3] - 2026-07-08
 
 ### Added

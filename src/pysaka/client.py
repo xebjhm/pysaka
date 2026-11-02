@@ -686,7 +686,17 @@ class Client:
                 the official mobile app.
 
         Returns:
-            List of message dicts, sorted by ID ascending.
+            List of message dicts, sorted by ID ascending. When the timeline ends
+            (no continuation, or a last page that echoes its continuation) before
+            reaching ``since_ts``, that is the start of the timeline and every
+            fetched message is returned.
+
+        Raises:
+            ApiError: If pagination stops in a way that could hide unfetched
+                messages — a failed page fetch or an empty page carrying a
+                continuation after earlier pages were collected, or (while the
+                ``since_ts`` cursor is still unreached) a full page that repeats
+                its continuation.
         """
         all_messages: dict[int, dict[str, Any]] = {}
         page = 0
@@ -773,23 +783,42 @@ class Client:
                     break
 
             current_continuation = data.get("continuation")
-            if not current_continuation or current_continuation == params.get("continuation"):
-                # A missing or repeated continuation on a non-empty page normally
-                # means end-of-timeline. But when a cursor is set and the oldest
-                # message on this page is STILL newer than the cursor, the timeline
-                # ran out before reaching it: the server offered no way to fetch the
-                # older-but-still-new messages between here and the cursor. Breaking
-                # would let the caller advance its cursor past that gap. Fail closed,
-                # mirroring the empty-page and failed-fetch guards above.
-                if effective_ts and messages:
-                    oldest_timestamp = messages[-1].get("published_at", "")
-                    if oldest_timestamp and oldest_timestamp > effective_ts:
-                        raise ApiError(
-                            f"Timeline pagination for group {group_id} ended with a "
-                            f"missing/duplicate continuation while the oldest fetched "
-                            f"message ({oldest_timestamp}) is still newer than the "
-                            f"cursor ({effective_ts}); refusing to skip a possible gap."
-                        )
+            oldest_timestamp = messages[-1].get("published_at", "")
+            before_cursor = bool(effective_ts and oldest_timestamp and oldest_timestamp > effective_ts)
+            repeated = bool(current_continuation) and current_continuation == params.get("continuation")
+            # A partial page (fewer than ``count``) cannot be followed by more data:
+            # the server is marking its LAST page, whether it omits the continuation
+            # or echoes the one it was given. A FULL page that echoes its token is NOT
+            # treated as the end — a server ignoring the continuation re-serves the
+            # newest page forever, and breaking there would drop everything older.
+            last_page = len(messages) < params["count"]
+            if repeated and not last_page:
+                # A full page of NEW messages handing back the token it was given:
+                # pagination is stuck mid-timeline. If the cursor was not reached yet,
+                # the older-but-still-new messages between here and the cursor are
+                # unfetched — breaking would let the caller advance its cursor past
+                # that gap. Fail closed so the next sync retries.
+                if before_cursor:
+                    raise ApiError(
+                        f"Timeline pagination for group {group_id} returned a duplicate "
+                        f"continuation on a full page while the oldest fetched message "
+                        f"({oldest_timestamp}) is still newer than the cursor "
+                        f"({effective_ts}); refusing to skip a possible gap."
+                    )
+                break
+            if not current_continuation or repeated:
+                # End of timeline: the server has nothing older — this is the START of
+                # the timeline, even when the cursor predates it (e.g. a caller's
+                # overlap window subtracted from a cursor pinned at the room's oldest
+                # message). Nothing older can be fetched, so raising here would only
+                # fail every future sync and freeze the room permanently.
+                if before_cursor:
+                    logger.info(
+                        "Timeline starts after cursor",
+                        group_id=group_id,
+                        oldest=oldest_timestamp,
+                        cursor=effective_ts,
+                    )
                 break
 
             page += 1
