@@ -251,9 +251,10 @@ image (`member.phone_image`) into `member_dir/profile_images/<kind>/<basename>` 
 failure is logged and never affects the result or the cursor. Returns `{"downloaded", "skipped", "failed"}`.
 - An unreadable `index.json` is replaced by a fresh index: its history entries and `first_seen`
   values are lost (the image files stay on disk).
-- CDN URLs may carry changing query strings, so match the current image by basename, not by full
-  URL: compare `profile_images.relative_file(kind, url)` for the member's URL with that of the
-  `current[kind]` entry.
+- The current image of a kind is the `images[]` entry where
+  `entry["kind"] == kind and entry["file"] == profile_images.relative_file(kind, index["current"][kind])`
+  — match by file, never by full URL (CDN URLs can carry changing query strings). If no entry
+  matches, the current image has not been archived yet; use the URL in `current[kind]`.
 
 #### `backfill_past_messages(session, group: dict, member: dict) -> int`
 Merge the room's pre-subscription messages (`Client.get_past_messages`) into the member's archive
@@ -290,6 +291,8 @@ Archive the account's own nickname and avatar for this service. Writes
 `<output_dir>/account/profile.json` = `{"version": 1, "name": str, "updated_at": str}` and archives
 the avatar (kind `thumbnail`) into `<output_dir>/account/profile_images/` with the same `index.json`
 history as member profile images, so an app can show the user's avatar beside their letters.
+The same current-image rule as for `archive_profile_images` applies to `account/profile_images/index.json`:
+match the `images[]` entry by `kind` and `file` (via `profile_images.relative_file`), never by full URL.
 Birthday, sex, subdivision (region) and FC accounts are returned by `/profile` too but are
 deliberately **not** stored or logged. A missing profile writes nothing. Idempotent: an avatar
 already on disk is skipped, a changed avatar adds a history entry. Returns

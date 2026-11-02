@@ -1197,6 +1197,11 @@ class Client:
         self, session: aiohttp.ClientSession, group_id: int, *, strict: Literal[True]
     ) -> Optional[list[dict[str, Any]]]: ...
 
+    @overload
+    async def get_past_messages(
+        self, session: aiohttp.ClientSession, group_id: int, *, strict: bool
+    ) -> Optional[list[dict[str, Any]]]: ...
+
     async def get_past_messages(
         self, session: aiohttp.ClientSession, group_id: int, *, strict: bool = False
     ) -> Optional[list[dict[str, Any]]]:
