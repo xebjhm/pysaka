@@ -1709,3 +1709,489 @@ Expected: tests PASS; coverage shows no missed lines in changed code.
 - [ ] **Step 4: Hand-off**
 
 Do **not** release yet. Push the branch and open a PR to `dev` (PR body sections `## Why`, `## What`, `## Testing`, `## Changelog`). Release 0.4.5 via `/release pysaka 0.4.5` only after SakaDesk sub-project A has been verified against this branch.
+
+---
+
+## Addendum (2026-11-03): Tasks 7–8 — letters and own profile
+
+Spec §9–§10. Both run after Tasks 1–6 and the final-review fix round. Same Global Constraints.
+
+### Task 7: Sent-letter archiving (`sync_letters`)
+
+**Files:**
+- Modify: `src/pysaka/manager.py` (new method `sync_letters` after `backfill_past_messages`; class constants)
+- Create: `tests/test_letters.py`
+- Modify: `docs/API.md`, `CHANGELOG.md` (`[Unreleased]` → Added)
+
+**Interfaces:**
+- Consumes: `_locked_update`, `_member_dir_path`, `Client.get_letters(session, group_id, updated_from=None, count=200) -> list[dict]`, `Client.download_file`, `get_media_extension`, `media_file_is_present`.
+- Produces:
+  - `async SyncManager.sync_letters(session, group: dict, member: dict) -> int` (letters newly added to `letters.json`)
+  - `<member_dir>/letters.json` = `{"version": 1, "letters": [{"id", "member_id", "text", "created_at", "updated_at", "is_favorite", "image_file", "width", "height"}]}` sorted by `created_at`; `image_file` is relative to `member_dir` (`letters/<id>.<ext>`) or None.
+  - sync_state key `letters_updated_at` (letters cursor; never the message cursor).
+
+API facts (live probe 2026-11-03): ascending by id; `count` takes the oldest first; `updated_from` is inclusive; expired subscriptions still return letters; every letter's `updated_at` is later than `created_at`.
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_letters.py`:
+
+```python
+"""Sent-letter archiving (spec §9)."""
+
+import json
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from pysaka.client import Client, Group
+from pysaka.exceptions import SessionExpiredError
+from pysaka.manager import SyncManager
+
+GROUP = {"id": 90, "name": "高井 俐香"}
+MEMBER = {"id": 90, "name": "高井 俐香"}
+
+
+def _letter(i, upd, member_id=90, url=True):
+    return {
+        "id": i,
+        "group_id": 90,
+        "member_id": member_id,
+        "text": f"りかたん 手紙 {i} 🎉",
+        "file": f"https://cdn/letters/{i}.jpg?sig=x" if url else None,
+        "thumbnail": f"https://cdn/letters/t{i}.jpg",
+        "thumbnail_width": 300,
+        "thumbnail_height": 480,
+        "is_favorite": False,
+        "client_token": "SECRET-TOKEN",
+        "created_at": upd,
+        "updated_at": upd,
+    }
+
+
+class FakeLetterApi:
+    """Mimics the server: ascending by id, inclusive updated_from, count from the oldest."""
+
+    def __init__(self, letters):
+        self.letters = letters
+        self.calls = []
+
+    async def __call__(self, session, group_id, updated_from=None, count=200):
+        self.calls.append(updated_from)
+        rows = [l for l in sorted(self.letters, key=lambda l: l["id"]) if updated_from is None or l["updated_at"] >= updated_from]
+        return rows[:count]
+
+
+@pytest.fixture
+def manager(tmp_path):
+    client = MagicMock(spec=Client)
+    client.group = Group.HINATAZAKA46
+
+    async def fake_download(session, url, path, timestamp=None):
+        if "fail" in url:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"card")
+        return True
+
+    client.download_file = AsyncMock(side_effect=fake_download)
+    return SyncManager(client, tmp_path)
+
+
+def _stored(manager):
+    with open(manager._member_dir_path(GROUP, MEMBER) / "letters.json", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _ts(i):
+    return f"2026-01-{1 + i // 1440:02d}T{(i // 60) % 24:02d}:{i % 60:02d}:00Z"
+
+
+async def test_first_sync_stores_letters_images_and_cursor(manager):
+    api = FakeLetterApi([_letter(1, _ts(1)), _letter(2, _ts(2)), _letter(3, _ts(3), member_id=7)])
+    manager.client.get_letters = AsyncMock(side_effect=api)
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 2
+
+    data = _stored(manager)
+    assert data["version"] == 1
+    assert [l["id"] for l in data["letters"]] == [1, 2]
+    first = data["letters"][0]
+    assert first["text"] == "りかたん 手紙 1 🎉" and first["image_file"] == "letters/1.jpg"
+    assert first["width"] == 300 and first["height"] == 480
+    assert "client_token" not in first and "file" not in first
+    assert (manager._member_dir_path(GROUP, MEMBER) / "letters" / "1.jpg").read_bytes() == b"card"
+    assert manager.sync_state["90_90"]["letters_updated_at"] == _ts(3)
+    assert "last_sync_ts" not in manager.sync_state["90_90"]  # message cursor untouched
+
+
+async def test_incremental_sync_uses_cursor_and_upserts(manager):
+    api = FakeLetterApi([_letter(1, _ts(1)), _letter(2, _ts(2))])
+    manager.client.get_letters = AsyncMock(side_effect=api)
+    await manager.sync_letters(AsyncMock(), GROUP, MEMBER)
+
+    api.letters.append(_letter(4, _ts(9)))
+    api.letters[1] = {**_letter(2, _ts(8)), "is_favorite": True}  # letter 2 updated later
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 1
+
+    assert api.calls[-1] == _ts(2)  # resumed from the stored cursor
+    data = _stored(manager)
+    assert [l["id"] for l in data["letters"]] == [1, 2, 4]
+    assert data["letters"][1]["is_favorite"] is True
+    assert manager.sync_state["90_90"]["letters_updated_at"] == _ts(9)
+
+
+async def test_pages_beyond_200(manager):
+    api = FakeLetterApi([_letter(i, _ts(i)) for i in range(1, 451)])
+    manager.client.get_letters = AsyncMock(side_effect=api)
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 450
+    assert len(_stored(manager)["letters"]) == 450
+    assert len(api.calls) == 3
+
+
+async def test_failed_image_holds_cursor_and_retries(manager):
+    api = FakeLetterApi([_letter(1, _ts(1))])
+    api.letters[0]["file"] = "https://cdn/fail/1.jpg"
+    manager.client.get_letters = AsyncMock(side_effect=api)
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 1
+    assert "letters_updated_at" not in (manager.sync_state.get("90_90") or {})
+
+    api.letters[0]["file"] = "https://cdn/ok/1.jpg"
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 0
+    assert api.calls[-1] is None  # no cursor yet: full refetch gives a fresh signed URL
+    assert manager.sync_state["90_90"]["letters_updated_at"] == _ts(1)
+
+
+async def test_letter_without_image(manager):
+    manager.client.get_letters = AsyncMock(side_effect=FakeLetterApi([_letter(1, _ts(1), url=False)]))
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 1
+    assert _stored(manager)["letters"][0]["image_file"] is None
+    assert manager.sync_state["90_90"]["letters_updated_at"] == _ts(1)
+
+
+async def test_corrupt_letters_json_resets_cursor_and_is_left_alone(manager):
+    api = FakeLetterApi([_letter(1, _ts(1))])
+    manager.client.get_letters = AsyncMock(side_effect=api)
+    await manager.sync_letters(AsyncMock(), GROUP, MEMBER)
+    path = manager._member_dir_path(GROUP, MEMBER) / "letters.json"
+    path.write_text("{bad", encoding="utf-8")
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 0
+    assert path.read_text(encoding="utf-8") == "{bad"
+    assert "letters_updated_at" not in manager.sync_state["90_90"]
+
+
+async def test_auth_error_propagates_and_other_errors_are_swallowed(manager):
+    manager.client.get_letters = AsyncMock(side_effect=SessionExpiredError("expired"))
+    with pytest.raises(SessionExpiredError):
+        await manager.sync_letters(AsyncMock(), GROUP, MEMBER)
+    manager.client.get_letters = AsyncMock(side_effect=RuntimeError("boom"))
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 0
+
+
+async def test_nothing_fetched_writes_nothing(manager):
+    manager.client.get_letters = AsyncMock(side_effect=FakeLetterApi([]))
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 0
+    assert not (manager._member_dir_path(GROUP, MEMBER) / "letters.json").exists()
+```
+
+- [ ] **Step 2: Run to verify failure** — `uv run pytest tests/test_letters.py -q --no-cov` → FAIL: `AttributeError: ... 'sync_letters'`.
+
+- [ ] **Step 3: Implement** (in `SyncManager`, after `backfill_past_messages`):
+
+```python
+    _LETTER_PAGE = 200
+    _LETTER_MAX_PAGES = 50
+
+    async def sync_letters(self, session: aiohttp.ClientSession, group: dict[str, Any], member: dict[str, Any]) -> int:
+        """Archive the account's sent letters to this member.
+
+        Stores ``<member_dir>/letters.json`` (``client_token`` is never stored) and
+        each letter-card image at ``<member_dir>/letters/<id>.<ext>``. Uses its own
+        cursor ``letters_updated_at`` in the member's sync_state entry, which is
+        advanced only when every stored letter's image is on disk, so a failed
+        image is re-fetched with a fresh signed URL next run. Works for expired
+        subscriptions (the server still returns their letters). Never touches the
+        message cursor and never fires ``on_new_messages``.
+
+        Raises:
+            SessionExpiredError, RefreshFailedError: auth failures propagate.
+
+        Returns:
+            Number of letters that were not in ``letters.json`` before.
+        """
+        gid, mid = group["id"], member["id"]
+        key = f"{gid}_{mid}"
+        cursor = (self.sync_state.get(key) or {}).get("letters_updated_at")
+        fetched: dict[Any, dict[str, Any]] = {}
+        updated_from = cursor
+        try:
+            for _ in range(self._LETTER_MAX_PAGES):
+                page = await self.client.get_letters(session, gid, updated_from=updated_from, count=self._LETTER_PAGE)
+                new_ids = [l.get("id") for l in page if l.get("id") not in fetched]
+                for letter in page:
+                    fetched[letter.get("id")] = letter
+                if len(page) < self._LETTER_PAGE or not new_ids:
+                    break
+                # Inclusive overlap on purpose: deduped by id above.
+                updated_from = page[-1].get("updated_at") or updated_from
+        except (SessionExpiredError, RefreshFailedError):
+            raise
+        except Exception as e:
+            logger.warning("Letter fetch failed", group_id=gid, error_type=type(e).__name__)
+            return 0
+
+        mine = [l for l in fetched.values() if l.get("member_id") == mid]
+        if not mine:
+            return 0
+
+        member_dir = self._member_dir_path(group, member)
+        records: list[dict[str, Any]] = []
+        downloads: list[tuple[str, Path]] = []
+        for letter in mine:
+            url = letter.get("file")
+            image_file = f"letters/{letter['id']}.{get_media_extension(url, 'picture')}" if url else None
+            if url and image_file:
+                downloads.append((url, member_dir / image_file))
+            records.append(
+                {
+                    "id": letter["id"],
+                    "member_id": mid,
+                    "text": letter.get("text") or "",
+                    "created_at": letter.get("created_at"),
+                    "updated_at": letter.get("updated_at"),
+                    "is_favorite": bool(letter.get("is_favorite")),
+                    "image_file": image_file,
+                    "width": letter.get("thumbnail_width"),
+                    "height": letter.get("thumbnail_height"),
+                }
+            )
+
+        def mutate(current: Optional[Any]) -> tuple[Optional[Any], int]:
+            existing = current.get("letters", []) if isinstance(current, dict) else []
+            by_id = {l.get("id"): l for l in existing}
+            added = sum(1 for r in records if r["id"] not in by_id)
+            for r in records:
+                prev = by_id.get(r["id"])
+                if prev and r["image_file"] is None and prev.get("image_file"):
+                    r["image_file"] = prev["image_file"]
+                by_id[r["id"]] = r
+            letters = sorted(by_id.values(), key=lambda l: l.get("created_at") or "")
+            return {"version": 1, "letters": letters}, added
+
+        member_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            wrote, added = await asyncio.to_thread(self._locked_update, member_dir / "letters.json", mutate)
+        except ValueError:
+            # Unreadable letters.json: leave it for inspection and refetch everything next time.
+            entry = dict(self.sync_state.get(key) or {})
+            entry.pop("letters_updated_at", None)
+            self.sync_state[key] = entry
+            self.save_sync_state()
+            logger.warning("letters.json unreadable; letters cursor reset", group_id=gid, member_id=mid)
+            return 0
+        if not wrote:
+            return 0
+
+        for url, path in downloads:
+            await self.client.download_file(session, url, path)
+        if all(media_file_is_present(path) for _, path in downloads):
+            newest = max((r["updated_at"] or "" for r in records), default="")
+            entry = dict(self.sync_state.get(key) or {})
+            if newest and newest > (entry.get("letters_updated_at") or ""):
+                entry["letters_updated_at"] = newest
+                self.sync_state[key] = entry
+                self.save_sync_state()
+        logger.info("Letters synced", group_id=gid, member_id=mid, added=added)
+        return added
+```
+
+- [ ] **Step 4: Run tests** — `uv run pytest tests/test_letters.py -q` then `uv run pytest -q --cov=pysaka --cov-report=term-missing`; add focused tests for any uncovered new line.
+
+- [ ] **Step 5: Docs + commit**
+
+`docs/API.md` (Sync Manager): add a `sync_letters(session, group: dict, member: dict) -> int` entry summarising the docstring and the `letters.json` shape. `CHANGELOG.md` `[Unreleased]` → Added: "`SyncManager.sync_letters(session, group, member)` archives the account's sent letters (text + letter-card image) into `letters.json` and `letters/`, with its own `letters_updated_at` cursor; works for expired subscriptions."
+
+```bash
+uv run ruff check src tests && uv run ruff format src/pysaka/manager.py tests/test_letters.py && uv run mypy src
+git add src/pysaka/manager.py tests/test_letters.py docs/API.md CHANGELOG.md
+uv run git commit -m "feat(manager): archive sent letters with their card images
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 8: Own profile (nickname + avatar) archiving
+
+**Files:**
+- Modify: `src/pysaka/manager.py` (extract `_archive_image_set` from `archive_profile_images`; add `archive_account_profile`)
+- Create: `tests/test_account_profile.py`
+- Modify: `docs/API.md`, `CHANGELOG.md`
+
+**Interfaces:**
+- Produces:
+  - `async SyncManager._archive_image_set(session, root: Path, urls: dict[str, str]) -> dict[str, int]` (the body of today's `archive_profile_images` after computing `urls`/`root`)
+  - `async SyncManager.archive_account_profile(session) -> dict[str, int]`
+  - `<output_dir>/account/profile.json` = `{"version": 1, "name": str, "updated_at": str}` and `<output_dir>/account/profile_images/` (same layout/index as member profile images; kind `thumbnail`)
+
+- [ ] **Step 1: Write the failing tests** — `tests/test_account_profile.py`:
+
+```python
+"""Own profile archiving (spec §10): nickname + avatar only, no personal data."""
+
+import json
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from pysaka.client import Client, Group
+from pysaka.exceptions import SessionExpiredError
+from pysaka.manager import SyncManager
+
+PROFILE = {
+    "name": "ハオ🐱",
+    "birthday": "1990-01-01",
+    "sex": "male",
+    "subdivision": "TW-TPE",
+    "thumbnail": "https://cdn/users/thumbnails/u-20260101-000000.jpeg?sig=abc",
+    "fc_accounts": [{"organization_id": 1, "account": "secret"}],
+    "updated_at": "2026-10-01T00:00:00Z",
+}
+
+
+@pytest.fixture
+def manager(tmp_path):
+    client = MagicMock(spec=Client)
+    client.group = Group.HINATAZAKA46
+    client.get_profile = AsyncMock(return_value=dict(PROFILE))
+
+    async def fake_download(session, url, path, timestamp=None):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"me")
+        return True
+
+    client.download_file = AsyncMock(side_effect=fake_download)
+    return SyncManager(client, tmp_path)
+
+
+def _read(p):
+    with open(p, encoding="utf-8") as f:
+        return json.load(f)
+
+
+async def test_stores_name_and_avatar_only(manager):
+    report = await manager.archive_account_profile(AsyncMock())
+    assert report == {"downloaded": 1, "skipped": 0, "failed": 0}
+    account = manager.output_dir / "account"
+    assert _read(account / "profile.json") == {"version": 1, "name": "ハオ🐱", "updated_at": "2026-10-01T00:00:00Z"}
+    blob = (account / "profile.json").read_text(encoding="utf-8")
+    for secret in ("1990-01-01", "TW-TPE", "male", "secret"):
+        assert secret not in blob
+    assert (account / "profile_images" / "thumbnail" / "u-20260101-000000.jpeg").read_bytes() == b"me"
+    assert _read(account / "profile_images" / "index.json")["current"] == {"thumbnail": PROFILE["thumbnail"]}
+
+
+async def test_second_run_skips_and_avatar_change_adds_history(manager):
+    await manager.archive_account_profile(AsyncMock())
+    assert (await manager.archive_account_profile(AsyncMock()))["skipped"] == 1
+    manager.client.get_profile.return_value = {**PROFILE, "thumbnail": "https://cdn/users/thumbnails/u-20261101-000000.jpeg"}
+    await manager.archive_account_profile(AsyncMock())
+    idx = _read(manager.output_dir / "account" / "profile_images" / "index.json")
+    assert [e["file"] for e in idx["images"]] == [
+        "thumbnail/u-20260101-000000.jpeg",
+        "thumbnail/u-20261101-000000.jpeg",
+    ]
+
+
+async def test_missing_profile_writes_nothing(manager):
+    manager.client.get_profile.return_value = None
+    assert await manager.archive_account_profile(AsyncMock()) == {"downloaded": 0, "skipped": 0, "failed": 0}
+    assert not (manager.output_dir / "account").exists()
+
+
+async def test_auth_error_propagates_other_errors_swallowed(manager):
+    manager.client.get_profile = AsyncMock(side_effect=SessionExpiredError("x"))
+    with pytest.raises(SessionExpiredError):
+        await manager.archive_account_profile(AsyncMock())
+    manager.client.get_profile = AsyncMock(side_effect=RuntimeError("boom"))
+    assert (await manager.archive_account_profile(AsyncMock()))["failed"] == 0
+```
+
+- [ ] **Step 2: Run to verify failure** — `uv run pytest tests/test_account_profile.py -q --no-cov` → FAIL (`archive_account_profile` missing).
+
+- [ ] **Step 3: Implement**
+
+Refactor `archive_profile_images` so its body after computing `urls` and `root` becomes:
+
+```python
+        return await self._archive_image_set(session, root, urls)
+```
+
+with the extracted helper (verbatim move of the existing loop + index write):
+
+```python
+    async def _archive_image_set(
+        self, session: aiohttp.ClientSession, root: Path, urls: dict[str, str]
+    ) -> dict[str, int]:
+        """Download ``urls`` (kind → URL) under ``root/<kind>/<basename>`` and
+        update ``root/index.json``. Shared by member and account images."""
+        # (move the existing body of archive_profile_images here unchanged:
+        #  report dict, loop over urls with relative_file/media_file_is_present/
+        #  download_file, now_iso, mutate via profile_images.merge_index, the
+        #  `if urls or index exists` guard and the _locked_update call)
+```
+
+— i.e. cut the existing lines from `report = {...}` through `return report` out of `archive_profile_images` into `_archive_image_set`, replacing `profile_images.image_urls(group, member)` / `member_dir / profile_images.DIR_NAME` with the `urls` / `root` parameters. Existing profile-image tests must pass unchanged.
+
+Add:
+
+```python
+    async def archive_account_profile(self, session: aiohttp.ClientSession) -> dict[str, int]:
+        """Archive the account's own nickname and avatar for this service.
+
+        Writes ``<output_dir>/account/profile.json`` (``name`` and ``updated_at``
+        only — birthday, sex, subdivision and FC accounts are personal data the
+        app does not need and are never stored or logged) and archives the avatar
+        under ``account/profile_images/`` with the same index/history as member
+        images. Auth errors propagate; anything else is logged by type.
+
+        Returns:
+            ``{"downloaded": n, "skipped": n, "failed": n}`` for the avatar.
+        """
+        empty = {"downloaded": 0, "skipped": 0, "failed": 0}
+        try:
+            profile = await self.client.get_profile(session)
+        except (SessionExpiredError, RefreshFailedError):
+            raise
+        except Exception as e:
+            logger.warning("Profile fetch failed", error_type=type(e).__name__)
+            return empty
+        if not isinstance(profile, dict):
+            return empty
+
+        account_dir = self.output_dir / "account"
+        account_dir.mkdir(parents=True, exist_ok=True)
+        record = {"version": 1, "name": profile.get("name") or "", "updated_at": profile.get("updated_at")}
+
+        def mutate(current: Optional[Any]) -> tuple[Optional[Any], None]:
+            return (None if current == record else record), None
+
+        await asyncio.to_thread(self._locked_update, account_dir / "profile.json", mutate, corrupt_ok=True)
+        urls = {"thumbnail": profile["thumbnail"]} if profile.get("thumbnail") else {}
+        return await self._archive_image_set(session, account_dir / profile_images.DIR_NAME, urls)
+```
+
+- [ ] **Step 4: Run tests** — `uv run pytest -q --cov=pysaka --cov-report=term-missing`; all green, no new missed lines.
+
+- [ ] **Step 5: Docs + commit**
+
+`docs/API.md`: add `archive_account_profile(session) -> dict` (what is stored, what is deliberately not). `CHANGELOG.md` Added: "`SyncManager.archive_account_profile(session)` stores the account's own nickname and avatar (with avatar history) under `account/`; other profile fields (birthday, sex, region, FC accounts) are not stored."
+
+```bash
+uv run ruff check src tests && uv run ruff format src/pysaka/manager.py tests/test_account_profile.py && uv run mypy src
+git add src/pysaka/manager.py tests/test_account_profile.py docs/API.md CHANGELOG.md
+uv run git commit -m "feat(manager): archive the account's own nickname and avatar
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```

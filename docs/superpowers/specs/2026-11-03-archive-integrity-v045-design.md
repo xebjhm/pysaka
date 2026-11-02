@@ -16,6 +16,8 @@
 | 3 | `on_new_messages` callback on `sync_member` | SakaDesk C (per-member notifications, incoming-call popup) needs to know which messages are genuinely new and their type. | Yes |
 | 4 | Pre-subscription backfill via `/groups/{id}/past_messages` | Spike (2026-11-03, live, read-only) found 98 messages in 8 rooms missing from the archive. | Yes |
 | 5 | "History is an exact multiple of 200" frozen-chat bug (`SakaDesk/docs/KNOWN_BUGS.md` #1) | Known rare bug in pagination. | **Conditional** — see §6 exit criteria |
+| 7 | Sent-letter archiving (`letters.json` + letter-card images) | Letters are only ever fetched live; SakaDesk will show them inline in the chat like the official app (added 2026-11-03). | Yes — §9 |
+| 8 | Own profile (nickname + avatar) archiving | Needed to show the user's own avatar beside their letters in the chat (added 2026-11-03). | Yes — §10 |
 
 Non-goals: any change to how the forward cursor (`last_sync_ts` / `last_message_id`) is computed or advanced; any UI concern.
 
@@ -142,6 +144,28 @@ Investigate the pagination end-of-history decision in `Client.get_messages` (the
 Otherwise the item is dropped from 0.4.5 and `KNOWN_BUGS.md` stays as-is. Either outcome is reported back before release.
 
 ---
+
+## 9. Sent-letter archiving
+
+### Spike evidence (2026-11-03, read-only)
+- `GET /groups/{id}/letters` still returns letters for **expired** subscriptions (room 66: 3, room 85: 1); active rooms: 90 → 189, 83 → 57.
+- Items: `id, group_id, member_id, text, file` (letter-card image, signed URL), `thumbnail`, `thumbnail_width/height, is_favorite, client_token, created_at, updated_at`. Every letter has `updated_at > created_at` (server-side processing after sending).
+- Ordering: ascending by id; `count` takes the oldest first; `updated_from` is inclusive (`>=`; pivot test returned exactly the 95 expected letters).
+
+### Design
+- New public `async SyncManager.sync_letters(session, group, member) -> int` (letters newly added):
+  1. Cursor `letters_updated_at` in the member's sync_state entry (separate from the message cursor; preserved by the merging `update_sync_state`).
+  2. Page: `get_letters(group_id, updated_from=cursor, count=200)`; while a page has 200 items, request again with `updated_from` = the page's last item's `updated_at` (inclusive overlap, deduped by id); stop when a page adds no new id or after 50 pages.
+  3. Keep only `member_id == member.id`. Store under `<member_dir>/letters.json` via `_locked_update`: `{"version": 1, "letters": [{id, member_id, text, created_at, updated_at, is_favorite, image_file, width, height}]}` sorted by `created_at`; upsert by id (fresh fields win; `image_file` kept). `client_token` is never stored.
+  4. Download each letter's `file` to `<member_dir>/letters/<id>.<ext>` with `download_file` (skips files already present).
+  5. Advance `letters_updated_at` to the max `updated_at` stored **only if** every letter's image is on disk (same rule as the message cursor's media hold: an image that failed must be re-fetched with a fresh signed URL next run).
+- Called by consumers for every non-closed room, including expired subscriptions. Never touches the message cursor, never fires `on_new_messages`. Auth errors propagate; other errors are logged by type and leave the cursor unchanged.
+
+## 10. Own profile archiving
+
+- New public `async SyncManager.archive_account_profile(session) -> dict` (`{"downloaded","skipped","failed"}`): `client.get_profile()`; keeps **only** `name` and `thumbnail` — birthday, sex, subdivision and FC account ids are personal data the app does not need and are neither stored nor logged.
+- Writes `<output_dir>/account/profile.json` (`{"version": 1, "name", "updated_at"}`) and archives the avatar with the same mechanism and index format as §2 (`<output_dir>/account/profile_images/thumbnail/<basename>` + `index.json`, kind `thumbnail`), so avatar history comes for free.
+- `output_dir` is per service, so each group's own avatar is kept separately (users can set different ones). Failures are logged by type and never raise except auth errors.
 
 ## 7. Testing
 
