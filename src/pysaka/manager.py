@@ -462,6 +462,8 @@ class SyncManager:
         incomplete) and every image of this member's letters is on disk, so a failed
         image is re-fetched with a fresh signed URL next run. A member with no
         letters in the room still advances the cursor after a complete fetch.
+        Pages of 200 are chained by the last letter's ``created_at`` (not its
+        ``updated_at``, which a later favourite would push past unseen letters).
         A letter whose ``id`` is not an integer is skipped (logged by error type).
         Works for expired subscriptions (the server still returns their letters).
         Never touches the message cursor and never fires ``on_new_messages``.
@@ -496,8 +498,11 @@ class SyncManager:
                     break
                 if not new_ids:
                     break
-                # Inclusive overlap on purpose: deduped by id above.
-                updated_from = page[-1].get("updated_at") or updated_from
+                # Page by the last letter's creation time, not its updated_at: every
+                # letter with a higher id has updated_at >= created_at >= this value,
+                # whereas a favourited boundary letter's later updated_at would skip
+                # them. Inclusive overlap on purpose: deduped by id above.
+                updated_from = page[-1].get("created_at") or page[-1].get("updated_at") or updated_from
         except (SessionExpiredError, RefreshFailedError):
             raise
         except Exception as e:

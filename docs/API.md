@@ -279,7 +279,8 @@ after a full one, hitting the page cap, or a page with no new letter count as in
 image of this member's letters is on disk, so a failed image is re-fetched (with a fresh signed
 URL) on the next call. A member with no letters in the room still advances it after a complete
 fetch. A letter whose `id` is not an integer is skipped. Fetches up to 50 pages of 200 letters per
-call; `letters.json` is rewritten only when its content changes.
+call, chaining each page from the last letter's `created_at` (not `updated_at`, which a later
+favorite would push past letters not yet fetched); `letters.json` is rewritten only when its content changes.
 
 `letters.json` shape, sorted by `created_at`:
 `{"version": 1, "letters": [{"id", "member_id", "text", "created_at", "updated_at", "is_favorite",

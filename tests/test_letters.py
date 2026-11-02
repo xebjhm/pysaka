@@ -116,6 +116,20 @@ async def test_pages_beyond_200(manager):
     assert len(api.calls) == 3
 
 
+async def test_boundary_letter_with_later_updated_at_does_not_lose_letters(manager):
+    """Paging by the boundary's updated_at skipped higher ids with an older updated_at."""
+    letters = [_letter(i, _ts(i)) for i in range(1, 451)]
+    letters[199] = {**letters[199], "updated_at": _ts(1000)}  # letter 200 favorited later
+    api = FakeLetterApi(letters)
+    manager.client.get_letters = api.as_mock()
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 450
+
+    assert [row["id"] for row in _stored(manager)["letters"]] == list(range(1, 451))
+    assert manager.sync_state["90_90"]["letters_updated_at"] == _ts(1000)
+    assert api.calls[1:] == [_ts(200), _ts(399)]  # paged by created_at, not updated_at
+
+
 async def test_failed_image_holds_cursor_and_retries(manager):
     api = FakeLetterApi([_letter(1, _ts(1))])
     api.letters[0]["file"] = "https://cdn/fail/1.jpg"
