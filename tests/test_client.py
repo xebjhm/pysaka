@@ -712,3 +712,22 @@ async def test_full_last_page_raises_when_probe_fails(monkeypatch):
     client.fetch_json = AsyncMock(side_effect=fetch)
     with pytest.raises(ApiError):
         await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
+
+
+@pytest.mark.asyncio
+async def test_full_last_page_raises_when_probe_ignores_order(monkeypatch):
+    """A server that ignores ``order=asc`` answers the probe with the NEWEST message,
+    which is always in the collected set. That must not pass for the room's first
+    message: ids 1..200 were never fetched, so the dropped continuation is a gap."""
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
+    client = Client(group=Group.HINATAZAKA46, access_token="t")
+    pages = [{"messages": _desc_page(201, 200, _sec_ts)}]  # full page of ids 400..201, token dropped
+
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return {"messages": [{"id": 400, "published_at": _sec_ts(400)}]}
+        return pages.pop(0)
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
+    with pytest.raises(ApiError):
+        await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")

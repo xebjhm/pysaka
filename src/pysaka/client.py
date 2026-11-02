@@ -821,9 +821,13 @@ class Client:
                     # A FULL last page with no continuation is ambiguous: dropped
                     # token, or a history that is an exact multiple of the page
                     # size. Ask the server for the room's first message; if we
-                    # already hold it, nothing older exists (KNOWN_BUGS #1).
+                    # already hold it as our OLDEST message, nothing older exists
+                    # (KNOWN_BUGS #1). Ids grow over time, so the room's first
+                    # message must be the smallest id collected; merely holding it
+                    # would also accept a server that ignores ``order=asc`` and
+                    # answers with the newest message.
                     first_id = await self._timeline_first_id(session, group_id)
-                    timeline_start = first_id is not None and first_id in all_messages
+                    timeline_start = first_id is not None and bool(all_messages) and first_id == min(all_messages)
                 if cursor_unreached and not timeline_start:
                     raise ApiError(
                         f"Timeline pagination for group {group_id} ended (missing or "
