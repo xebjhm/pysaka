@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `member_info` passed to `on_new_messages` has `initial_sync`, True when the
   member's `messages.json` was created by that sync (the callback then gets the
   whole fetched history); ignore those calls when sending notifications.
+- `SyncManager.archive_account_profile(session)` stores the account's own
+  nickname and avatar (with avatar history) under `account/`; other profile
+  fields (birthday, sex, region, FC accounts) are not stored.
 
 ### Fixed
 - **A favorite (or any local `messages.json` edit) made while a sync was writing

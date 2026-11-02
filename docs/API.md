@@ -285,6 +285,19 @@ thumbnail's size. Returns the number of letters that were not in `letters.json` 
   unreadable `letters.json` does not raise: it logs and returns 0 (an unreadable file is left
   untouched and the letters cursor is reset).
 
+#### `archive_account_profile(session) -> dict`
+Archive the account's own nickname and avatar for this service. Writes
+`<output_dir>/account/profile.json` = `{"version": 1, "name": str, "updated_at": str}` and archives
+the avatar (kind `thumbnail`) into `<output_dir>/account/profile_images/` with the same `index.json`
+history as member profile images, so an app can show the user's avatar beside their letters.
+Birthday, sex, subdivision (region) and FC accounts are returned by `/profile` too but are
+deliberately **not** stored or logged. A missing profile writes nothing. Idempotent: an avatar
+already on disk is skipped, a changed avatar adds a history entry. Returns
+`{"downloaded", "skipped", "failed"}` for the avatar. Not called by `sync_member`; call it once per
+service.
+- **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. Any other fetch error is
+  logged by type and returns all-zero counts.
+
 #### `process_media_queue(session, queue: list, concurrency: int = 5, progress_callback = None) -> dict[Path, dict[int, dict]]`
 Download every media item in `queue` and extract media metadata.
 - **queue**: A list of media descriptor **dicts**, each with keys `url`, `path`

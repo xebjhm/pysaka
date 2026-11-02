@@ -570,9 +570,16 @@ class SyncManager:
         Returns:
             ``{"downloaded": n, "skipped": n, "failed": n}``.
         """
-        report = {"downloaded": 0, "skipped": 0, "failed": 0}
         urls = profile_images.image_urls(group, member)
         root = member_dir / profile_images.DIR_NAME
+        return await self._archive_image_set(session, root, urls)
+
+    async def _archive_image_set(
+        self, session: aiohttp.ClientSession, root: Path, urls: dict[str, str]
+    ) -> dict[str, int]:
+        """Download ``urls`` (kind -> URL) under ``root/<kind>/<basename>`` and
+        update ``root/index.json``. Shared by member and account images."""
+        report = {"downloaded": 0, "skipped": 0, "failed": 0}
         archived: dict[str, tuple[str, str]] = {}
         for kind, url in urls.items():
             rel = profile_images.relative_file(kind, url)
@@ -610,6 +617,40 @@ class SyncManager:
                 logger.info("Profile images archived", member_id=member.get("id"), **report)
         except Exception as e:
             logger.warning("Profile image archiving failed", member_id=member.get("id"), error_type=type(e).__name__)
+
+    async def archive_account_profile(self, session: aiohttp.ClientSession) -> dict[str, int]:
+        """Archive the account's own nickname and avatar for this service.
+
+        Writes ``<output_dir>/account/profile.json`` (``name`` and ``updated_at``
+        only — birthday, sex, subdivision and FC accounts are personal data the
+        app does not need and are never stored or logged) and archives the avatar
+        under ``account/profile_images/`` with the same index/history as member
+        images. Auth errors propagate; anything else is logged by type.
+
+        Returns:
+            ``{"downloaded": n, "skipped": n, "failed": n}`` for the avatar.
+        """
+        empty = {"downloaded": 0, "skipped": 0, "failed": 0}
+        try:
+            profile = await self.client.get_profile(session)
+        except (SessionExpiredError, RefreshFailedError):
+            raise
+        except Exception as e:
+            logger.warning("Profile fetch failed", error_type=type(e).__name__)
+            return empty
+        if not isinstance(profile, dict):
+            return empty
+
+        account_dir = self.output_dir / "account"
+        account_dir.mkdir(parents=True, exist_ok=True)
+        record = {"version": 1, "name": profile.get("name") or "", "updated_at": profile.get("updated_at")}
+
+        def mutate(current: Optional[Any]) -> tuple[Optional[Any], None]:
+            return (None if current == record else record), None
+
+        await asyncio.to_thread(self._locked_update, account_dir / "profile.json", mutate, corrupt_ok=True)
+        urls = {"thumbnail": profile["thumbnail"]} if profile.get("thumbnail") else {}
+        return await self._archive_image_set(session, account_dir / profile_images.DIR_NAME, urls)
 
     async def _sync_member_messages(
         self,
