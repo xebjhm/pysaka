@@ -261,7 +261,29 @@ async def test_non_integer_letter_id_is_skipped(manager, tmp_path):
     member_dir = manager._member_dir_path(GROUP, MEMBER)
     assert downloaded == [member_dir / "letters" / "1.jpg"]
     assert "evil" not in json.dumps(logs, ensure_ascii=False)
-    assert any(e.get("error_type") for e in logs)
+    assert any(e.get("id_types") for e in logs)
+
+
+@pytest.mark.parametrize("bad_id", ["12", 1.9, True, None], ids=["str", "float", "bool", "none"])
+async def test_only_true_integer_ids_are_accepted(manager, bad_id):
+    bad = {**_letter(2, _ts(2)), "id": bad_id}
+    missing = {k: v for k, v in _letter(3, _ts(3)).items() if k != "id"}
+    manager.client.get_letters = AsyncMock(return_value=[_letter(1, _ts(1)), bad, missing])
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 1
+
+    assert [row["id"] for row in _stored(manager)["letters"]] == [1]
+    downloaded = [call.args[2].name for call in manager.client.download_file.await_args_list]
+    assert downloaded == ["1.jpg"]
+
+
+async def test_mixed_int_and_string_ids_do_not_double_count(manager):
+    """The same letter returned as 12 and "12" (overlap) is stored once."""
+    twin = {**_letter(12, _ts(12)), "id": "12"}
+    manager.client.get_letters = AsyncMock(return_value=[_letter(12, _ts(12)), twin])
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 1
+    assert [row["id"] for row in _stored(manager)["letters"]] == [12]
 
 
 async def test_quiet_member_still_advances_cursor(manager):

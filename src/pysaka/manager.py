@@ -469,6 +469,11 @@ class SyncManager:
     _LETTER_PAGE = 200
     _LETTER_MAX_PAGES = 50
 
+    @staticmethod
+    def _is_letter_id(value: Any) -> bool:
+        """A letter id is a true integer (not a bool, str or float)."""
+        return isinstance(value, int) and not isinstance(value, bool)
+
     async def sync_letters(self, session: aiohttp.ClientSession, group: dict[str, Any], member: dict[str, Any]) -> int:
         """Archive the account's sent letters to this member.
 
@@ -483,7 +488,8 @@ class SyncManager:
         letters in the room still advances the cursor after a complete fetch.
         Pages of 200 are chained by the last letter's ``created_at`` (not its
         ``updated_at``, which a later favourite would push past unseen letters).
-        A letter whose ``id`` is not an integer is skipped (logged by error type).
+        A letter whose ``id`` is not an integer (a string, float, bool or a missing
+        id) is skipped and only the id's type name is logged.
         Works for expired subscriptions (the server still returns their letters).
         Never touches the message cursor and never fires ``on_new_messages``.
         ``letters.json`` is rewritten only when its content changes. A room
@@ -503,15 +509,24 @@ class SyncManager:
         gid, mid = group["id"], member["id"]
         key = f"{gid}_{mid}"
         cursor = (self.sync_state.get(key) or {}).get("letters_updated_at")
-        fetched: dict[Any, dict[str, Any]] = {}
+        fetched: dict[int, dict[str, Any]] = {}
+        bad_id_types: set[str] = set()
         updated_from = cursor
         complete = False
         try:
             for page_no in range(self._LETTER_MAX_PAGES):
                 page = await self.client.get_letters(session, gid, updated_from=updated_from, count=self._LETTER_PAGE)
-                new_ids = [item.get("id") for item in page if item.get("id") not in fetched]
-                for letter in page:
-                    fetched[letter.get("id")] = letter
+                # Only true integers identify a letter ("12", 1.9, True are not ids);
+                # the rest is dropped here and reported once below.
+                keyed = [(item["id"], item) for item in page if self._is_letter_id(item.get("id"))]
+                new_ids = [letter_id for letter_id, _ in keyed if letter_id not in fetched]
+                for letter_id, letter in keyed:
+                    fetched[letter_id] = letter
+                bad_id_types.update(
+                    type(item.get("id")).__name__
+                    for item in page
+                    if item.get("member_id") == mid and not self._is_letter_id(item.get("id"))
+                )
                 if len(page) < self._LETTER_PAGE:
                     # An empty page after a full one is impossible (updated_from is
                     # inclusive), so it means the request failed and was swallowed.
@@ -530,16 +545,13 @@ class SyncManager:
             logger.warning("Letter fetch failed", group_id=gid, error_type=type(e).__name__)
             return 0
 
+        if bad_id_types:
+            logger.warning("Letters skipped: id is not an integer", group_id=gid, id_types=sorted(bad_id_types))
         member_dir = self._member_dir_path(group, member)
         records: list[dict[str, Any]] = []
         downloads: list[tuple[str, Path]] = []
-        for letter in fetched.values():
+        for letter_id, letter in fetched.items():
             if letter.get("member_id") != mid:
-                continue
-            try:
-                letter_id = int(letter["id"])
-            except (KeyError, TypeError, ValueError) as e:
-                logger.warning("Letter skipped: invalid id", group_id=gid, error_type=type(e).__name__)
                 continue
             url = letter.get("file")
             image_file = f"letters/{letter_id}.{get_media_extension(url, 'picture')}" if url else None
