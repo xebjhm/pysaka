@@ -279,7 +279,11 @@ after a full one, hitting the page cap, or a page with no new letter count as in
 image of this member's letters is on disk, so a failed image is re-fetched (with a fresh signed
 URL) on the next call. A member with no letters in the room still advances it after a complete
 fetch. A letter whose `id` is not an integer (a string such as `"12"`, a float, a bool or a missing id) is
-skipped, and only the id's type name is logged. Fetches up to 50 pages of 200 letters per
+skipped, and only the id's type name is logged. A non-string `created_at`/`updated_at` counts as missing (stored as `null`).
+The cursor is used only while `letters.json` exists: if the file is missing the cursor is dropped and
+all letters are fetched again; an unreadable file is renamed to `letters.json.corrupt-<UTC timestamp>`
+(kept for inspection), the cursor is dropped, and the letters are rebuilt from a full fetch in the same
+call. Fetches up to 50 pages of 200 letters per
 call, chaining each page from the last letter's `created_at` (not `updated_at`, which a later
 favorite would push past letters not yet fetched); `letters.json` is rewritten only when its content changes.
 A room folder left under an old room name is renamed first (as `sync_member` does), so letters and
@@ -289,10 +293,11 @@ messages share one folder.
 `{"version": 1, "letters": [{"id", "member_id", "text", "created_at", "updated_at", "is_favorite",
 "image_file", "width", "height"}]}`. `image_file` is relative to the member dir
 (`letters/<id>.<ext>`) or `None` for a letter without an image; `width`/`height` are the card
-thumbnail's size. Returns the number of letters that were not in `letters.json` before.
-- **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. A failed fetch or an
-  unreadable `letters.json` does not raise: it logs and returns 0 (an unreadable file is left
-  untouched and the letters cursor is reset). `OSError` from file I/O after the fetch can
+thumbnail's size. Returns the number of letters that were not in `letters.json` before (all of them after a corrupt or
+missing file).
+- **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. A failed fetch does not raise:
+  it logs and returns 0 (a corrupt `letters.json` is already set aside by then, so the next call
+  rebuilds it). `OSError` from file I/O after the fetch can
   propagate (like `backfill_past_messages`), so callers should wrap the call.
 
 #### `archive_account_profile(session) -> dict`

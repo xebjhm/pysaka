@@ -151,16 +151,87 @@ async def test_letter_without_image(manager):
     assert manager.sync_state["90_90"]["letters_updated_at"] == _ts(1)
 
 
-async def test_corrupt_letters_json_resets_cursor_and_is_left_alone(manager):
+async def test_corrupt_letters_json_is_quarantined_and_rebuilt_in_the_same_call(manager):
+    import time_machine
+
+    api = FakeLetterApi([_letter(1, _ts(1))])
+    manager.client.get_letters = api.as_mock()
+    await manager.sync_letters(AsyncMock(), GROUP, MEMBER)
+    member_dir = manager._member_dir_path(GROUP, MEMBER)
+    path = member_dir / "letters.json"
+    path.write_text("{bad", encoding="utf-8")
+    api.letters.append(_letter(2, _ts(2)))
+
+    with time_machine.travel("2026-11-03T12:34:56Z", tick=False):
+        assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 2
+
+    kept = member_dir / "letters.json.corrupt-20261103T123456Z"
+    assert kept.read_text(encoding="utf-8") == "{bad"
+    assert [row["id"] for row in _stored(manager)["letters"]] == [1, 2]
+    assert api.calls[-1] is None  # cursor dropped: full refetch
+    assert manager.sync_state["90_90"]["letters_updated_at"] == _ts(2)
+
+
+async def test_corrupt_file_racing_in_after_the_check_resets_cursor_and_returns_zero(manager, monkeypatch):
     api = FakeLetterApi([_letter(1, _ts(1))])
     manager.client.get_letters = api.as_mock()
     await manager.sync_letters(AsyncMock(), GROUP, MEMBER)
     path = manager._member_dir_path(GROUP, MEMBER) / "letters.json"
     path.write_text("{bad", encoding="utf-8")
+    monkeypatch.setattr(SyncManager, "_quarantine_corrupt_letters", staticmethod(lambda p: False))
 
     assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 0
     assert path.read_text(encoding="utf-8") == "{bad"
     assert "letters_updated_at" not in manager.sync_state["90_90"]
+
+
+async def test_cursor_without_letters_json_forces_a_full_refetch(manager):
+    api = FakeLetterApi([_letter(1, _ts(1)), _letter(2, _ts(2))])
+    manager.client.get_letters = api.as_mock()
+    await manager.sync_letters(AsyncMock(), GROUP, MEMBER)
+    (manager._member_dir_path(GROUP, MEMBER) / "letters.json").unlink()
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 2
+    assert api.calls[-1] is None
+    assert [row["id"] for row in _stored(manager)["letters"]] == [1, 2]
+
+
+async def test_stale_cursor_is_dropped_even_if_the_refetch_is_incomplete(manager):
+    manager.sync_state["90_90"] = {"letters_updated_at": _ts(50)}  # but no letters.json
+    manager.client.get_letters = AsyncMock(side_effect=RuntimeError("boom"))
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 0
+    assert "letters_updated_at" not in manager.sync_state["90_90"]
+
+
+async def test_non_string_timestamps_are_treated_as_missing(manager):
+    odd_updated = {**_letter(2, _ts(2)), "updated_at": 12345}
+    odd_created = {**_letter(3, _ts(3)), "created_at": None}
+    odd_both = {**_letter(4, _ts(4)), "created_at": 7, "updated_at": ["x"]}
+    manager.client.get_letters = AsyncMock(return_value=[_letter(1, _ts(1)), odd_updated, odd_created, odd_both])
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 4
+
+    rows = {row["id"]: row for row in _stored(manager)["letters"]}
+    assert rows[2]["updated_at"] is None and rows[4]["created_at"] is None and rows[4]["updated_at"] is None
+    assert manager.sync_state["90_90"]["letters_updated_at"] == _ts(3)  # newest string updated_at
+
+
+async def test_non_string_created_at_pages_by_updated_at(manager):
+    page = [_letter(i, _ts(i)) for i in range(1, 201)]
+    page[-1] = {**page[-1], "created_at": 123}
+    manager.client.get_letters = AsyncMock(side_effect=[page, [page[-1]]])
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 200
+    assert manager.client.get_letters.await_args_list[1].kwargs["updated_from"] == _ts(200)
+
+
+async def test_non_string_stored_cursor_is_ignored(manager):
+    manager.sync_state["90_90"] = {"letters_updated_at": 99}
+    manager.client.get_letters = FakeLetterApi([_letter(1, _ts(1))]).as_mock()
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 1
+    assert manager.sync_state["90_90"]["letters_updated_at"] == _ts(1)
 
 
 async def test_auth_error_propagates_and_other_errors_are_swallowed(manager):

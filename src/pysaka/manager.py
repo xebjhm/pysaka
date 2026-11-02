@@ -474,6 +474,30 @@ class SyncManager:
         """A letter id is a true integer (not a bool, str or float)."""
         return isinstance(value, int) and not isinstance(value, bool)
 
+    @staticmethod
+    def _timestamp_text(value: Any) -> str:
+        """``value`` if it is a string, else ``""`` (a non-string timestamp is missing)."""
+        return value if isinstance(value, str) else ""
+
+    @staticmethod
+    def _quarantine_corrupt_letters(path: Path) -> bool:
+        """Move an unreadable ``letters.json`` aside as ``letters.json.corrupt-<UTC>``.
+
+        Blocking, takes the file's lock. Returns True when the file existed but
+        was not valid JSON and was renamed (kept for inspection), else False.
+        """
+        with _lock_for(path):
+            if not path.exists():
+                return False
+            try:
+                with open(path, encoding="utf-8") as f:
+                    json.load(f)
+            except ValueError:
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                path.replace(path.with_name(f"{path.name}.corrupt-{stamp}"))
+                return True
+            return False
+
     async def sync_letters(self, session: aiohttp.ClientSession, group: dict[str, Any], member: dict[str, Any]) -> int:
         """Archive the account's sent letters to this member.
 
@@ -489,7 +513,13 @@ class SyncManager:
         Pages of 200 are chained by the last letter's ``created_at`` (not its
         ``updated_at``, which a later favourite would push past unseen letters).
         A letter whose ``id`` is not an integer (a string, float, bool or a missing
-        id) is skipped and only the id's type name is logged.
+        id) is skipped and only the id's type name is logged. A non-string
+        ``created_at``/``updated_at`` counts as missing (stored as ``None``).
+        The cursor is used only while ``letters.json`` exists: if it is missing
+        the cursor is dropped and everything is fetched again; if it is not valid
+        JSON it is renamed to ``letters.json.corrupt-<UTC timestamp>`` (kept for
+        inspection), the cursor is dropped, and the letters are rebuilt from a
+        full fetch in the same call.
         Works for expired subscriptions (the server still returns their letters).
         Never touches the message cursor and never fires ``on_new_messages``.
         ``letters.json`` is rewritten only when its content changes. A room
@@ -500,15 +530,28 @@ class SyncManager:
             SessionExpiredError, RefreshFailedError: auth failures propagate.
             OSError: creating the member directory, or file I/O after the fetch,
                 failed (other unexpected errors after the fetch also propagate),
-                so callers should wrap the call. A failed fetch or an unreadable
-                ``letters.json`` does not raise: it logs and returns 0.
+                so callers should wrap the call. A failed fetch does not raise: it
+                logs and returns 0 (a corrupt ``letters.json`` is already set aside
+                by then, so the next call rebuilds it).
 
         Returns:
-            Number of letters that were not in ``letters.json`` before.
+            Number of letters that were not in ``letters.json`` before (all of
+            them after a corrupt or missing file).
         """
         gid, mid = group["id"], member["id"]
         key = f"{gid}_{mid}"
-        cursor = (self.sync_state.get(key) or {}).get("letters_updated_at")
+        member_dir = self._member_dir_path(group, member)
+        letters_file = member_dir / "letters.json"
+        if await asyncio.to_thread(self._quarantine_corrupt_letters, letters_file):
+            logger.warning("letters.json unreadable; kept aside and rebuilding", group_id=gid, member_id=mid)
+        # A cursor is only trustworthy next to the letters.json it describes.
+        stored_cursor = (self.sync_state.get(key) or {}).get("letters_updated_at")
+        cursor = stored_cursor if isinstance(stored_cursor, str) and stored_cursor and letters_file.exists() else None
+        if stored_cursor is not None and cursor is None:
+            entry = dict(self.sync_state[key])
+            entry.pop("letters_updated_at")
+            self.sync_state[key] = entry
+            self.save_sync_state()
         fetched: dict[int, dict[str, Any]] = {}
         bad_id_types: set[str] = set()
         updated_from = cursor
@@ -538,7 +581,12 @@ class SyncManager:
                 # letter with a higher id has updated_at >= created_at >= this value,
                 # whereas a favourited boundary letter's later updated_at would skip
                 # them. Inclusive overlap on purpose: deduped by id above.
-                updated_from = page[-1].get("created_at") or page[-1].get("updated_at") or updated_from
+                last = page[-1]
+                updated_from = (
+                    self._timestamp_text(last.get("created_at"))
+                    or self._timestamp_text(last.get("updated_at"))
+                    or updated_from
+                )
         except (SessionExpiredError, RefreshFailedError):
             raise
         except Exception as e:
@@ -547,7 +595,6 @@ class SyncManager:
 
         if bad_id_types:
             logger.warning("Letters skipped: id is not an integer", group_id=gid, id_types=sorted(bad_id_types))
-        member_dir = self._member_dir_path(group, member)
         records: list[dict[str, Any]] = []
         downloads: list[tuple[str, Path]] = []
         for letter_id, letter in fetched.items():
@@ -562,8 +609,8 @@ class SyncManager:
                     "id": letter_id,
                     "member_id": mid,
                     "text": letter.get("text") or "",
-                    "created_at": letter.get("created_at"),
-                    "updated_at": letter.get("updated_at"),
+                    "created_at": self._timestamp_text(letter.get("created_at")) or None,
+                    "updated_at": self._timestamp_text(letter.get("updated_at")) or None,
                     "is_favorite": bool(letter.get("is_favorite")),
                     "image_file": image_file,
                     "width": letter.get("thumbnail_width"),
@@ -583,7 +630,7 @@ class SyncManager:
                     if prev and r["image_file"] is None and prev.get("image_file"):
                         r["image_file"] = prev["image_file"]
                     by_id[r["id"]] = r
-                letters = sorted(by_id.values(), key=lambda item: item.get("created_at") or "")
+                letters = sorted(by_id.values(), key=lambda item: self._timestamp_text(item.get("created_at")))
                 merged = {"version": 1, "letters": letters}
                 return (None if merged == current else merged), new_count
 
@@ -608,9 +655,9 @@ class SyncManager:
         if complete and all(media_file_is_present(path) for _, path in downloads):
             # Over everything fetched, not just this member's rows: other members' letters
             # in the same group are not ours, so there is nothing to re-fetch for them.
-            newest = max((item.get("updated_at") or "" for item in fetched.values()), default="")
+            newest = max((self._timestamp_text(item.get("updated_at")) for item in fetched.values()), default="")
             entry = dict(self.sync_state.get(key) or {})
-            if newest and newest > (entry.get("letters_updated_at") or ""):
+            if newest and newest > self._timestamp_text(entry.get("letters_updated_at")):
                 entry["letters_updated_at"] = newest
                 self.sync_state[key] = entry
                 self.save_sync_state()
