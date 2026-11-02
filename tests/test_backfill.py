@@ -184,3 +184,38 @@ def test_update_total_messages_touches_only_total(manager):
     assert manager.sync_state["79_134"] == {"last_message_id": 5, "last_sync_ts": "t", "total_messages": 9}
     manager.update_total_messages(79, 999, 2)
     assert manager.sync_state["79_999"] == {"total_messages": 2}
+
+
+async def test_corrupt_recovery_clears_flag_so_backfill_reruns(manager, time_machine):
+    """Recovery rebuilds messages.json from the timeline, which never holds the
+    pre-subscription messages, so the flag must be cleared or they stay lost."""
+    time_machine.move_to(NOW)
+    path = await _first_sync(manager)
+    manager.client.get_past_messages.return_value = [_m(400, "2026-06-14T04:57:00Z")]
+    assert await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER) == 1
+    assert _ids(path) == [400, 500]
+    assert manager.sync_state["79_134"]["past_backfilled_at"] == NOW
+
+    path.write_text("{corrupt", encoding="utf-8")
+    await manager.sync_member(AsyncMock(), GROUP, MEMBER, [])
+
+    assert _ids(path) == [500]  # the past message is gone from disk...
+    assert "past_backfilled_at" not in manager.sync_state["79_134"]  # ...so the flag must be too
+    assert await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER) == 1
+    assert _ids(path) == [400, 500]
+    assert manager.sync_state["79_134"]["past_backfilled_at"] == NOW
+
+
+async def test_count_mismatch_recovery_clears_flag(manager, time_machine):
+    time_machine.move_to(NOW)
+    path = await _first_sync(manager)
+    manager.client.get_past_messages.return_value = [_m(400, "2026-06-14T04:57:00Z")]
+    await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER)
+    manager.sync_state["79_134"]["total_messages"] = 99  # file now holds fewer than recorded
+
+    await manager.sync_member(AsyncMock(), GROUP, MEMBER, [])
+
+    assert "past_backfilled_at" not in manager.sync_state["79_134"]
+    assert await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER) == 0  # already merged: idempotent
+    assert _ids(path) == [400, 500]
+    assert manager.sync_state["79_134"]["past_backfilled_at"] == NOW

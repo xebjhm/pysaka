@@ -687,6 +687,12 @@ class SyncManager:
             # mutate+serialize on the event loop keeps it atomic under cooperative
             # scheduling. (The messages.json write above writes a local dict, so it is
             # safe to offload.)
+            if recovering:
+                # The rebuilt history comes from the group timeline, which never
+                # holds pre-subscription messages, so a corrupt-file rebuild loses
+                # the backfilled ones. Re-arm the backfill (merging is idempotent;
+                # the server keeps serving them). update_sync_state saves below.
+                (self.sync_state.get(state_key) or {}).pop("past_backfilled_at", None)
             max_id = max(x["id"] for x in merged) if merged else 0
             newest_ts = max((x.get("timestamp") or "" for x in merged), default=None)
             # If any message failed to normalize, do NOT advance the cursor to or
