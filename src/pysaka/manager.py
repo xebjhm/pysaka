@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import os
 import threading
@@ -38,7 +39,7 @@ _FILE_LOCKS_GUARD = threading.Lock()
 
 def _lock_for(path: Path) -> threading.Lock:
     """Return the process-wide lock for ``path`` (case-normalised on Windows)."""
-    key = os.path.normcase(str(path.resolve()))
+    key = os.path.normcase(str(path.absolute().resolve()))
     with _FILE_LOCKS_GUARD:
         lock = _FILE_LOCKS.get(key)
         if lock is None:
@@ -138,6 +139,8 @@ class SyncManager:
         """Read-modify-write a JSON file under its process-wide lock.
 
         Synchronous and blocking — call via ``asyncio.to_thread`` from async code.
+        The lock is not re-entrant, so ``mutate`` must not call ``_locked_update``
+        (or ``update_message_fields*``) on the same path — it would deadlock.
         ``mutate`` receives the parsed file (``None`` if the file is missing, or if
         it is unreadable and ``corrupt_ok`` is True) and returns ``(data, result)``.
         ``data is None`` means "nothing to write". Every writer of a given file must
@@ -211,12 +214,19 @@ class SyncManager:
             last_ts: The newest message's published_at timestamp (primary cursor).
         """
         key = f"{group_id}_{member_id}"
-        self.sync_state[key] = {
-            "last_message_id": last_msg_id,
-            "last_sync_ts": last_ts,
-            "total_messages": count,
-            "last_sync": datetime.now(timezone.utc).isoformat() + "Z",
-        }
+        # Merge, don't replace: other features keep their own keys in the entry
+        # (e.g. backfill's past_backfilled_at), which a full replace would wipe on
+        # every sync.
+        entry = dict(self.sync_state.get(key) or {})
+        entry.update(
+            {
+                "last_message_id": last_msg_id,
+                "last_sync_ts": last_ts,
+                "total_messages": count,
+                "last_sync": datetime.now(timezone.utc).isoformat() + "Z",
+            }
+        )
+        self.sync_state[key] = entry
         self.save_sync_state()
 
     def get_last_ts(self, group_id: int, member_id: int) -> Optional[str]:
@@ -240,6 +250,38 @@ class SyncManager:
             return state.get("last_message_id")
         return None
 
+    def _member_dir_path(self, group: dict[str, Any], member: dict[str, Any]) -> Path:
+        """The on-disk directory of a member's archive (same naming as sync_member)."""
+        return (
+            self.output_dir
+            / "messages"
+            / f"{group['id']} {sanitize_name(group['name'])}"
+            / f"{member['id']} {sanitize_name(member['name'])}"
+        )
+
+    @staticmethod
+    def _type_counts(messages: list[dict[str, Any]]) -> dict[str, int]:
+        counts = {"text": 0, "video": 0, "picture": 0, "voice": 0}
+        for msg in messages:
+            mtype = msg.get("type", "text")
+            if mtype in counts:
+                counts[mtype] += 1
+        return counts
+
+    @staticmethod
+    async def _notify_new_messages(
+        callback: Callable[[dict[str, Any], list[dict[str, Any]]], Any],
+        member_info: dict[str, Any],
+        new_messages: list[dict[str, Any]],
+    ) -> None:
+        """Invoke a consumer callback; its failures must never break a sync."""
+        try:
+            result = callback(member_info, new_messages)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as e:
+            logger.error("on_new_messages callback failed", error=str(e), exc_info=True)
+
     async def sync_member(
         self,
         session: aiohttp.ClientSession,
@@ -248,9 +290,12 @@ class SyncManager:
         media_queue: list[dict[str, Any]],
         progress_callback: Optional[Any] = None,
         prefetched_messages: Optional[list[dict[str, Any]]] = None,
+        *,
+        on_new_messages: Optional[Callable[[dict[str, Any], list[dict[str, Any]]], Any]] = None,
     ) -> int:
         """
-        Syncs messages for a member and prepares media queue.
+        Syncs messages for a member, prepares the media queue, and archives the
+        member's profile images.
 
         Args:
             session: Active aiohttp session.
@@ -261,6 +306,47 @@ class SyncManager:
             prefetched_messages: Pre-fetched group timeline messages. When
                 provided, the API call is skipped and messages are filtered
                 from this list instead (using this member's own last_id).
+            on_new_messages: Optional ``callback(member_info, new_messages)``
+                (sync or async) called once after a successful write when at
+                least one message was not on disk before. Not called during
+                corrupt-file / count-mismatch recovery. Exceptions it raises are
+                logged and swallowed.
+
+        Returns:
+            Number of messages processed in this run (includes re-fetched
+            overlap, so it is not a count of new messages).
+        """
+        processed = await self._sync_member_messages(
+            session,
+            group,
+            member,
+            media_queue,
+            progress_callback,
+            prefetched_messages,
+            on_new_messages=on_new_messages,
+        )
+        await self._archive_profile_images_safely(session, group, member)
+        return processed
+
+    async def _archive_profile_images_safely(
+        self, session: aiohttp.ClientSession, group: dict[str, Any], member: dict[str, Any]
+    ) -> None:
+        """Archive profile images; never raises (implemented in the next commit)."""
+        return None
+
+    async def _sync_member_messages(
+        self,
+        session: aiohttp.ClientSession,
+        group: dict[str, Any],
+        member: dict[str, Any],
+        media_queue: list[dict[str, Any]],
+        progress_callback: Optional[Any] = None,
+        prefetched_messages: Optional[list[dict[str, Any]]] = None,
+        *,
+        on_new_messages: Optional[Callable[[dict[str, Any], list[dict[str, Any]]], Any]] = None,
+    ) -> int:
+        """
+        Message part of :meth:`sync_member` (see there for arguments).
 
         Returns:
             Number of new messages processed.
@@ -411,36 +497,42 @@ class SyncManager:
                 messages, member_dir, media_queue
             )
 
-            # Dedupe (Upsert: prefer fresh API data, but preserve locally-derived
-            # media metadata the API never returns — see _merge_messages).
-            merged = self._merge_messages(existing_msgs, processed)
-            merged.sort(key=lambda x: x.get("timestamp") or "")
-
-            # Stats
-            type_counts = {"text": 0, "video": 0, "picture": 0, "voice": 0}
-            for msg in merged:
-                mtype = msg.get("type", "text")
-                if mtype in type_counts:
-                    type_counts[mtype] += 1
-
-            # Save
-            export_data = {
-                "exported_at": datetime.now(timezone.utc).isoformat() + "Z",
-                "member": {
-                    "id": mid,
-                    "name": mname,
-                    "group_id": gid,
-                    "portrait": member.get("portrait"),
-                    "thumbnail": member.get("thumbnail"),
-                    "phone_image": member.get("phone_image"),
-                    "group_thumbnail": group.get("thumbnail"),
-                },
-                "total_messages": len(merged),
-                "message_type_counts": type_counts,
-                "messages": merged,
+            member_block = {
+                "id": mid,
+                "name": mname,
+                "group_id": gid,
+                "portrait": member.get("portrait"),
+                "thumbnail": member.get("thumbnail"),
+                "phone_image": member.get("phone_image"),
+                "group_thumbnail": group.get("thumbnail"),
             }
 
-            wrote = await asyncio.to_thread(self._atomic_write_json, existing_file, export_data)
+            def mutate(
+                current: Optional[Any],
+            ) -> tuple[Optional[Any], tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
+                # Merge against the file as it is NOW, under the lock — not the copy
+                # read before the API call. Another writer (e.g. a favorite toggle)
+                # may have rewritten it since; merging the stale copy would drop
+                # that change, and the other writer's stale copy would drop ours.
+                base = current.get("messages", []) if isinstance(current, dict) else existing_msgs
+                base_ids = {m.get("id") for m in base}
+                new_msgs = [m for m in processed if m["id"] not in base_ids]
+                # Dedupe (Upsert: prefer fresh API data, but preserve locally-derived
+                # media metadata the API never returns — see _merge_messages).
+                merged = self._merge_messages(base, processed)
+                merged.sort(key=lambda x: x.get("timestamp") or "")
+                export_data = {
+                    "exported_at": datetime.now(timezone.utc).isoformat() + "Z",
+                    "member": member_block,
+                    "total_messages": len(merged),
+                    "message_type_counts": self._type_counts(merged),
+                    "messages": merged,
+                }
+                return export_data, (merged, new_msgs)
+
+            wrote, (merged, new_msgs) = await asyncio.to_thread(
+                self._locked_update, existing_file, mutate, corrupt_ok=True
+            )
             if not wrote:
                 # The messages never hit disk — do NOT advance the cursor, or the next
                 # sync would skip them permanently. Abort this member; retry next run.
@@ -471,6 +563,17 @@ class SyncManager:
             if earliest_pending_media_ts is not None and newest_ts is not None:
                 newest_ts = min(newest_ts, earliest_pending_media_ts)
             self.update_sync_state(gid, mid, max_id, len(merged), last_ts=newest_ts)
+
+            if on_new_messages is not None and new_msgs and not recovering:
+                member_info = {
+                    "group_id": gid,
+                    "group_name": group["name"],
+                    "member_id": mid,
+                    "member_name": member["name"],
+                    "member_dir": member_dir,
+                    "phone_image": member.get("phone_image"),
+                }
+                await self._notify_new_messages(on_new_messages, member_info, new_msgs)
 
             return len(processed)
 
@@ -783,27 +886,29 @@ class SyncManager:
             messages_file: Path to messages.json file.
             metadata: Dict mapping message_id to metadata dict
                       (may contain: width, height, media_duration, is_muted).
+
+        Runs under the file lock (see :meth:`_locked_update`).
         """
         if not metadata or not messages_file.exists():
             return
 
-        try:
-            async with aiofiles.open(messages_file, encoding="utf-8") as f:
-                data = json.loads(await f.read())
-
+        def mutate(current: Optional[Any]) -> tuple[Optional[Any], None]:
+            if not isinstance(current, dict):
+                return None, None
             updated = False
-            for msg in data.get("messages", []):
-                msg_id = msg.get("id")
-                if msg_id in metadata:
-                    msg_metadata = metadata[msg_id]
+            for msg in current.get("messages", []):
+                msg_metadata = metadata.get(msg.get("id"))
+                if msg_metadata:
                     for key, value in msg_metadata.items():
                         if value is not None:
                             msg[key] = value
                             updated = True
+            return (current if updated else None), None
 
-            if updated:
-                await asyncio.to_thread(self._atomic_write_json, messages_file, data)
-
+        try:
+            wrote, _ = await asyncio.to_thread(self._locked_update, messages_file, mutate)
+            if not wrote:
+                logger.error("Failed to write message metadata", file=str(messages_file))
         except Exception as e:
             logger.error("Failed to update message metadata", file=str(messages_file), error=str(e))
 
