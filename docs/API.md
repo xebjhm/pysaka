@@ -267,6 +267,24 @@ next call merges the pre-subscription messages again. Never moves the cursor and
   unexpected errors) after the fetch can propagate too, so wrap the call. A failed fetch or an
   unreadable `messages.json` does not raise: it logs and returns 0.
 
+#### `sync_letters(session, group: dict, member: dict) -> int`
+Archive the account's sent letters to this member into `<member_dir>/letters.json` and each
+letter-card image into `<member_dir>/letters/<id>.<ext>`. `client_token` is never stored. Works for
+expired subscriptions (the server still returns their letters). Uses its own cursor
+`letters_updated_at` in the member's sync_state entry; it never touches the message cursor and
+never fires `on_new_messages`. The cursor advances only when every stored letter's image is on
+disk, so a failed image is re-fetched (with a fresh signed URL) on the next call. Fetches up to 50
+pages of 200 letters per call.
+
+`letters.json` shape, sorted by `created_at`:
+`{"version": 1, "letters": [{"id", "member_id", "text", "created_at", "updated_at", "is_favorite",
+"image_file", "width", "height"}]}`. `image_file` is relative to the member dir
+(`letters/<id>.<ext>`) or `None` for a letter without an image; `width`/`height` are the card
+thumbnail's size. Returns the number of letters that were not in `letters.json` before.
+- **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. A failed fetch or an
+  unreadable `letters.json` does not raise: it logs and returns 0 (an unreadable file is left
+  untouched and the letters cursor is reset).
+
 #### `process_media_queue(session, queue: list, concurrency: int = 5, progress_callback = None) -> dict[Path, dict[int, dict]]`
 Download every media item in `queue` and extract media metadata.
 - **queue**: A list of media descriptor **dicts**, each with keys `url`, `path`

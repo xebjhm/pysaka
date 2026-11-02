@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SyncManager.backfill_past_messages(session, group, member)` adds the room's
   pre-subscription messages and their media once per member, without moving the
   cursor.
+- `SyncManager.sync_letters(session, group, member)` archives the account's sent
+  letters (text + letter-card image) into `letters.json` and `letters/`, with
+  its own `letters_updated_at` cursor; works for expired subscriptions.
 - `Client.get_past_messages(..., strict=True)` returns None on a failed request
   instead of `[]`. The default (`strict=False`) is unchanged and typed as
   `list[dict]`; only `strict=True` is typed `Optional[list[dict]]`.
