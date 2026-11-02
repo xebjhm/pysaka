@@ -44,7 +44,7 @@ The member block written into `messages.json` already carries three CDN URLs; th
 ```json
 {
   "version": 1,
-  "current": {"thumbnail": "thumbnail/134-20260705-113257.jpeg", "phone_image": "…", "group_thumbnail": "…"},
+  "current": {"thumbnail": "https://…/134-20260705-113257.jpeg", "phone_image": "https://…", "group_thumbnail": "https://…"},
   "images": [
     {"kind": "thumbnail", "file": "thumbnail/134-20260705-113257.jpeg",
      "url": "https://…/134-20260705-113257.jpeg", "first_seen": "2026-11-03T04:12:00Z"}
@@ -53,7 +53,7 @@ The member block written into `messages.json` already carries three CDN URLs; th
 ```
 - Identity of an image = `(kind, basename)`. A new basename for a kind appends an entry; history accumulates naturally.
 - `first_seen` is the UTC time pysaka first archived it — the ordering key that survives a future change of CDN naming.
-- `current` maps each kind to the file matching the URL in the **fresh API** `member` / `group` dicts of the latest sync. It is rewritten on every archive run, because the member block inside `messages.json` is only refreshed when new messages are written and can therefore lag behind an image change.
+- `current` maps each kind to the URL from the fresh API data of the latest sync (recorded even before its download succeeds); consumers treat the image whose `url` matches as current and fall back to the remote URL otherwise.
 - Basename is sanitized (`sanitize_name`) and must stay inside the kind directory (reject path separators / `..`).
 
 ### Behaviour

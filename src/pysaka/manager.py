@@ -13,6 +13,7 @@ import aiofiles
 import aiohttp
 import structlog
 
+from . import profile_images
 from .client import Client
 from .exceptions import RefreshFailedError, SessionExpiredError
 from .media import get_audio_metadata, get_media_dimensions
@@ -330,11 +331,62 @@ class SyncManager:
         await self._archive_profile_images_safely(session, group, member)
         return processed
 
+    async def archive_profile_images(
+        self,
+        session: aiohttp.ClientSession,
+        group: dict[str, Any],
+        member: dict[str, Any],
+        member_dir: Path,
+    ) -> dict[str, int]:
+        """Download the member's current profile images and record them in
+        ``<member_dir>/profile_images/index.json``.
+
+        Idempotent: an image already on disk (non-empty) is skipped. A failed
+        download is not indexed and is retried on the next call.
+
+        Returns:
+            ``{"downloaded": n, "skipped": n, "failed": n}``.
+        """
+        report = {"downloaded": 0, "skipped": 0, "failed": 0}
+        urls = profile_images.image_urls(group, member)
+        root = member_dir / profile_images.DIR_NAME
+        archived: dict[str, tuple[str, str]] = {}
+        for kind, url in urls.items():
+            rel = profile_images.relative_file(kind, url)
+            if rel is None:
+                report["failed"] += 1
+                continue
+            path = root / rel
+            if media_file_is_present(path):
+                report["skipped"] += 1
+            elif await self.client.download_file(session, url, path):
+                report["downloaded"] += 1
+            else:
+                report["failed"] += 1
+                continue
+            archived[kind] = (rel, url)
+
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def mutate(current: Optional[Any]) -> tuple[Optional[Any], None]:
+            return profile_images.merge_index(current, archived, urls, now_iso), None
+
+        if urls or (root / profile_images.INDEX_NAME).exists():
+            root.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(self._locked_update, root / profile_images.INDEX_NAME, mutate, corrupt_ok=True)
+        return report
+
     async def _archive_profile_images_safely(
         self, session: aiohttp.ClientSession, group: dict[str, Any], member: dict[str, Any]
     ) -> None:
-        """Archive profile images; never raises (implemented in the next commit)."""
-        return None
+        """Run :meth:`archive_profile_images`; any failure is logged, never raised,
+        so it cannot change sync_member's result or the cursor."""
+        try:
+            report = await self.archive_profile_images(session, group, member, self._member_dir_path(group, member))
+            if report["downloaded"] or report["failed"]:
+                logger.info("Profile images archived", member_id=member.get("id"), **report)
+        except Exception as e:
+            logger.warning("Profile image archiving failed", member_id=member.get("id"), error=str(e))
 
     async def _sync_member_messages(
         self,
