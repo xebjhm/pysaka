@@ -305,10 +305,10 @@ async def test_get_messages_raises_on_full_page_without_continuation_before_curs
     """A FULL page (``count`` messages) with NO continuation while the cursor is
     unreached is ambiguous: more data should follow a full page, so the token may
     have been dropped. Treating it as the timeline start would let the caller advance
-    its cursor past everything older — fail closed. (A genuine last page of exactly
-    ``count`` messages self-heals once the room gets a new message.) The
-    ``order=asc`` probe returns an uncollected (older) first message, so the page is
-    not confirmed as the timeline start."""
+    its cursor past everything older — fail closed. The ``order=asc`` probe returns
+    an uncollected (older) first message, so the page is not confirmed as the
+    timeline start. (A genuine exact-``count`` last page is accepted immediately via
+    the probe; see ``test_full_last_page_at_timeline_start_is_not_a_gap``.)"""
     from pysaka.exceptions import ApiError
 
     async def fetch(session, endpoint, params=None):
@@ -325,11 +325,13 @@ async def test_get_messages_raises_on_full_page_without_continuation_before_curs
 @pytest.mark.asyncio
 async def test_get_messages_full_page_without_continuation_no_cursor_is_clean_end(client, mock_session):
     """With no cursor (full fetch) there is no gap to protect: a full last page with
-    no continuation simply ends pagination."""
+    no continuation simply ends pagination, without any ``order=asc`` probe request."""
     client.fetch_json = AsyncMock(return_value={"messages": _page(1000, 200, 10), "continuation": None})
 
     msgs = await client.get_messages(mock_session, group_id=1)
     assert len(msgs) == 200
+    assert client.fetch_json.await_count == 1
+    assert all(call.args[2].get("order") != "asc" for call in client.fetch_json.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -670,11 +672,16 @@ async def test_full_last_page_at_timeline_start_is_not_a_gap(monkeypatch):
     client.fetch_json = AsyncMock(side_effect=fetch)
     msgs = await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
     assert len(msgs) == 400
-    assert any(p.get("order") == "asc" for p in calls)
+    probes = [p for p in calls if p.get("order") == "asc"]
+    assert len(probes) == 1
+    assert probes[0]["clear_unread"] == "false"
+    assert probes[0]["count"] == 1
 
 
 @pytest.mark.asyncio
 async def test_full_last_page_still_raises_when_first_message_not_collected(monkeypatch):
+    """A full last page whose room-start message (order=asc probe) was never collected
+    is still a possible gap, so it raises."""
     monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
     client = Client(group=Group.HINATAZAKA46, access_token="t")
     pages = [{"messages": _desc_page(201, 200, _sec_ts)}]  # full, no continuation, but id 1 never seen
@@ -691,6 +698,8 @@ async def test_full_last_page_still_raises_when_first_message_not_collected(monk
 
 @pytest.mark.asyncio
 async def test_full_last_page_raises_when_probe_fails(monkeypatch):
+    """If the order=asc probe fails, the full last page cannot be confirmed as the
+    timeline start, so it fails closed."""
     monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
     client = Client(group=Group.HINATAZAKA46, access_token="t")
     pages = [{"messages": _desc_page(1, 200, _sec_ts)}]

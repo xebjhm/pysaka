@@ -349,8 +349,10 @@ class SyncManager:
         a prior successful :meth:`sync_member` (no entry or no ``messages.json`` →
         skipped). Downloads its own media, because Verify & Fix takes fresh URLs
         from the timeline, which never contains these messages. The flag is set
-        only when the request succeeded and every queued file is on disk; on any
-        failure the next call retries (merging is idempotent). Cursor fields are
+        only when the request succeeded, no past message failed to normalize
+        (otherwise the member would be retried on every sync), and every queued
+        file is on disk; on any failure the next call retries (merging is
+        idempotent). Cursor fields are
         never touched and ``on_new_messages`` is never fired.
 
         Returns:

@@ -711,7 +711,8 @@ class Client:
                 messages — a failed page fetch or an empty page carrying a
                 continuation after earlier pages were collected, or, while the
                 cursor is still unreached, a full page with a missing or repeated
-                continuation or a page that replays already-collected messages.
+                continuation (unless the ``order=asc`` probe confirms the timeline
+                start) or a page that replays already-collected messages.
         """
         all_messages: dict[int, dict[str, Any]] = {}
         page = 0
