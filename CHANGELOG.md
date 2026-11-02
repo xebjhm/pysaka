@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-02
+
+### Fixed
+- `Client.get_messages` no longer raises `ApiError` when the timeline ends on a
+  partial page (fewer than a full page of 200 messages; no continuation, or one
+  echoing its continuation) before reaching the cursor. That is the start of
+  the room's timeline, not a gap — e.g. a caller's overlap window subtracted
+  from a cursor pinned at the room's oldest message. Since 0.4.3 it raised on
+  every sync for such rooms, so `SyncManager` callers never advanced the cursor
+  and the room stopped receiving new messages permanently. It now returns the
+  messages and logs a `Timeline starts after cursor` warning.
+- `Client.get_messages` still fails closed while the cursor is unreached when
+  pagination ends on a full page (missing or repeated continuation) or the
+  server replays already-collected messages, and this now also applies to a
+  legacy `since_id` cursor whose message has not been seen yet (previously it
+  returned only the newest pages, letting callers skip older messages).
+
 ## [0.4.3] - 2026-07-08
 
 ### Added
@@ -255,7 +272,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Secure credential storage via system keyring
 - Token refresh without storing plaintext credentials
 
-[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/xebjhm/pysaka/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/xebjhm/pysaka/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/xebjhm/pysaka/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/xebjhm/pysaka/compare/v0.4.0...v0.4.1

@@ -686,7 +686,18 @@ class Client:
                 the official mobile app.
 
         Returns:
-            List of message dicts, sorted by ID ascending.
+            List of message dicts, sorted by ID ascending. When the timeline ends
+            on a partial page (no continuation, or one echoing its continuation)
+            before reaching the cursor (``since_ts``, or one found via
+            ``since_id``), that is the start of the timeline and every fetched
+            message is returned.
+
+        Raises:
+            ApiError: If pagination stops in a way that could hide unfetched
+                messages — a failed page fetch or an empty page carrying a
+                continuation after earlier pages were collected, or, while the
+                cursor is still unreached, a full page with a missing or repeated
+                continuation or a page that replays already-collected messages.
         """
         all_messages: dict[int, dict[str, Any]] = {}
         page = 0
@@ -751,6 +762,7 @@ class Client:
                     )
                 break
 
+            known_before_page = len(all_messages)
             for m in messages:
                 all_messages[m["id"]] = m
 
@@ -773,23 +785,46 @@ class Client:
                     break
 
             current_continuation = data.get("continuation")
-            if not current_continuation or current_continuation == params.get("continuation"):
-                # A missing or repeated continuation on a non-empty page normally
-                # means end-of-timeline. But when a cursor is set and the oldest
-                # message on this page is STILL newer than the cursor, the timeline
-                # ran out before reaching it: the server offered no way to fetch the
-                # older-but-still-new messages between here and the cursor. Breaking
-                # would let the caller advance its cursor past that gap. Fail closed,
-                # mirroring the empty-page and failed-fetch guards above.
-                if effective_ts and messages:
-                    oldest_timestamp = messages[-1].get("published_at", "")
-                    if oldest_timestamp and oldest_timestamp > effective_ts:
-                        raise ApiError(
-                            f"Timeline pagination for group {group_id} ended with a "
-                            f"missing/duplicate continuation while the oldest fetched "
-                            f"message ({oldest_timestamp}) is still newer than the "
-                            f"cursor ({effective_ts}); refusing to skip a possible gap."
-                        )
+            oldest_timestamp = messages[-1].get("published_at", "")
+            before_cursor = bool(effective_ts and oldest_timestamp and oldest_timestamp > effective_ts)
+            # Cursor not reached yet: a timestamp cursor still older than this page,
+            # or a legacy since_id whose message has not been seen yet.
+            cursor_unreached = before_cursor or need_discover_ts
+            repeated = bool(current_continuation) and current_continuation == params.get("continuation")
+            if not current_continuation or repeated:
+                # The server offers no further page. That is the genuine START of the
+                # timeline only on a partial page (fewer than ``count``) — whether the
+                # server omits the token or echoes it — and only if the page is not a
+                # replay of messages already collected. A FULL page means more data
+                # should follow (the token was dropped), and a replay means the server
+                # ignored the token; breaking on either would let the caller advance
+                # its cursor past everything older, so fail closed while the cursor is
+                # unreached and retry next sync.
+                replayed = repeated and len(all_messages) == known_before_page
+                timeline_start = len(messages) < params["count"] and not replayed
+                if cursor_unreached and not timeline_start:
+                    raise ApiError(
+                        f"Timeline pagination for group {group_id} ended (missing or "
+                        f"repeated continuation) on a full or replayed page while the "
+                        f"cursor (since_ts={effective_ts}, since_id={since_id}) is "
+                        f"still unreached; refusing to skip a possible gap."
+                    )
+                if before_cursor:
+                    # Routine, not a gap: e.g. a caller's overlap window subtracted
+                    # from a cursor pinned at the room's oldest message. Nothing older
+                    # exists, so raising would fail every sync and freeze the room.
+                    logger.warning(
+                        "Timeline starts after cursor",
+                        group_id=group_id,
+                        oldest=oldest_timestamp,
+                        cursor=effective_ts,
+                    )
+                elif repeated and not timeline_start:
+                    logger.warning(
+                        "Timeline pagination stuck without a cursor; returning collected pages",
+                        group_id=group_id,
+                        collected=len(all_messages),
+                    )
                 break
 
             page += 1
