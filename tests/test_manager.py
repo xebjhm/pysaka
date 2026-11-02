@@ -882,6 +882,23 @@ async def test_on_new_messages_receives_only_genuinely_new(sync_manager):
 
 
 @pytest.mark.asyncio
+async def test_on_new_messages_flags_initial_sync(sync_manager):
+    session = AsyncMock()
+    group, member = {"id": 1, "name": "G"}, {"id": 10, "name": "M"}
+    infos = []
+
+    def on_new(info, msgs):
+        infos.append(info["initial_sync"])
+
+    sync_manager.client.get_messages.return_value = [_msg(101, "2023-01-01T10:00:00Z")]
+    await sync_manager.sync_member(session, group, member, [], on_new_messages=on_new)
+    sync_manager.client.get_messages.return_value = [_msg(102, "2023-01-01T11:00:00Z")]
+    await sync_manager.sync_member(session, group, member, [], on_new_messages=on_new)
+
+    assert infos == [True, False]
+
+
+@pytest.mark.asyncio
 async def test_on_new_messages_not_called_when_nothing_new(sync_manager):
     session = AsyncMock()
     group, member = {"id": 1, "name": "G"}, {"id": 10, "name": "M"}

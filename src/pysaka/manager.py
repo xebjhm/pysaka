@@ -321,7 +321,15 @@ class SyncManager:
                 corrupt-file / count-mismatch recovery. Exceptions it raises are
                 logged and swallowed. The callback is awaited inline, so a slow
                 callback delays that member's sync; hand heavy work off (e.g.
-                schedule a task).
+                schedule a task). ``member_info`` has ``group_id``,
+                ``group_name``, ``member_id``, ``member_name``, ``member_dir``,
+                ``phone_image`` and ``initial_sync``. ``initial_sync`` is True
+                when ``messages.json`` did not exist before this write, in which
+                case ``new_messages`` is the whole fetched history, not fresh
+                posts; consumers sending notifications should ignore those calls.
+                The callback runs before the profile-image step, so a just-changed
+                ``phone_image`` may not be archived yet; use the ``phone_image``
+                URL from ``member_info``.
 
         Returns:
             Number of messages processed in this run (includes re-fetched
@@ -652,7 +660,7 @@ class SyncManager:
 
             def mutate(
                 current: Optional[Any],
-            ) -> tuple[Optional[Any], tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
+            ) -> tuple[Optional[Any], tuple[list[dict[str, Any]], list[dict[str, Any]], bool]]:
                 # Merge against the file as it is NOW, under the lock — not the copy
                 # read before the API call. Another writer (e.g. a favorite toggle)
                 # may have rewritten it since; merging the stale copy would drop
@@ -671,9 +679,12 @@ class SyncManager:
                     "message_type_counts": self._type_counts(merged),
                     "messages": merged,
                 }
-                return export_data, (merged, new_msgs)
+                # First write of this member's archive (file absent, not merely
+                # unreadable); evaluated under the lock like the merge itself.
+                initial = current is None and not existing_file.exists()
+                return export_data, (merged, new_msgs, initial)
 
-            wrote, (merged, new_msgs) = await asyncio.to_thread(
+            wrote, (merged, new_msgs, initial_sync) = await asyncio.to_thread(
                 self._locked_update, existing_file, mutate, corrupt_ok=True
             )
             if not wrote:
@@ -721,6 +732,7 @@ class SyncManager:
                     "member_name": member["name"],
                     "member_dir": member_dir,
                     "phone_image": member.get("phone_image"),
+                    "initial_sync": initial_sync,
                 }
                 await self._notify_new_messages(on_new_messages, member_info, new_msgs)
 
