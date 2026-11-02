@@ -199,3 +199,73 @@ async def test_logs_never_contain_letter_text_or_token(manager):
         await manager.sync_letters(AsyncMock(), GROUP, MEMBER)
     dumped = json.dumps(logs, ensure_ascii=False)
     assert "SECRET-TOKEN" not in dumped and "手紙" not in dumped and "cdn/" not in dumped
+
+
+async def test_empty_later_page_stores_letters_but_holds_cursor(manager):
+    """An empty page after a full one means a swallowed fetch error, not the end."""
+    page = [_letter(i, _ts(i)) for i in range(1, 201)]
+    manager.client.get_letters = AsyncMock(side_effect=[page, []])
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 200
+    assert len(_stored(manager)["letters"]) == 200
+    assert manager.client.download_file.await_count == 200
+    assert "letters_updated_at" not in (manager.sync_state.get("90_90") or {})
+
+
+async def test_page_cap_holds_cursor(manager, monkeypatch):
+    monkeypatch.setattr(SyncManager, "_LETTER_PAGE", 2)
+    monkeypatch.setattr(SyncManager, "_LETTER_MAX_PAGES", 2)
+    manager.client.get_letters = FakeLetterApi([_letter(i, _ts(i)) for i in range(1, 8)]).as_mock()
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 3  # page 2 overlaps letter 2
+    assert len(_stored(manager)["letters"]) == 3
+    assert "letters_updated_at" not in (manager.sync_state.get("90_90") or {})
+
+
+async def test_repeated_full_page_holds_cursor(manager):
+    manager.client.get_letters = AsyncMock(return_value=[_letter(i, _ts(1)) for i in range(1, 201)])
+
+    await manager.sync_letters(AsyncMock(), GROUP, MEMBER)
+    assert "letters_updated_at" not in (manager.sync_state.get("90_90") or {})
+
+
+async def test_non_integer_letter_id_is_skipped(manager, tmp_path):
+    evil = {**_letter(2, _ts(2)), "id": "../../evil"}
+    missing = {k: v for k, v in _letter(3, _ts(3)).items() if k != "id"}
+    manager.client.get_letters = AsyncMock(return_value=[_letter(1, _ts(1)), evil, missing])
+
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 1
+
+    assert [row["id"] for row in _stored(manager)["letters"]] == [1]
+    written = {p.relative_to(tmp_path) for p in tmp_path.rglob("*") if p.is_file()}
+    assert not any("evil" in str(p) for p in written)
+    assert not list(tmp_path.parent.glob("evil*"))
+    downloaded = [call.args[2] for call in manager.client.download_file.await_args_list]
+    member_dir = manager._member_dir_path(GROUP, MEMBER)
+    assert downloaded == [member_dir / "letters" / "1.jpg"]
+    assert "evil" not in json.dumps(logs, ensure_ascii=False)
+    assert any(e.get("error_type") for e in logs)
+
+
+async def test_quiet_member_still_advances_cursor(manager):
+    manager.client.get_letters = FakeLetterApi(
+        [_letter(1, _ts(1), member_id=7), _letter(2, _ts(2), member_id=7)]
+    ).as_mock()
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 0
+    assert manager.sync_state["90_90"]["letters_updated_at"] == _ts(2)
+    assert not (manager._member_dir_path(GROUP, MEMBER) / "letters.json").exists()
+
+
+async def test_identical_second_sync_does_not_rewrite_letters_json(manager):
+    manager.client.get_letters = FakeLetterApi([_letter(1, _ts(1))]).as_mock()
+    await manager.sync_letters(AsyncMock(), GROUP, MEMBER)
+    path = manager._member_dir_path(GROUP, MEMBER) / "letters.json"
+    before = path.stat().st_mtime_ns
+
+    manager.sync_state["90_90"].pop("letters_updated_at")  # force a full refetch
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 0
+    assert path.stat().st_mtime_ns == before

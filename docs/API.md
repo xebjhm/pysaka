@@ -273,9 +273,13 @@ Archive the account's sent letters to this member into `<member_dir>/letters.jso
 letter-card image into `<member_dir>/letters/<id>.<ext>`. `client_token` is never stored. Works for
 expired subscriptions (the server still returns their letters). Uses its own cursor
 `letters_updated_at` in the member's sync_state entry; it never touches the message cursor and
-never fires `on_new_messages`. The cursor advances only when every stored letter's image is on
-disk, so a failed image is re-fetched (with a fresh signed URL) on the next call. Fetches up to 50
-pages of 200 letters per call.
+never fires `on_new_messages`. The cursor advances (to the newest `updated_at` among all letters
+fetched for the room) only when the fetch was complete (it ended on a short page; an empty page
+after a full one, hitting the page cap, or a page with no new letter count as incomplete) and every
+image of this member's letters is on disk, so a failed image is re-fetched (with a fresh signed
+URL) on the next call. A member with no letters in the room still advances it after a complete
+fetch. A letter whose `id` is not an integer is skipped. Fetches up to 50 pages of 200 letters per
+call; `letters.json` is rewritten only when its content changes.
 
 `letters.json` shape, sorted by `created_at`:
 `{"version": 1, "letters": [{"id", "member_id", "text", "created_at", "updated_at", "is_favorite",
@@ -284,7 +288,8 @@ pages of 200 letters per call.
 thumbnail's size. Returns the number of letters that were not in `letters.json` before.
 - **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. A failed fetch or an
   unreadable `letters.json` does not raise: it logs and returns 0 (an unreadable file is left
-  untouched and the letters cursor is reset).
+  untouched and the letters cursor is reset). `OSError` from file I/O after the fetch can
+  propagate (like `backfill_past_messages`), so callers should wrap the call.
 
 #### `archive_account_profile(session) -> dict`
 Archive the account's own nickname and avatar for this service. Writes

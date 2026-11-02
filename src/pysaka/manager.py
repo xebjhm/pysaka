@@ -455,14 +455,24 @@ class SyncManager:
 
         Stores ``<member_dir>/letters.json`` (``client_token`` is never stored) and
         each letter-card image at ``<member_dir>/letters/<id>.<ext>``. Uses its own
-        cursor ``letters_updated_at`` in the member's sync_state entry, which is
-        advanced only when every stored letter's image is on disk, so a failed
-        image is re-fetched with a fresh signed URL next run. Works for expired
-        subscriptions (the server still returns their letters). Never touches the
-        message cursor and never fires ``on_new_messages``.
+        cursor ``letters_updated_at`` in the member's sync_state entry. The cursor
+        moves to the newest ``updated_at`` among all letters fetched for the room
+        only when the fetch was complete (it ended on a short page; an empty page
+        after a full one, the page cap, or a page with no new letter are treated as
+        incomplete) and every image of this member's letters is on disk, so a failed
+        image is re-fetched with a fresh signed URL next run. A member with no
+        letters in the room still advances the cursor after a complete fetch.
+        A letter whose ``id`` is not an integer is skipped (logged by error type).
+        Works for expired subscriptions (the server still returns their letters).
+        Never touches the message cursor and never fires ``on_new_messages``.
+        ``letters.json`` is rewritten only when its content changes.
 
         Raises:
             SessionExpiredError, RefreshFailedError: auth failures propagate.
+            OSError: creating the member directory, or file I/O after the fetch,
+                failed (other unexpected errors after the fetch also propagate),
+                so callers should wrap the call. A failed fetch or an unreadable
+                ``letters.json`` does not raise: it logs and returns 0.
 
         Returns:
             Number of letters that were not in ``letters.json`` before.
@@ -472,13 +482,19 @@ class SyncManager:
         cursor = (self.sync_state.get(key) or {}).get("letters_updated_at")
         fetched: dict[Any, dict[str, Any]] = {}
         updated_from = cursor
+        complete = False
         try:
-            for _ in range(self._LETTER_MAX_PAGES):
+            for page_no in range(self._LETTER_MAX_PAGES):
                 page = await self.client.get_letters(session, gid, updated_from=updated_from, count=self._LETTER_PAGE)
                 new_ids = [item.get("id") for item in page if item.get("id") not in fetched]
                 for letter in page:
                     fetched[letter.get("id")] = letter
-                if len(page) < self._LETTER_PAGE or not new_ids:
+                if len(page) < self._LETTER_PAGE:
+                    # An empty page after a full one is impossible (updated_from is
+                    # inclusive), so it means the request failed and was swallowed.
+                    complete = page_no == 0 or bool(page)
+                    break
+                if not new_ids:
                     break
                 # Inclusive overlap on purpose: deduped by id above.
                 updated_from = page[-1].get("updated_at") or updated_from
@@ -488,21 +504,24 @@ class SyncManager:
             logger.warning("Letter fetch failed", group_id=gid, error_type=type(e).__name__)
             return 0
 
-        mine = [item for item in fetched.values() if item.get("member_id") == mid]
-        if not mine:
-            return 0
-
         member_dir = self._member_dir_path(group, member)
         records: list[dict[str, Any]] = []
         downloads: list[tuple[str, Path]] = []
-        for letter in mine:
+        for letter in fetched.values():
+            if letter.get("member_id") != mid:
+                continue
+            try:
+                letter_id = int(letter["id"])
+            except (KeyError, TypeError, ValueError) as e:
+                logger.warning("Letter skipped: invalid id", group_id=gid, error_type=type(e).__name__)
+                continue
             url = letter.get("file")
-            image_file = f"letters/{letter['id']}.{get_media_extension(url, 'picture')}" if url else None
+            image_file = f"letters/{letter_id}.{get_media_extension(url, 'picture')}" if url else None
             if url and image_file:
                 downloads.append((url, member_dir / image_file))
             records.append(
                 {
-                    "id": letter["id"],
+                    "id": letter_id,
                     "member_id": mid,
                     "text": letter.get("text") or "",
                     "created_at": letter.get("created_at"),
@@ -514,35 +533,40 @@ class SyncManager:
                 }
             )
 
-        def mutate(current: Optional[Any]) -> tuple[Optional[Any], int]:
-            existing = current.get("letters", []) if isinstance(current, dict) else []
-            by_id = {item.get("id"): item for item in existing}
-            added = sum(1 for r in records if r["id"] not in by_id)
-            for r in records:
-                prev = by_id.get(r["id"])
-                if prev and r["image_file"] is None and prev.get("image_file"):
-                    r["image_file"] = prev["image_file"]
-                by_id[r["id"]] = r
-            letters = sorted(by_id.values(), key=lambda item: item.get("created_at") or "")
-            return {"version": 1, "letters": letters}, added
+        added = 0
+        if records:
 
-        member_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            wrote, added = await asyncio.to_thread(self._locked_update, member_dir / "letters.json", mutate)
-        except ValueError:
-            # Unreadable letters.json: leave it for inspection and refetch everything next time.
-            entry = dict(self.sync_state.get(key) or {})
-            entry.pop("letters_updated_at", None)
-            self.sync_state[key] = entry
-            self.save_sync_state()
-            logger.warning("letters.json unreadable; letters cursor reset", group_id=gid, member_id=mid)
-            return 0
-        if not wrote:
-            return 0
+            def mutate(current: Optional[Any]) -> tuple[Optional[Any], int]:
+                existing = current.get("letters", []) if isinstance(current, dict) else []
+                by_id = {item.get("id"): item for item in existing}
+                new_count = sum(1 for r in records if r["id"] not in by_id)
+                for r in records:
+                    prev = by_id.get(r["id"])
+                    if prev and r["image_file"] is None and prev.get("image_file"):
+                        r["image_file"] = prev["image_file"]
+                    by_id[r["id"]] = r
+                letters = sorted(by_id.values(), key=lambda item: item.get("created_at") or "")
+                merged = {"version": 1, "letters": letters}
+                return (None if merged == current else merged), new_count
 
-        for url, path in downloads:
-            await self.client.download_file(session, url, path)
-        if all(media_file_is_present(path) for _, path in downloads):
+            member_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                wrote, added = await asyncio.to_thread(self._locked_update, member_dir / "letters.json", mutate)
+            except ValueError:
+                # Unreadable letters.json: leave it for inspection and refetch everything next time.
+                entry = dict(self.sync_state.get(key) or {})
+                entry.pop("letters_updated_at", None)
+                self.sync_state[key] = entry
+                self.save_sync_state()
+                logger.warning("letters.json unreadable; letters cursor reset", group_id=gid, member_id=mid)
+                return 0
+            if not wrote:
+                return 0
+
+            for url, path in downloads:
+                await self.client.download_file(session, url, path)
+
+        if complete and all(media_file_is_present(path) for _, path in downloads):
             # Over everything fetched, not just this member's rows: other members' letters
             # in the same group are not ours, so there is nothing to re-fetch for them.
             newest = max((item.get("updated_at") or "" for item in fetched.values()), default="")
@@ -551,7 +575,7 @@ class SyncManager:
                 entry["letters_updated_at"] = newest
                 self.sync_state[key] = entry
                 self.save_sync_state()
-        logger.info("Letters synced", group_id=gid, member_id=mid, added=added)
+        logger.info("Letters synced", group_id=gid, member_id=mid, added=added, complete=complete)
         return added
 
     async def archive_profile_images(
