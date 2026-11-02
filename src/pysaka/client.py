@@ -4,6 +4,7 @@ import os
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Optional, Union, overload
+from urllib.parse import urlsplit, urlunsplit
 
 import aiofiles
 import aiohttp
@@ -14,6 +15,16 @@ from .exceptions import ApiError, RefreshFailedError, SessionExpiredError
 from .utils import get_jwt_remaining_seconds, get_media_extension, media_file_is_present
 
 logger = structlog.get_logger()
+
+
+def _redact_url(url: str) -> str:
+    """Return ``scheme://host/path`` of ``url`` for logging.
+
+    Signed media URLs carry their credentials in the query string, so the query
+    and fragment are dropped.
+    """
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
 class Group(Enum):
@@ -904,13 +915,14 @@ class Client:
         filepath.parent.mkdir(parents=True, exist_ok=True)
         tmp = filepath.with_name(filepath.name + ".part")
         last_err: Optional[str] = None
+        safe_url = _redact_url(url)
 
         for attempt in range(retries):
             try:
                 async with session.get(url) as resp:
                     if resp.status != 200:
                         last_err = f"status {resp.status}"
-                        logger.warning("Download failed", status=resp.status, url=url)
+                        logger.warning("Download failed", status=resp.status, url=safe_url)
                     else:
                         data = await resp.read()
                         declared = resp.headers.get("Content-Length")
@@ -930,15 +942,16 @@ class Client:
                             os.replace(tmp, filepath)
                             return True
             except Exception as e:  # noqa: BLE001 - transient network errors are retried
-                last_err = str(e)
-                logger.warning("Download error (will retry)", url=url, error=str(e), attempt=attempt + 1)
+                # str(e) can embed the signed URL, so only the exception type is kept.
+                last_err = type(e).__name__
+                logger.warning("Download error (will retry)", url=safe_url, error_type=last_err, attempt=attempt + 1)
 
             if attempt < retries - 1:
                 await asyncio.sleep(0.5 * (attempt + 1))
 
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
-        logger.error("Download ultimately failed", url=url, error=str(last_err))
+        logger.error("Download ultimately failed", url=safe_url, error=str(last_err))
         return False
 
     async def download_message_media(
