@@ -8,12 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `Client.get_member(session, member_id)` returns one member's public profile
-  (`/members/{id}`), including members no longer in any room's list.
 - `Client.get_messages(..., page_delay=0.5)` makes the pause between page
   requests configurable (default unchanged).
 
 ### Changed
+- `Client.get_member(session, member_id)` now returns None when the response
+  body is not a JSON object (before: the raw body). It also works for members
+  who are no longer in any room's member list (e.g. graduated members who
+  posted in an official room).
 - **Breaking:** HTTP 429 now raises `RateLimitedError` (a subclass of `ApiError`,
   `retry_after` from the `Retry-After` header) instead of returning None from
   `Client.fetch_json`. Before, `get_groups`, `get_members` and `get_messages`

@@ -128,7 +128,8 @@ Main API client supporting all Sakamichi groups.
   (e.g. 4xx) or the body is not a JSON object. Works for members who are no
   longer in any room's member list.
 - **Raises**: `ApiError` on a server (5xx) or network error; `RateLimitedError`
-  on HTTP 429.
+  on HTTP 429; `SessionExpiredError` / `RefreshFailedError` on auth failures
+  (propagated from `fetch_json`).
 
 #### `get_account(session) -> Optional[dict]`
 - **Returns**: Account info dict or `None` if failed.

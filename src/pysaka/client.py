@@ -1354,6 +1354,8 @@ class Client:
         Raises:
             ApiError: On a server error (5xx) or a network error.
             RateLimitedError: On HTTP 429 (a subclass of ``ApiError``).
+            SessionExpiredError: If the session is invalidated during the request.
+            RefreshFailedError: If a 401 triggers a token refresh and it fails.
         """
         data = await self.fetch_json(session, f"/members/{member_id}")
         return data if isinstance(data, dict) else None
