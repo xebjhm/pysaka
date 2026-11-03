@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-11-03
+
 ### Added
 - `Client.timeline_min_interval` (also the `Client(..., timeline_min_interval=0.0)`
   keyword) paces `/groups/{id}/timeline` requests: while above 0, consecutive
@@ -473,7 +475,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Secure credential storage via system keyring
 - Token refresh without storing plaintext credentials
 
-[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/xebjhm/pysaka/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/xebjhm/pysaka/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/xebjhm/pysaka/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/xebjhm/pysaka/compare/v0.4.2...v0.4.3
