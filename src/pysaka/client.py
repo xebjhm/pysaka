@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import os
+from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Optional, Union, overload
@@ -11,7 +12,7 @@ import aiohttp
 import structlog
 
 from .credentials import get_token_manager
-from .exceptions import ApiError, RefreshFailedError, SessionExpiredError
+from .exceptions import ApiError, RateLimitedError, RefreshFailedError, SessionExpiredError
 from .utils import get_jwt_remaining_seconds, get_media_extension, media_file_is_present
 
 logger = structlog.get_logger()
@@ -44,6 +45,18 @@ def _int_or_none(value: Any) -> Optional[int]:
     """``value`` if it is a true integer (not a bool), else None — for logging
     server-supplied ids without echoing arbitrary content."""
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _rate_limited(endpoint: str, resp: Any) -> RateLimitedError:
+    """Build the error for a 429 response (Retry-After parsed when numeric)."""
+    headers = getattr(resp, "headers", None)
+    raw = headers.get("Retry-After") if isinstance(headers, Mapping) else None
+    try:
+        retry_after: Optional[float] = float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        retry_after = None
+    logger.warning("API rate limited", endpoint=endpoint, retry_after=retry_after)
+    return RateLimitedError(f"Rate limited at {endpoint}", retry_after)
 
 
 class Group(Enum):
@@ -266,6 +279,7 @@ class Client:
 
         Raises:
             ApiError: If the API returns a server error (5xx) or other unhandled status.
+            RateLimitedError: On HTTP 429 (also after a token refresh).
             SessionExpiredError: If the session is invalidated during the request.
             RefreshFailedError: If a 401 triggers a token refresh and all refresh
                 plans fail (surfaced so callers can prompt re-login).
@@ -288,9 +302,13 @@ class Client:
                             elif resp_retry.status == 401:
                                 logger.warning(f"Unauthorized at {endpoint} even after refresh.")
                                 return None
+                            elif resp_retry.status == 429:
+                                raise _rate_limited(endpoint, resp_retry)
                             elif resp_retry.status >= 500:
                                 raise ApiError(f"Server error {resp_retry.status}", resp_retry.status)
                     return None
+                elif resp.status == 429:
+                    raise _rate_limited(endpoint, resp)
                 elif resp.status >= 500:
                     logger.error(f"Server error {resp.status} at {endpoint}")
                     raise ApiError(f"Server error {resp.status}", resp.status)

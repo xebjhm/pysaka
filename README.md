@@ -194,6 +194,7 @@ Each scraper provides:
 - `SakaError`: Base exception for all pysaka errors.
 - `AuthError`: Authentication related errors.
 - `ApiError`: API request errors (includes `status_code` attribute).
+- `RateLimitedError`: HTTP 429 from the API; a subclass of `ApiError` with `retry_after` (seconds, or `None`).
 - `SessionExpiredError`: Session invalidated server-side (e.g., logged in from another device).
 - `RefreshFailedError`: All token refresh attempts failed unexpectedly.
 - `BlogGoneError`: Blog post has been permanently removed (HTTP 404/410).

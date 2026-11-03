@@ -21,6 +21,22 @@ class ApiError(SakaError):
         self.status_code = status_code
 
 
+class RateLimitedError(ApiError):
+    """The API answered 429 Too Many Requests.
+
+    Raised instead of returning None so a rate-limited response is never mistaken
+    for "no data" (an empty group list, timeline or member list). Retry later.
+
+    Attributes:
+        retry_after: Seconds from the ``Retry-After`` header, or None when absent
+            or not a number.
+    """
+
+    def __init__(self, message: str, retry_after: Optional[float] = None):
+        super().__init__(message, 429)
+        self.retry_after = retry_after
+
+
 class SessionExpiredError(AuthError):
     """
     Raised when the session has been invalidated server-side.

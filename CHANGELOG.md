@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Breaking:** HTTP 429 now raises `RateLimitedError` (a subclass of `ApiError`,
+  `retry_after` from the `Retry-After` header) instead of returning None from
+  `Client.fetch_json`. Before, `get_groups`, `get_members` and `get_messages`
+  returned `[]` while rate limited, which callers could not tell apart from
+  "nothing there". Callers that already handle `ApiError` need no change.
+
 ## [0.4.5] - 2026-11-03
 
 ### Added

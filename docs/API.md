@@ -59,10 +59,12 @@ Main API client supporting all Sakamichi groups.
 - **session**: Active aiohttp session.
 - **include_inactive**: If True, returns `expired` and `suspended` subscriptions too.
 - **Returns**: List of group objects.
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list).
 
 #### `get_members(session, group_id: int) -> List[dict]`
 - **group_id**: Target group ID.
 - **Returns**: List of member objects.
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list).
 
 #### `get_messages(session, group_id: int, since_id: int = None, since_ts: str = None, max_id: int = None, progress_callback = None, clear_unread: bool = False) -> List[dict]`
 - **group_id**: Target group ID.
@@ -86,7 +88,8 @@ Main API client supporting all Sakamichi groups.
   earlier pages were collected, or, while the cursor is still unreached, a full
   page with a repeated continuation (always), a full page with a missing
   continuation (unless the `order=asc` probe confirms the timeline start), or a
-  page that replays already-collected messages.
+  page that replays already-collected messages. On HTTP 429 it raises
+  `RateLimitedError` instead of returning an empty list.
 
 #### `download_file(session, url: str, filepath: Path, timestamp: str = None) -> bool`
 - **url**: Signed media URL. Failure logs carry only its scheme, host, port and path (never the
@@ -170,7 +173,8 @@ or the response has no `messages` list.
 #### `fetch_json(session, endpoint: str, params: dict = None) -> Optional[dict]`
 Low-level authenticated GET returning parsed JSON (used internally by the
 higher-level `get_*` methods). Handles token refresh and raises `ApiError` on
-non-recoverable HTTP errors. See the `ApiError` example below.
+non-recoverable HTTP errors. HTTP 429 raises `RateLimitedError` (a subclass of
+`ApiError`) instead of returning None. See the `ApiError` example below.
 
 #### `refresh_access_token(session) -> bool`
 - **session**: Active aiohttp session.
@@ -562,6 +566,27 @@ try:
     data = await client.fetch_json(session, "/endpoint")
 except ApiError as e:
     print(f"API error (status {e.status_code}): {e}")
+```
+
+### `RateLimitedError`
+Subclass of `ApiError`, raised when the API answers HTTP 429 Too Many Requests.
+Raised by `fetch_json` and by the list calls built on it (`get_groups`,
+`get_members`, `get_messages`), instead of returning None or `[]`.
+
+- **status_code**: `429`.
+- **retry_after**: `Optional[float]` - seconds from the `Retry-After` header, or
+  `None` when the header is absent or not a number.
+
+```python
+import asyncio
+
+from pysaka import RateLimitedError
+
+try:
+    members = await client.get_members(session, group_id)
+except RateLimitedError as e:
+    # Back off; retry_after is None when the server sent no usable header
+    await asyncio.sleep(e.retry_after or 60)
 ```
 
 ### `BlogGoneError`
