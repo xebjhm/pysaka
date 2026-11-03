@@ -198,3 +198,104 @@ def test_ensure_member_dir_logs_and_reraises_rename_failure(manager, monkeypatch
     assert warning and warning[0]["member_id"] == 22
     assert warning[0]["old"] == "22 22" and warning[0]["new"] == "22 潮 紗理菜"
     assert (room / "22 22").is_dir()
+
+
+def _write_messages(folder, messages):
+    folder.mkdir(parents=True, exist_ok=True)
+    with open(folder / "messages.json", "w", encoding="utf-8") as f:
+        json.dump({"member": {"id": 1, "name": "x"}, "messages": messages}, f, ensure_ascii=False)
+
+
+def _by_id(path):
+    with open(path, encoding="utf-8") as f:
+        return {m["id"]: m for m in json.load(f)["messages"]}
+
+
+async def test_member_rename_rewrites_media_paths_in_both_separator_styles(manager):
+    room = manager.output_dir / "messages" / "43 日向坂46"
+    stored = [
+        {
+            "id": 1,
+            "type": "picture",
+            "is_favorite": True,
+            "width": 3,
+            "media_file": r"messages\43 日向坂46\22 22\picture\1.jpg",
+        },
+        {"id": 2, "type": "video", "media_file": "messages/43 日向坂46/22 22/video/2.mp4", "media_duration": 1.5},
+        {"id": 3, "type": "picture", "media_file": "messages/43 日向坂46/22 222/picture/3.jpg"},
+        {"id": 4, "type": "picture", "media_file": "elsewhere/22 22/picture/4.jpg"},
+        {"id": 5, "type": "text", "content": "本文"},
+    ]
+    _write_messages(room / "22 22", stored)
+    (room / "22 22" / "video").mkdir()
+    (room / "22 22" / "video" / "2.mp4").write_bytes(b"x")
+
+    await manager.sync_member(
+        AsyncMock(), GROUP, {"id": 22, "name": "潮 紗理菜"}, [], prefetched_messages=[_m(6, "2021-09-17T00:00:00Z", 22)]
+    )
+
+    msgs = _by_id(room / "22 潮 紗理菜" / "messages.json")
+    assert msgs[1] == {**stored[0], "media_file": r"messages\43 日向坂46\22 潮 紗理菜\picture\1.jpg"}
+    assert msgs[2] == {**stored[1], "media_file": "messages/43 日向坂46/22 潮 紗理菜/video/2.mp4"}
+    assert msgs[3] == stored[2] and msgs[4] == stored[3] and msgs[5] == stored[4]
+    scan = manager.scan_member_media(room / "22 潮 紗理菜")
+    assert [d["message_id"] for d in scan["missing"]] == [1, 3, 4]  # 2 is found at its new path
+
+
+async def test_group_rename_rewrites_media_paths_of_every_member_folder(manager):
+    old_room = manager.output_dir / "messages" / "43 旧ルーム"
+    a = [
+        {"id": 1, "type": "picture", "media_file": r"messages\43 旧ルーム\22 a\picture\1.jpg"},
+        {"id": 2, "type": "picture", "media_file": "messages/430 旧ルーム/22 a/picture/2.jpg"},
+    ]
+    b = [{"id": 3, "type": "voice", "media_file": "messages/43 旧ルーム/0 旧ルーム/voice/3.m4a", "is_muted": False}]
+    _write_messages(old_room / "22 a", a)
+    _write_messages(old_room / "0 旧ルーム", b)
+    (old_room / "notes").mkdir()  # a folder without messages.json is left alone
+
+    await manager.sync_member(
+        AsyncMock(), GROUP, {"id": 22, "name": "a"}, [], prefetched_messages=[_m(6, "2021-09-17T00:00:00Z", 22)]
+    )
+
+    room = manager.output_dir / "messages" / "43 日向坂46"
+    assert not old_room.exists()
+    msgs = _by_id(room / "22 a" / "messages.json")
+    assert msgs[1]["media_file"] == r"messages\43 日向坂46\22 a\picture\1.jpg"
+    assert msgs[2] == a[1]
+    assert _by_id(room / "0 旧ルーム" / "messages.json")[3] == {
+        **b[0],
+        "media_file": "messages/43 日向坂46/0 旧ルーム/voice/3.m4a",
+    }
+
+
+async def test_media_path_rewrite_failure_is_logged_not_raised(manager, monkeypatch):
+    room = manager.output_dir / "messages" / "43 日向坂46"
+    _write_messages(room / "22 22", [{"id": 1, "type": "picture", "media_file": "messages/43 日向坂46/22 22/p/1.jpg"}])
+
+    def boom(*args, **kwargs):
+        raise OSError("disk")
+
+    monkeypatch.setattr(SyncManager, "_locked_update", staticmethod(boom))
+    with structlog.testing.capture_logs() as logs:
+        assert manager._ensure_member_dir(room, 22, "潮 紗理菜") == room / "22 潮 紗理菜"
+    warning = [e for e in logs if e["event"] == "Media paths not updated after folder rename"]
+    assert warning and warning[0]["error_type"] == "OSError"
+    assert (room / "22 潮 紗理菜").is_dir()
+
+
+def test_media_path_rewrite_write_failure_is_logged(manager, monkeypatch):
+    room = manager.output_dir / "messages" / "43 日向坂46"
+    _write_messages(room / "22 22", [{"id": 1, "type": "picture", "media_file": "messages/43 日向坂46/22 22/p/1.jpg"}])
+    monkeypatch.setattr(SyncManager, "_atomic_write_json", staticmethod(lambda target, data: False))
+    with structlog.testing.capture_logs() as logs:
+        manager._ensure_member_dir(room, 22, "潮 紗理菜")
+    warning = [e for e in logs if e["event"] == "Media paths not updated after folder rename"]
+    assert warning and warning[0]["error_type"] == "write_failed"
+
+
+def test_media_path_rewrite_leaves_unreadable_file_alone(manager):
+    room = manager.output_dir / "messages" / "43 日向坂46"
+    (room / "22 22").mkdir(parents=True)
+    (room / "22 22" / "messages.json").write_text("{broken", encoding="utf-8")
+    manager._ensure_member_dir(room, 22, "潮 紗理菜")
+    assert (room / "22 潮 紗理菜" / "messages.json").read_text(encoding="utf-8") == "{broken"

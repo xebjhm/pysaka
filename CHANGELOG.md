@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "nothing there". Callers that already handle `ApiError` need no change.
 
 ### Fixed
+- Renaming a room folder (`messages/<gid> <old room name>`) or a member folder
+  (`<mid> <old name>`) left every stored `media_file` pointing into the old
+  folder, so the app showed broken media and Verify & Fix re-downloaded into
+  the old path, recreating it. `sync_member` and `sync_letters` now rewrite the
+  `media_file` values that start with the old folder in the affected
+  `messages.json` files, keeping each value's `\` or `/` separators; other
+  values and fields are left as they are.
 - **Withdrawn messages are now archived instead of dropped**: a canceled text
   message was skipped before (the withdrawal was never recorded) and a canceled
   photo/video lost its archived caption on the next re-fetch. `sync_member` now

@@ -412,8 +412,13 @@ class SyncManager:
 
         If the room was renamed on the server (e.g. "12th Single" -> "16th Single")
         and only a ``messages/<gid> <old name>`` folder exists, it is renamed
-        instead of leaving a duplicate. Call this before creating anything under
+        instead of leaving a duplicate, and the ``media_file`` paths under the old
+        folder are rewritten in every member folder's ``messages.json`` (see
+        :meth:`_rewrite_media_paths`). Call this before creating anything under
         the group directory; it does not create the directory itself.
+
+        Raises:
+            OSError: the rename failed (nothing was changed).
         """
         gid = group["id"]
         messages_dir = self.output_dir / "messages"
@@ -423,6 +428,9 @@ class SyncManager:
                 if existing.is_dir() and existing.name.startswith(f"{gid} "):
                     logger.info("Group renamed on server, renaming directory", old=existing.name, new=group_dir.name)
                     existing.rename(group_dir)
+                    for member_dir in sorted(group_dir.iterdir()):
+                        if (member_dir / "messages.json").is_file():
+                            self._rewrite_media_paths(member_dir / "messages.json", existing, group_dir)
                     break
         return group_dir
 
@@ -430,8 +438,13 @@ class SyncManager:
         """Return ``group_dir/<mid> <name>``, renaming a member folder left under an old name.
 
         A member who changed their display name, or an author first archived under
-        a fallback name (their id), keeps one folder instead of a duplicate. Only
-        renames when the target does not exist yet; never creates the directory.
+        a fallback name (their id), keeps one folder instead of a duplicate, and the
+        ``media_file`` paths under the old folder are rewritten in its
+        ``messages.json`` (see :meth:`_rewrite_media_paths`). Only renames when the
+        target does not exist yet; never creates the directory.
+
+        Raises:
+            OSError: the rename failed (a warning is logged; nothing was changed).
         """
         member_dir = group_dir / f"{member_id} {name}"
         if not member_dir.exists() and group_dir.exists():
@@ -454,8 +467,48 @@ class SyncManager:
                             new=member_dir.name,
                         )
                         raise
+                    if (member_dir / "messages.json").is_file():
+                        self._rewrite_media_paths(member_dir / "messages.json", existing, member_dir)
                     break
         return member_dir
+
+    def _rewrite_media_paths(self, messages_file: Path, old_dir: Path, new_dir: Path) -> None:
+        """After renaming ``old_dir`` to ``new_dir``, point ``media_file`` values at the new folder.
+
+        ``media_file`` is relative to ``output_dir`` with the separator of the OS
+        that wrote it (``\\`` on Windows, ``/`` elsewhere), so the old prefix is
+        matched with either separator. Only the prefix is replaced, in the record's
+        own separator style; a value that does not start with the old folder, and
+        every other field, are left as they are. Runs under the file lock. A failure
+        is logged (file and error type) and not raised: the folder is already renamed.
+        """
+        old_prefix = old_dir.relative_to(self.output_dir).as_posix() + "/"
+        new_prefix = new_dir.relative_to(self.output_dir).as_posix()
+
+        def mutate(current: Optional[Any]) -> tuple[Optional[Any], int]:
+            messages = current.get("messages") if isinstance(current, dict) else None
+            if not isinstance(messages, list):
+                return None, 0
+            updated = 0
+            for msg in messages:
+                value = msg.get("media_file") if isinstance(msg, dict) else None
+                if not isinstance(value, str) or not value.replace("\\", "/").startswith(old_prefix):
+                    continue
+                sep = value[len(old_prefix) - 1]
+                msg["media_file"] = new_prefix.replace("/", sep) + sep + value[len(old_prefix) :]
+                updated += 1
+            return (current if updated else None), updated
+
+        rel_file = str(messages_file.relative_to(self.output_dir))
+        try:
+            wrote, updated = self._locked_update(messages_file, mutate, on_corrupt="discard")
+        except OSError as e:
+            logger.warning("Media paths not updated after folder rename", file=rel_file, error_type=type(e).__name__)
+            return
+        if not wrote:
+            logger.warning("Media paths not updated after folder rename", file=rel_file, error_type="write_failed")
+        elif updated:
+            logger.info("Media paths updated after folder rename", file=rel_file, updated=updated)
 
     @staticmethod
     def _type_counts(messages: list[dict[str, Any]]) -> dict[str, int]:
@@ -538,8 +591,10 @@ class SyncManager:
 
         Messages without a ``member_id`` belong to member 0, the room author (see
         :mod:`pysaka.roster`). Member 0 has no profile images, so none are
-        archived for it. A member folder left under an old name is renamed to the
-        member's current name instead of creating a second folder.
+        archived for it. A member folder left under an old name (or a room folder
+        left under an old room name) is renamed to the current name instead of
+        creating a second folder, and ``media_file`` paths into the old folder are
+        rewritten in the affected ``messages.json`` files.
 
         Returns:
             Number of messages processed in this run (includes re-fetched

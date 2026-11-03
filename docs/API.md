@@ -273,8 +273,13 @@ Sync one member's messages, queue their media, and archive the member's profile 
   has no profile images, so none are archived for it, and `backfill_past_messages` and
   `sync_letters` return 0 for it.
 - A member folder left under an old name (`messages/<gid> */<mid> <old name>`) is renamed to the
-  member's current name instead of creating a second folder. When both the old and the new folder
-  exist, neither is touched.
+  member's current name instead of creating a second folder, and so is a room folder left under an
+  old room name (`messages/<gid> <old name>`). When both the old and the new folder exist, neither
+  is touched. After a rename, every `media_file` that starts with the old folder is rewritten to the
+  new one in the affected `messages.json` (the member's, or every member folder's for a room
+  rename), keeping the value's own `\` or `/` separators (`media_file` is relative to
+  `output_dir` with the separator of the OS that wrote it). Other values and fields are untouched.
+  A failure to rewrite is logged (file and error type) and does not fail the sync.
 
 #### `update_message_fields(messages_file: Path, message_id: int, fields: dict) -> bool` (async, static) / `update_message_fields_sync(messages_file, message_id, fields) -> bool` (blocking, static)
 Set fields on one message under the file's lock. Use this for every local edit of `messages.json`
