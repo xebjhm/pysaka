@@ -215,3 +215,38 @@ class TestGetMediaDimensions:
 
         assert width is None
         assert height is None
+
+
+class TestProbeWarningsAreSafe:
+    """Probe failures log parent/name and the error type, never the absolute path or exception text."""
+
+    def _check(self, logs, event: str, tmp_path: Path) -> None:
+        (warn,) = [e for e in logs if e["event"] == event]
+        assert warn["path"] == f"{tmp_path.name}/clip.bin"
+        assert warn["error_type"] == "RuntimeError" and "error" not in warn
+        assert str(tmp_path) not in repr(logs) and "SECRET" not in repr(logs)
+
+    def test_image_probe_failure(self, tmp_path: Path) -> None:
+        from structlog.testing import capture_logs
+
+        bad = tmp_path / "clip.bin"
+        bad.write_bytes(b"x")
+        with patch("PIL.Image.open", side_effect=RuntimeError(f"SECRET {bad}")), capture_logs() as logs:
+            assert get_image_dimensions(bad) == (None, None)
+        self._check(logs, "Failed to get image dimensions", tmp_path)
+
+    def test_video_and_audio_probe_failure(self, tmp_path: Path) -> None:
+        from structlog.testing import capture_logs
+
+        from pysaka.media import get_audio_metadata
+
+        bad = tmp_path / "clip.bin"
+        bad.write_bytes(b"x")
+        with (
+            patch("pymediainfo.MediaInfo.parse", side_effect=RuntimeError(f"SECRET {bad}")),
+            capture_logs() as logs,
+        ):
+            assert get_video_dimensions(bad) == (None, None)
+            assert get_audio_metadata(bad, "video") == {"duration": None, "is_muted": None}
+        self._check([e for e in logs if "video" in e["event"]], "Failed to get video dimensions", tmp_path)
+        self._check([e for e in logs if "audio" in e["event"]], "Failed to get audio metadata", tmp_path)

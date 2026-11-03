@@ -156,7 +156,7 @@ The main entry point.
 - `post_json(session, endpoint, data)`: Perform JSON POST requests.
 - `delete_json(session, endpoint)`: Perform DELETE requests.
 - `download_file(session, url, filepath)`: Download a file to local filesystem.
-- `get_member(session, member_id)`: Fetch individual member details.
+- `get_member(session, member_id)`: Fetch one member's public profile (works for members no longer in a room's list).
 - `get_account(session)`: Fetch user account information.
 - `get_letters(session, group_id)`: Fetch user's sent letters/cards.
 - `get_past_messages(session, group_id, *, strict=False)`: Fetch historical messages. With `strict=True` it returns `None` when the request failed instead of `[]`.
@@ -194,6 +194,7 @@ Each scraper provides:
 - `SakaError`: Base exception for all pysaka errors.
 - `AuthError`: Authentication related errors.
 - `ApiError`: API request errors (includes `status_code` attribute).
+- `RateLimitedError`: HTTP 429 from the API; a subclass of `ApiError` with `retry_after` (seconds, or `None`).
 - `SessionExpiredError`: Session invalidated server-side (e.g., logged in from another device).
 - `RefreshFailedError`: All token refresh attempts failed unexpectedly.
 - `BlogGoneError`: Blog post has been permanently removed (HTTP 404/410).

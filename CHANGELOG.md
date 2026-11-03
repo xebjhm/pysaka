@@ -7,6 +7,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-11-03
+
+### Added
+- `Client.timeline_min_interval` (also the `Client(..., timeline_min_interval=0.0)`
+  keyword) paces `/groups/{id}/timeline` requests: while above 0, consecutive
+  request starts through that client are at least that many seconds apart,
+  covering every `get_messages` page, its `order=asc` probe, `mark_group_read`
+  and the 401 retry in `fetch_json`, also under concurrent callers. Other
+  endpoints and CDN downloads are never paced. Default `0.0` keeps today's
+  behavior (no pacing); a negative, NaN or infinite value raises `ValueError`. Set it
+  (e.g. `3.0`) for history scans (the timeline was observed to return 429
+  after about 170 timeline requests in 5 minutes), and pass `page_delay=0` to
+  avoid doubling the pause.
+- Timeline fail-fast after HTTP 429, with or without `timeline_min_interval`:
+  once a `/groups/{id}/timeline` request returns 429, the `Client` raises
+  `RateLimitedError` immediately, without sending, for every further timeline
+  request (`get_messages` pages, `mark_group_read`, `fetch_json`, the 401 retry,
+  and requests already waiting in the pacing gate), with `retry_after` set to the
+  remaining cooldown. The cooldown is the response's `Retry-After` (finite, >= 0,
+  at most `pysaka.client.TIMELINE_429_MAX_COOLDOWN` = 900 s) or else
+  `pysaka.client.TIMELINE_429_COOLDOWN` (150 s); a later 429 never shortens it.
+  It ends by itself, is per client, and other endpoints are unaffected. The new
+  read-only `Client.timeline_blocked_remaining` returns the seconds left (`None`
+  when not blocked). Before, queued requests kept going out and each got another
+  429, so a caller's circuit breaker could not stop them.
+- `Client.get_messages(..., page_delay=0.5)` makes the pause between page
+  requests configurable (default unchanged).
+- `pysaka.roster` (`ROOM_AUTHOR_ID`, `author_id`, `extra_author_ids`,
+  `room_author`) and `SyncManager.sync_member(..., ignore_cursor=True)`, which merges a
+  member's rows older than the cursor and does not call `on_new_messages` (not
+  even for posts that arrived since the last sync). Only messages at or after
+  the previous cursor can hold the cursor back: an old message with missing
+  media or a failed normalize no longer pins it to that old date.
+- `SyncManager.prepare_messages(..., cursor_floor=None)`: when set, only
+  messages published at or after it count toward the returned earliest
+  failed / pending-media timestamps.
+- `SyncManager.extra_room_members(session, group, api_members, messages, name_hints=None)`
+  returns the authors of a room's timeline missing from `/groups/{id}/members`
+  (earlier lineups, members posting in official rooms) plus member 0 when a
+  message has no usable `member_id` (absent, or not an int / decimal string)
+  and 0 is not in `api_members`. Sync them with `sync_member` so their messages
+  are no longer dropped. Rows that sync skips as empty (non-canceled text with
+  no text and no media) do not create an author, so a 1:1 room gets no empty
+  member 0 folder.
+- `SyncManager.history_scanned`, `mark_history_scanned` and `room_archive_complete`
+  let callers re-read each room's whole timeline once (flag in `sync_state.json`
+  as `room_<gid>`), recovering messages from authors that earlier versions
+  dropped. `room_archive_complete` does not expect the messages sync skips
+  (empty text messages that are not canceled).
+- `pysaka.utils.CANCELED_STATES`: the server states (`canceled`, `cancelled`) of a
+  message the member withdrew. A canceled message now carries `canceled_at`
+  (the API's `updated_at`, kept from the first time it was seen; omitted, never
+  `null`, while the API row has no `updated_at`).
+- Log breadcrumbs for the room-roster and scan decisions, for diagnosing bug
+  reports from `debug.log`. `info`: `Extra room members`, `Room history scan
+  recorded`, `Stored message turned canceled`. `warning`: unknown extra-author
+  names, `Messages with unusable member_id attributed to room author`, `Local
+  member block unreadable`, `Member lookup returned a non-object body`; the
+  `API rate limited` warning also says why an unusable `Retry-After` was
+  ignored (`retry_after_ignored`, `error_type`). `debug`: per-author name
+  source, `Room archive complete`, cursor exclusions during a scan, canceled
+  skeletons and skipped member 0 calls. Logs carry ids, counts, error types
+  and relative `messages/...` folder names; never message text.
+
+### Changed
+- `sync_member` assigns messages without `member_id` to member 0 (the room
+  itself) instead of no member. `sync_member` and `sync_letters` rename
+  `messages/<gid> */<mid> <old name>` to the member's current name instead of
+  creating a second folder. If a member or room folder rename fails
+  (`OSError`, e.g. a file locked on Windows), `sync_member` and `sync_letters`
+  log a warning and return 0 without writing or moving a cursor (before: the
+  error escaped `sync_member`).
+- `Client.get_member(session, member_id)` now returns `None` when the response
+  body is not a JSON object (before: the raw body). It also works for members
+  who are no longer in any room's member list (e.g. graduated members who
+  posted in an official room).
+- **Breaking:** HTTP 429 now raises `RateLimitedError` (a subclass of `ApiError`)
+  from every `Client` method built on `fetch_json`: `fetch_json`, `get_groups`,
+  `get_members`, `get_messages`, `get_profile`, `get_account`, `get_member`,
+  `get_news`, `get_tags`, `get_fc_contents`, `get_organizations`,
+  `get_products`, `get_letters`, `get_past_messages`, `get_subscription_streak`
+  and `mark_group_read`. Before, they returned their failure value while rate
+  limited (`None`, `[]` or `False`), which callers could not tell apart from
+  "nothing there". `retry_after` holds the `Retry-After` header in seconds, or
+  `None` when it is absent, not a number, not finite or negative. Callers that
+  already handle `ApiError` need no change; others should catch
+  `RateLimitedError` and back off.
+- `SyncManager.save_sync_state()` now returns `True` when `sync_state.json`
+  was written and `False` when the write failed (before: always `None`).
+  Callers that ignore the result need no change.
+
+### Fixed
+- Error logs no longer carry exception text, which could quote message content,
+  signed URLs or local paths: `Prepare error`, `Error syncing member`,
+  `Failed to update message metadata`, `Unexpected error fetching` and `Message
+  media download error` now log `error_type` plus ids. `Error syncing member`
+  logs a text-free `origin` (`file:line:function`, `pysaka_frame`, `cause_type`)
+  instead of a traceback. Network, timeout and download failures log the
+  redacted URL, and the `ApiError` raised for a network error or timeout reads
+  `Network error: <ExceptionType>` / `Timeout: <ExceptionType>` instead of
+  embedding the exception text. Media probe and file-error logs show
+  `parent/name` instead of the absolute path (no user name).
+- Renaming a room folder (`messages/<gid> <old room name>`) or a member folder
+  (`<mid> <old name>`) left every stored `media_file` pointing into the old
+  folder, so the app showed broken media and Verify & Fix re-downloaded into
+  the old path, recreating it. `sync_member` and `sync_letters` now rewrite the
+  `media_file` values that start with the old folder in the affected
+  `messages.json` files, keeping each value's `\` or `/` separators; other
+  values and fields are left as they are.
+- **Withdrawn messages are now archived instead of dropped**: a canceled text
+  message was skipped before (the withdrawal was never recorded) and a canceled
+  photo/video lost its archived caption on the next re-fetch. `sync_member` now
+  stores canceled messages with `state` and `canceled_at` (the server's
+  `updated_at`, first sight), keeping any content captured before the
+  withdrawal. A text message with no text and no media in any state other
+  than canceled (not only `published`) is still skipped.
+- `Client.get_messages` without a cursor (neither `since_ts` nor `since_id`)
+  now raises `ApiError` when the first timeline page fails (a 4xx other than
+  429, a 401 that persists after the token refresh, or an unexpected error).
+  Before, it returned `[]`, which looks like an empty room, so
+  `room_archive_complete` passed and a history scan could be recorded as done
+  for a room that was never read. With a cursor, a failed first page still
+  returns `[]`.
+- `Client.get_messages` without a cursor now applies the same end-of-timeline
+  checks as with a cursor, and raises `ApiError` instead of returning a
+  truncated history when a full page repeats its continuation, a page replays
+  already-collected messages, an empty first page carries a continuation, or a
+  full last page has no continuation and the `order=asc` probe does not return
+  the smallest collected id. Before, these ended pagination and returned the
+  pages collected so far (a repeated continuation only logged `Timeline
+  pagination stuck without a cursor`). A partial last page, with or without an
+  echoed continuation, still ends the timeline normally.
+- `SyncManager.mark_history_scanned` logged `Room history scan recorded` even
+  when saving `sync_state.json` failed. It now returns `True` when the flag was
+  saved, and `False` (with a `Room history scan not saved` warning) when the
+  save failed; the flag then stays set in memory only, and the room is scanned
+  again after a restart.
+
 ## [0.4.5] - 2026-11-03
 
 ### Added
@@ -337,7 +475,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Secure credential storage via system keyring
 - Token refresh without storing plaintext credentials
 
-[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/xebjhm/pysaka/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/xebjhm/pysaka/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/xebjhm/pysaka/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/xebjhm/pysaka/compare/v0.4.2...v0.4.3

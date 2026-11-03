@@ -1023,14 +1023,14 @@ async def test_sync_merge_keeps_concurrent_favorite(sync_manager, monkeypatch):
 
     original_prepare = sync_manager.prepare_messages
 
-    def prepare_then_favorite(messages, member_dir, queue):
+    def prepare_then_favorite(messages, member_dir, queue, **kwargs):
         # Runs after sync's pre-read and before its write.
         def fav(current):
             current["messages"][0]["local_note"] = "kept"
             return current, None
 
         SyncManager._locked_update(path, fav)
-        return original_prepare(messages, member_dir, queue)
+        return original_prepare(messages, member_dir, queue, **kwargs)
 
     monkeypatch.setattr(sync_manager, "prepare_messages", prepare_then_favorite)
     sync_manager.client.get_messages.return_value = [_msg(102, "2023-01-01T11:00:00Z")]

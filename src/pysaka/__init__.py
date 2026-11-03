@@ -5,7 +5,7 @@ from .config import (
     MEDIA_DOWNLOAD_CONCURRENCY_INITIAL,
 )
 from .credentials import get_auth_dir, get_user_data_dir
-from .exceptions import ApiError, AuthError, RefreshFailedError, SakaError, SessionExpiredError
+from .exceptions import ApiError, AuthError, RateLimitedError, RefreshFailedError, SakaError, SessionExpiredError
 from .logging import configure_logging
 from .manager import SyncManager
 from .utils import (
@@ -27,6 +27,7 @@ __all__ = [
     "SakaError",
     "AuthError",
     "ApiError",
+    "RateLimitedError",
     "SessionExpiredError",
     "RefreshFailedError",
     "get_user_data_dir",
