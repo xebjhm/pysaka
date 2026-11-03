@@ -991,6 +991,27 @@ async def test_on_new_messages_sync_callable_and_exception_swallowed(sync_manage
 
 
 @pytest.mark.asyncio
+async def test_on_new_messages_failure_logs_error_type_only(sync_manager):
+    """The exception text (and its traceback) may quote message text: log only
+    the exception type."""
+    from structlog.testing import capture_logs
+
+    group, member = {"id": 1, "name": "G"}, {"id": 10, "name": "M"}
+    sync_manager.client.get_messages.return_value = [_msg(101, "2023-01-01T10:00:00Z")]
+
+    def boom(info, msgs):
+        raise ValueError("leaked: 秘密のメッセージ")
+
+    with capture_logs() as logs:
+        await sync_manager.sync_member(AsyncMock(), group, member, [], on_new_messages=boom)
+
+    (entry,) = [e for e in logs if e["event"] == "on_new_messages callback failed"]
+    assert entry["error_type"] == "ValueError"
+    assert "error" not in entry and "exc_info" not in entry
+    assert "秘密" not in repr(logs)
+
+
+@pytest.mark.asyncio
 async def test_sync_merge_keeps_concurrent_favorite(sync_manager, monkeypatch):
     """A favorite written between sync's pre-read and its write must survive:
     the merge happens under the lock against the file as it is at write time."""

@@ -340,13 +340,21 @@ class SyncManager:
         member_info: dict[str, Any],
         new_messages: list[dict[str, Any]],
     ) -> None:
-        """Invoke a consumer callback; its failures must never break a sync."""
+        """Invoke a consumer callback; its failures must never break a sync.
+
+        Only the exception type is logged: its text or traceback may quote the
+        message text the callback was handling.
+        """
         try:
             result = callback(member_info, new_messages)
             if inspect.isawaitable(result):
                 await result
         except Exception as e:
-            logger.error("on_new_messages callback failed", error=str(e), exc_info=True)
+            logger.error(
+                "on_new_messages callback failed",
+                member_id=member_info.get("member_id"),
+                error_type=type(e).__name__,
+            )
 
     async def sync_member(
         self,
@@ -376,11 +384,11 @@ class SyncManager:
                 (sync or async) called once after a successful write when at
                 least one message was not on disk before. Not called during
                 corrupt-file / count-mismatch recovery. Exceptions it raises are
-                logged and swallowed. The callback is awaited inline, so a slow
-                callback delays that member's sync; hand heavy work off (e.g.
-                schedule a task). ``member_info`` has ``group_id``,
-                ``group_name``, ``member_id``, ``member_name``, ``member_dir``,
-                ``phone_image`` and ``initial_sync``. ``initial_sync`` is True
+                logged (exception type only) and swallowed. The callback is
+                awaited inline, so a slow callback delays that member's sync;
+                hand heavy work off (e.g. schedule a task). ``member_info`` has
+                ``group_id``, ``group_name``, ``member_id``, ``member_name``,
+                ``member_dir``, ``phone_image`` and ``initial_sync``. ``initial_sync`` is True
                 when ``messages.json`` did not exist before this write, in which
                 case ``new_messages`` is the whole fetched history, not fresh
                 posts; consumers sending notifications should ignore those calls.

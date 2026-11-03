@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lock. Use them for any local edit of `messages.json`.
 - `SyncManager.sync_member(..., on_new_messages=callback)` reports the messages
   that were not on disk before, with the member's `phone_image`, for
-  notifications.
+  notifications. Exceptions raised by the callback are logged by type only and
+  swallowed.
 - `sync_member` now archives the member's list icon, chat icon and call-screen
   image into `profile_images/` with an `index.json` history
   (`SyncManager.archive_profile_images`). URLs in `index.json` are stored

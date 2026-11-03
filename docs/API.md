@@ -223,7 +223,7 @@ Sync one member's messages, queue their media, and archive the member's profile 
   `initial_sync` (`bool`). Not called during corrupt-file/count-mismatch recovery
   or by `backfill_past_messages`. It is awaited inline, so a slow callback delays
   that member's sync (hand heavy work off, e.g. schedule a task). Its exceptions
-  are logged and swallowed.
+  are logged (exception type only, never their text) and swallowed.
   - `initial_sync` is True when `messages.json` did not exist before this write;
     `new_messages` is then the member's whole fetched history, not fresh posts, so
     consumers sending notifications should ignore calls with `initial_sync=True`.
