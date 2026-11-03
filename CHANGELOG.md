@@ -26,9 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its own `letters_updated_at` cursor; works for expired subscriptions. A
   missing `letters.json` triggers a full refetch, and an unreadable one is kept
   as `letters.json.corrupt-<UTC timestamp>` and rebuilt in the same call.
-- `Client.get_past_messages(..., strict=True)` returns None on a failed request
-  instead of `[]`. The default (`strict=False`) is unchanged and typed as
-  `list[dict]`; only `strict=True` is typed `Optional[list[dict]]`.
+- `Client.get_past_messages(..., strict=True)` returns None on a failed request,
+  or on a response whose `messages` is missing or not a list, instead of `[]`.
+  The default (`strict=False`) is unchanged and typed as `list[dict]`; only
+  `strict=True` is typed `Optional[list[dict]]`.
 - `member_info` passed to `on_new_messages` has `initial_sync`, True when the
   member's `messages.json` was created by that sync (the callback then gets the
   whole fetched history); ignore those calls when sending notifications.

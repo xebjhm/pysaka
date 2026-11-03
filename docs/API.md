@@ -123,12 +123,14 @@ Main API client supporting all Sakamichi groups.
 
 #### `get_past_messages(session, group_id: int, *, strict: bool = False) -> List[dict]  # Optional[List[dict]] when strict=True`
 Messages from the ~1–1.5 days before the account's first subscription to the room (still returned
-after the subscription lapses or is renewed). With `strict=True`, returns None when the request failed.
+after the subscription lapses or is renewed). With `strict=True`, returns None when the request failed
+or the response has no `messages` list.
 - **group_id**: Target group ID.
-- **strict**: If True, a failed request returns `None` instead of `[]`, so it can be told apart from a
-  room with no earlier messages. Type checkers see `list[dict]` for `strict=False` and
-  `Optional[list[dict]]` for `strict=True`.
-- **Returns**: List of historical message objects; `None` only when `strict=True` and the request failed.
+- **strict**: If True, a failed request, or a response whose `messages` is missing or not a list,
+  returns `None` instead of `[]`, so it can be told apart from a room with no earlier messages. Type
+  checkers see `list[dict]` for `strict=False` and `Optional[list[dict]]` for `strict=True`.
+- **Returns**: List of historical message objects; `None` only when `strict=True` and the request
+  failed or returned no `messages` list.
 
 #### `get_subscription_streak(session, group_id: int) -> Optional[dict]`
 - **group_id**: Target group ID.

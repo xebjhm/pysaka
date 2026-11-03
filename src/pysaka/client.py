@@ -1233,16 +1233,19 @@ class Client:
         Args:
             session: Active aiohttp ClientSession.
             group_id: The ID of the group/member.
-            strict: If True, return None when the request failed, so callers can
+            strict: If True, return None when the request failed or the response
+                has no ``messages`` list (missing or not a list), so callers can
                 tell a failure apart from a room with no earlier messages.
 
         Returns:
             List of historical message objects (possibly empty); None only when
-            ``strict`` is True and the request failed.
+            ``strict`` is True and the request failed or returned no
+            ``messages`` list.
         """
         data = await self.fetch_json(session, f"/groups/{group_id}/past_messages")
-        if data is None and strict:
-            return None
+        if strict:
+            messages = data.get("messages") if isinstance(data, dict) else None
+            return messages if isinstance(messages, list) else None
         if data and "messages" in data:
             return data["messages"]
         return []

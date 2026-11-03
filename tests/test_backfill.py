@@ -92,6 +92,19 @@ async def test_backfill_request_failure_does_not_set_flag(manager):
     assert "past_backfilled_at" not in manager.sync_state["79_134"]
 
 
+@pytest.mark.parametrize("payload", [{}, {"messages": None}, {"messages": "oops"}])
+async def test_backfill_malformed_200_does_not_set_flag(manager, payload):
+    """A 200 without a ``messages`` list must not read as "nothing before the
+    subscription", or the flag would be set and the backfill never retried."""
+    await _first_sync(manager)
+    real = Client(group=Group.SAKURAZAKA46, access_token="t")
+    real.fetch_json = AsyncMock(return_value=payload)  # type: ignore[method-assign]
+    manager.client.get_past_messages = real.get_past_messages
+
+    assert await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER) == 0
+    assert "past_backfilled_at" not in manager.sync_state["79_134"]
+
+
 async def test_backfill_missing_media_does_not_set_flag_and_retries(manager):
     path = await _first_sync(manager)
     manager.client.get_past_messages.return_value = [
