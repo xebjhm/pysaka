@@ -349,7 +349,8 @@ class Client:
             logger.error(f"Timeout fetching {url}: {e}")
             raise ApiError(f"Timeout: {e}") from e
         except Exception as e:
-            logger.error(f"Unexpected error fetching {url}: {e}")
+            # Only the type: the response body being handled may be quoted in the text.
+            logger.error("Unexpected error fetching", endpoint=endpoint, error_type=type(e).__name__)
             return None
 
     def _get_refresh_lock(self) -> asyncio.Lock:
@@ -1084,7 +1085,7 @@ class Client:
             if await self.download_file(session, media_url, filepath):
                 return filepath
         except Exception as e:
-            logger.error(f"Message media download error: {e}")
+            logger.error("Message media download error", error_type=type(e).__name__)
 
         return None
 

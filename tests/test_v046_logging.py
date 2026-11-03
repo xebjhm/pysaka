@@ -298,3 +298,64 @@ async def test_get_member_non_object_body_is_logged(client, mock_session):
     with capture_logs() as logs:
         assert await client.get_member(mock_session, 22) is None
     assert not _events(logs, "Member lookup returned a non-object body")
+
+
+async def test_prepare_error_logs_type_not_message_text(manager, monkeypatch):
+    def boom(msg):
+        raise ValueError(f"bad row: {msg['text']} https://cdn/x.jpg?sig=SECRETURL")
+
+    monkeypatch.setattr("pysaka.manager.normalize_message", boom)
+    with capture_logs() as logs:
+        await _sync(manager, [_c(1)])
+    (err,) = _events(logs, "Prepare error")
+    assert err["message_id"] == 1 and err["error_type"] == "ValueError" and "error" not in err
+    _no_text(logs)
+    assert "SECRETURL" not in repr(logs)
+
+
+async def test_sync_member_error_logs_type_not_text_or_traceback(manager, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError(f"merge failed on {SECRET}")
+
+    monkeypatch.setattr(SyncManager, "_merge_messages", staticmethod(boom))
+    with capture_logs() as logs:
+        await _sync(manager, [_c(1)])
+    (err,) = _events(logs, "Error syncing member")
+    assert err["error_type"] == "RuntimeError" and err["member_id"] == 138 and err["group_id"] == 86
+    assert "error" not in err and "exc_info" not in err
+    _no_text(logs)
+
+
+async def test_update_message_metadata_error_logs_type_only(manager, monkeypatch, tmp_path):
+    def boom(*args, **kwargs):
+        raise OSError(f"cannot write {SECRET}")
+
+    monkeypatch.setattr(SyncManager, "_locked_update", staticmethod(boom))
+    (tmp_path / "messages.json").write_text("{}", encoding="utf-8")
+    with capture_logs() as logs:
+        await manager.update_message_metadata(tmp_path / "messages.json", {1: {"width": 1}})
+    (err,) = _events(logs, "Failed to update message metadata")
+    assert err["error_type"] == "OSError" and "error" not in err
+    _no_text(logs)
+
+
+async def test_fetch_json_unexpected_error_logs_type_only(client, mock_session):
+    resp = mock_session.get.return_value.__aenter__.return_value
+    resp.status = 200
+    resp.json = AsyncMock(side_effect=ValueError(f"bad body: {SECRET}"))
+    with capture_logs() as logs:
+        assert await client.fetch_json(mock_session, "/groups/1/timeline") is None
+    (err,) = _events(logs, "Unexpected error fetching")
+    assert err["endpoint"] == "/groups/1/timeline" and err["error_type"] == "ValueError"
+    _no_text(logs)
+
+
+async def test_download_message_media_error_logs_type_only(client, mock_session, tmp_path):
+    client.download_file = AsyncMock(side_effect=RuntimeError("https://cdn/p.jpg?sig=SECRETURL " + SECRET))
+    message = {"id": 1, "type": "picture", "file": "https://cdn/p.jpg?sig=SECRETURL"}
+    with capture_logs() as logs:
+        assert await client.download_message_media(mock_session, message, tmp_path) is None
+    (err,) = _events(logs, "Message media download error")
+    assert err["error_type"] == "RuntimeError"
+    _no_text(logs)
+    assert "SECRETURL" not in repr(logs)

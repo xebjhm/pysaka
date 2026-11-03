@@ -1515,7 +1515,8 @@ class SyncManager:
             # can prompt re-login instead of reporting a successful empty sync.
             raise
         except Exception as e:
-            logger.error("Error syncing member", member=mname, error=str(e), exc_info=True)
+            # Only the type: the exception text (or its traceback) may quote message content.
+            logger.error("Error syncing member", member=mname, member_id=mid, group_id=gid, error_type=type(e).__name__)
             return 0
 
     def prepare_messages(
@@ -1627,7 +1628,8 @@ class SyncManager:
                         earliest_failed_ts = failed_ts
                 else:
                     below_floor_failed += 1
-                logger.error("Prepare error", message_id=mid, error=str(e))
+                # Only the type: the exception text may quote the message that failed.
+                logger.error("Prepare error", message_id=mid, error_type=type(e).__name__)
         if below_floor_pending or below_floor_failed:
             logger.debug(
                 "Old rows excluded from cursor clamp",
@@ -1906,7 +1908,7 @@ class SyncManager:
             if not wrote:
                 logger.error("Failed to write message metadata", file=str(messages_file))
         except Exception as e:
-            logger.error("Failed to update message metadata", file=str(messages_file), error=str(e))
+            logger.error("Failed to update message metadata", file=str(messages_file), error_type=type(e).__name__)
 
     async def reconcile_member_media(
         self,

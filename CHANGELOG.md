@@ -62,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RateLimitedError` and back off.
 
 ### Fixed
+- The `Prepare error`, `Error syncing member`, `Unexpected error fetching` and
+  media-download error logs now carry `error_type` instead of the exception
+  text, which could quote message content or signed URLs.
 - Renaming a room folder (`messages/<gid> <old room name>`) or a member folder
   (`<mid> <old name>`) left every stored `media_file` pointing into the old
   folder, so the app showed broken media and Verify & Fix re-downloaded into
