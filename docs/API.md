@@ -297,6 +297,19 @@ failure is logged and never affects the result or the cursor. Returns `{"downloa
   matches, the current image has not been archived yet; use the URL in `current[kind]` (this works for
   public CDN URLs only — a signed private URL, such as the account avatar, needs a fresh API URL).
 
+#### `extra_room_members(session, group: dict, api_members: list[dict], messages: list[dict], name_hints: dict[int, dict] = None) -> list[dict]`
+Members to sync for a room in addition to `api_members` (the `/groups/{id}/members` lineup): one
+member dict per author of `messages` missing from `api_members` (ascending id), then member 0
+(`roster.room_author(group)`) when a message has no `member_id`. Sync each with `sync_member` so
+their messages are no longer dropped. Each dict has at least `id` and `name`, plus `thumbnail`,
+`phone_image` and `portrait` when known. The name is resolved from, first hit wins:
+1. `name_hints[id]` (a member dict with a `name`), returned as given.
+2. The `member` block of a local `messages/* */<id> */messages.json` whose `name` is not `str(id)`.
+3. `Client.get_member` (cached per `SyncManager`, including a `None` result for unknown ids).
+4. `{"id": id, "name": str(id)}`; a later sync that learns the name renames the folder.
+- **Raises**: `ApiError` from `Client.get_member` (e.g. `RateLimitedError`) propagates and is not
+  cached, so isolate each room in the caller.
+
 #### `backfill_past_messages(session, group: dict, member: dict) -> int`
 Merge the room's pre-subscription messages (`Client.get_past_messages`) into the member's archive
 and download their media. Requires a prior successful `sync_member` for the member. Runs once per

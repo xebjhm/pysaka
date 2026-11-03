@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pysaka.roster` (`ROOM_AUTHOR_ID`, `author_id`, `extra_author_ids`,
   `room_author`) and `SyncManager.sync_member(..., ignore_cursor=True)`, which merges a
   member's rows older than the cursor and does not call `on_new_messages`.
+- `SyncManager.extra_room_members(session, group, api_members, messages, name_hints=None)`
+  returns the authors of a room's timeline missing from `/groups/{id}/members`
+  (earlier lineups, members posting in official rooms) plus member 0 for
+  messages without `member_id`. Sync them with `sync_member` so their messages
+  are no longer dropped.
 
 ### Changed
 - `sync_member` assigns messages without `member_id` to member 0 (the room

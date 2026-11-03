@@ -68,6 +68,8 @@ class SyncManager:
         self.output_dir = output_dir
         self.state_file = output_dir / "sync_state.json"
         self.sync_state: dict[str, dict[str, Any]] = {}
+        # member id -> /members/{id} result for this manager's lifetime (None = unknown)
+        self._member_cache: dict[int, Optional[dict[str, Any]]] = {}
         self.load_sync_state()
 
     def load_sync_state(self) -> None:
@@ -463,6 +465,75 @@ class SyncManager:
         if member["id"] != roster.ROOM_AUTHOR_ID:
             await self._archive_profile_images_safely(session, group, member)
         return processed
+
+    _MEMBER_PROFILE_KEYS = ("thumbnail", "phone_image", "portrait")
+
+    async def extra_room_members(
+        self,
+        session: aiohttp.ClientSession,
+        group: dict[str, Any],
+        api_members: list[dict[str, Any]],
+        messages: list[dict[str, Any]],
+        name_hints: Optional[dict[int, dict[str, Any]]] = None,
+    ) -> list[dict[str, Any]]:
+        """Members to sync for this room **in addition to** ``api_members``.
+
+        ``/groups/{id}/members`` is the room's current lineup; earlier lineups and
+        members posting in official rooms are missing from it, and sync would drop
+        their messages. This returns one member dict per author of ``messages``
+        not in ``api_members`` (ascending id), then member 0 (the room author,
+        ``pysaka.roster.room_author``) when a message has no ``member_id``.
+
+        A name is resolved from, in order: ``name_hints`` (id -> member dict, e.g.
+        every room's member list fetched in this sync); the member block of a local
+        ``messages/* */<id> */messages.json`` (unless it only holds the fallback
+        name); ``Client.get_member`` (cached per manager); else ``str(id)``. A
+        message is never dropped because its author's name is unknown; a later sync
+        that learns the name renames the folder.
+
+        Raises:
+            ApiError: From ``Client.get_member`` (including ``RateLimitedError``).
+        """
+        hints = name_hints or {}
+        result: list[dict[str, Any]] = []
+        for aid in roster.extra_author_ids((m["id"] for m in api_members), messages):
+            if aid == roster.ROOM_AUTHOR_ID:
+                result.append(roster.room_author(group))
+            else:
+                result.append(await self._resolve_member(session, aid, hints))
+        return result
+
+    async def _resolve_member(
+        self, session: aiohttp.ClientSession, member_id: int, hints: dict[int, dict[str, Any]]
+    ) -> dict[str, Any]:
+        hinted = hints.get(member_id)
+        if hinted and hinted.get("name"):
+            return dict(hinted)
+        local = await asyncio.to_thread(self._local_member_block, member_id)
+        if local:
+            return local
+        if member_id not in self._member_cache:
+            fetched = await self.client.get_member(session, member_id)
+            self._member_cache[member_id] = fetched if fetched and fetched.get("name") else None
+        cached = self._member_cache[member_id]
+        if cached:
+            return {"id": member_id, "name": cached["name"], **{k: cached.get(k) for k in self._MEMBER_PROFILE_KEYS}}
+        return {"id": member_id, "name": str(member_id)}
+
+    def _local_member_block(self, member_id: int) -> Optional[dict[str, Any]]:
+        """Member block of any archived room folder for ``member_id`` with a real name."""
+        messages_dir = self.output_dir / "messages"
+        if not messages_dir.exists():
+            return None
+        for path in messages_dir.glob(f"* */{member_id} */messages.json"):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    block = json.load(f).get("member")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if isinstance(block, dict) and block.get("name") and block["name"] != str(member_id):
+                return {"id": member_id, "name": block["name"], **{k: block.get(k) for k in self._MEMBER_PROFILE_KEYS}}
+        return None
 
     async def backfill_past_messages(
         self, session: aiohttp.ClientSession, group: dict[str, Any], member: dict[str, Any]
