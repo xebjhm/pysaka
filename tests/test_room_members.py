@@ -98,3 +98,12 @@ async def test_unreadable_local_file_falls_through_to_api(manager):
     manager.client.get_member.return_value = {"id": 63, "name": "n63"}
     out = await manager.extra_room_members(AsyncMock(), GROUP, API, [_m(1, 63)])
     assert out[0]["name"] == "n63"
+
+
+@pytest.mark.parametrize("bad_name", [123, ["上村 ひなの"], {"ja": "上村"}, True])
+async def test_local_member_block_with_non_string_name_is_ignored(manager, bad_name):
+    _write_local(manager, "53 上村 ひなの", "89 上村 ひなの", {"id": 89, "name": bad_name})
+    manager.client.get_member.return_value = {"id": 89, "name": "上村 ひなの"}
+    out = await manager.extra_room_members(AsyncMock(), GROUP, API, [_m(1, 89)])
+    assert out[0]["name"] == "上村 ひなの"
+    manager.client.get_member.assert_awaited_once()

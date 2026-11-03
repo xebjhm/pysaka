@@ -289,7 +289,8 @@ Sync one member's messages, queue their media, and archive the member's profile 
   included, so not a count of new messages).
 - A message the member withdrew has `state: "canceled"` (or `"cancelled"`, see
   `pysaka.utils.CANCELED_STATES`) and `canceled_at`, the API's `updated_at`, kept from the first
-  time it was seen. The API returns it without text or media, so `content` captured before the
+  time it was seen (omitted, never `null`, while the API row has no `updated_at`; recorded once a
+  later row has one). The API returns it without text or media, so `content` captured before the
   withdrawal is kept, also when the fresh `content` is an empty string (and `media_file`, see
   `update_message_fields`). A canceled text message never seen before is stored with `content` null
   instead of being skipped; a text message with no text and no media in any state other than
@@ -349,7 +350,8 @@ member dict per author of `messages` missing from `api_members` (ascending id), 
 their messages are no longer dropped. Each dict has at least `id` and `name`, plus `thumbnail`,
 `phone_image` and `portrait` when known. The name is resolved from, first hit wins:
 1. `name_hints[id]` (a member dict with a `name`), returned as given.
-2. The `member` block of a local `messages/* */<id> */messages.json` whose `name` is not `str(id)`.
+2. The `member` block of a local `messages/* */<id> */messages.json` whose `name` is a non-empty
+   string other than `str(id)`.
 3. `Client.get_member` (cached per `SyncManager`, including a `None` result for unknown ids).
 4. `{"id": id, "name": str(id)}`; a later sync that learns the name renames the folder.
 - **Raises**: `ApiError` from `Client.get_member` (e.g. `RateLimitedError`) propagates and is not
@@ -390,8 +392,9 @@ call. Fetches up to 50 pages of 200 letters per
 call, chaining each page from the last letter's `created_at` (not `updated_at`, which a later
 favorite would push past letters not yet fetched); `letters.json` is written only when its content
 changes or it is created. Before that write (and only when there is something to write), a room
-folder left under an old room name is renamed (as `sync_member` does), so letters and messages share
-one folder.
+folder left under an old room name and a member folder left under an old member name are renamed,
+with their `media_file` paths rewritten (as `sync_member` does), so letters and messages share one
+folder.
 
 `letters.json` shape, sorted by `created_at`:
 `{"version": 1, "letters": [{"id", "member_id", "text", "created_at", "updated_at", "is_favorite",

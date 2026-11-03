@@ -103,3 +103,34 @@ async def test_cancelled_spelling_treated_like_canceled(manager):
     assert stored[1]["canceled_at"] == "2026-07-03T11:16:36Z"
     skeleton = await _sync(manager, [_raw(3, state="cancelled")])
     assert skeleton[3]["content"] is None and skeleton[3]["state"] == "cancelled"
+
+
+def test_normalize_omits_canceled_at_without_updated_at():
+    raw = _raw(1, state="canceled")
+    del raw["updated_at"]
+    assert "canceled_at" not in normalize_message(raw)
+    assert "canceled_at" not in normalize_message(_raw(2, state="canceled", updated=None))
+
+
+async def test_canceled_at_recorded_once_the_api_supplies_it(manager):
+    first = _raw(1, state="canceled")
+    del first["updated_at"]
+    stored = await _sync(manager, [first])
+    assert "canceled_at" not in stored[1]
+
+    stored = await _sync(manager, [_raw(1, state="canceled", updated="2026-07-03T11:16:36Z")], ignore_cursor=True)
+    assert stored[1]["canceled_at"] == "2026-07-03T11:16:36Z"
+
+    stored = await _sync(manager, [first], ignore_cursor=True)  # a later row without updated_at keeps it
+    assert stored[1]["canceled_at"] == "2026-07-03T11:16:36Z"
+    stored = await _sync(manager, [_raw(1, state="canceled", updated="2026-09-01T00:00:00Z")], ignore_cursor=True)
+    assert stored[1]["canceled_at"] == "2026-07-03T11:16:36Z"
+
+
+async def test_stored_null_canceled_at_is_replaced_by_a_real_value(manager):
+    d = manager._member_dir_path(GROUP, MEMBER)
+    d.mkdir(parents=True)
+    legacy = {"id": 1, "type": "text", "timestamp": "2026-07-03T11:15:42Z", "state": "canceled", "canceled_at": None}
+    (d / "messages.json").write_text(json.dumps({"messages": [legacy]}), encoding="utf-8")
+    stored = await _sync(manager, [_raw(1, state="canceled", updated="2026-07-03T11:16:36Z")], ignore_cursor=True)
+    assert stored[1]["canceled_at"] == "2026-07-03T11:16:36Z"

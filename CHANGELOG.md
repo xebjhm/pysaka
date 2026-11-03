@@ -31,11 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (empty text messages that are not canceled).
 - `pysaka.utils.CANCELED_STATES`: the server states (`canceled`, `cancelled`) of a
   message the member withdrew. A canceled message now carries `canceled_at`
-  (the API's `updated_at`, kept from the first time it was seen).
+  (the API's `updated_at`, kept from the first time it was seen; omitted, never
+  `null`, while the API row has no `updated_at`).
 
 ### Changed
 - `sync_member` assigns messages without `member_id` to member 0 (the room
-  itself) instead of no member, and renames
+  itself) instead of no member. `sync_member` and `sync_letters` rename
   `messages/<gid> */<mid> <old name>` to the member's current name instead of
   creating a second folder. If a member or room folder rename fails
   (`OSError`, e.g. a file locked on Windows), `sync_member` and `sync_letters`

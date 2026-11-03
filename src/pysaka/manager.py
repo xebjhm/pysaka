@@ -670,8 +670,8 @@ class SyncManager:
 
         A name is resolved from, in order: ``name_hints`` (id -> member dict, e.g.
         every room's member list fetched in this sync); the member block of a local
-        ``messages/* */<id> */messages.json`` (unless it only holds the fallback
-        name); ``Client.get_member`` (cached per manager); else ``str(id)``. A
+        ``messages/* */<id> */messages.json`` (only when its ``name`` is a non-empty
+        string other than the fallback ``str(id)``); ``Client.get_member`` (cached per manager); else ``str(id)``. A
         message is never dropped because its author's name is unknown; a later sync
         that learns the name renames the folder.
 
@@ -705,7 +705,10 @@ class SyncManager:
         return {"id": member_id, "name": str(member_id)}
 
     def _local_member_block(self, member_id: int) -> Optional[dict[str, Any]]:
-        """Member block of any archived room folder for ``member_id`` with a real name."""
+        """Member block of any archived room folder for ``member_id`` with a real name.
+
+        A real name is a non-empty string other than the fallback ``str(member_id)``.
+        """
         messages_dir = self.output_dir / "messages"
         if not messages_dir.exists():
             return None
@@ -715,8 +718,9 @@ class SyncManager:
                     block = json.load(f).get("member")
             except (OSError, ValueError, AttributeError):
                 continue
-            if isinstance(block, dict) and block.get("name") and block["name"] != str(member_id):
-                return {"id": member_id, "name": block["name"], **{k: block.get(k) for k in self._MEMBER_PROFILE_KEYS}}
+            name = block.get("name") if isinstance(block, dict) else None
+            if isinstance(name, str) and name and name != str(member_id):
+                return {"id": member_id, "name": name, **{k: block.get(k) for k in self._MEMBER_PROFILE_KEYS}}
         return None
 
     async def backfill_past_messages(
@@ -886,8 +890,10 @@ class SyncManager:
         Never touches the message cursor and never fires ``on_new_messages``.
         ``letters.json`` is written only when its content changes or it is
         created. Before that write (and only when there is something to write),
-        a room folder left under an old room name is renamed, so letters and
-        messages share one folder.
+        a room folder left under an old room name and a member folder left under
+        an old member name are renamed (with their ``media_file`` paths
+        rewritten, as in :meth:`sync_member`), so letters and messages share one
+        folder.
 
         Raises:
             SessionExpiredError, RefreshFailedError: auth failures propagate.
@@ -1567,8 +1573,10 @@ class SyncManager:
         A field is only inherited from the stored record when the fresh message
         omits it — a freshly re-derived value (e.g. is_muted recomputed on a
         re-download) always wins. A canceled (withdrawn) message arrives without
-        text: it keeps the ``content`` captured earlier and the first
-        ``canceled_at`` seen.
+        text: it keeps the ``content`` captured earlier and the first non-empty
+        ``canceled_at`` seen. A fresh row without ``canceled_at`` (the API sent no
+        ``updated_at``) inherits the stored one; when none is stored yet (or a
+        stored ``None`` from an earlier write), the fresh value is recorded.
         """
         merged = {m["id"]: m for m in existing_msgs}
         for pm in processed:

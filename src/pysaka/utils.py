@@ -181,6 +181,10 @@ def normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
     Args:
         msg: Raw API message dictionary.
 
+    A message in a non-``published`` state keeps it as ``state``; a canceled one
+    (see :data:`CANCELED_STATES`) also gets ``canceled_at`` = the API's
+    ``updated_at``, omitted when the row has no ``updated_at``.
+
     Returns:
         Normalized message dictionary.
     """
@@ -207,7 +211,9 @@ def normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
     state = msg.get("state")
     if state and state != "published":
         normalized["state"] = state
-        if state in CANCELED_STATES:
+        if state in CANCELED_STATES and msg.get("updated_at"):
             # When the member withdrew it (the server bumps updated_at on cancel).
-            normalized["canceled_at"] = msg.get("updated_at")
+            # Omitted (never stored as None) when the row has no updated_at, so a
+            # later sync that sees one still records it.
+            normalized["canceled_at"] = msg["updated_at"]
     return normalized
