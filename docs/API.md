@@ -346,8 +346,9 @@ failure is logged and never affects the result or the cursor. Returns `{"downloa
 #### `extra_room_members(session, group: dict, api_members: list[dict], messages: list[dict], name_hints: dict[int, dict] = None) -> list[dict]`
 Members to sync for a room in addition to `api_members` (the `/groups/{id}/members` lineup): one
 member dict per author of `messages` missing from `api_members` (ascending id), then member 0
-(`roster.room_author(group)`) when a message has no `member_id`. Sync each with `sync_member` so
-their messages are no longer dropped. Each dict has at least `id` and `name`, plus `thumbnail`,
+(`roster.room_author(group)`) when a message has no `member_id`. Rows that sync skips as empty
+(non-canceled `text` messages with no text and no media) are ignored, so they never create an
+author (no empty folder). Sync each with `sync_member` so their messages are no longer dropped. Each dict has at least `id` and `name`, plus `thumbnail`,
 `phone_image` and `portrait` when known. The name is resolved from, first hit wins:
 1. `name_hints[id]` (a member dict with a `name`), returned as given.
 2. The `member` block of a local `messages/* */<id> */messages.json` whose `name` is a non-empty

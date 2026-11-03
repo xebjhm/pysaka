@@ -23,7 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns the authors of a room's timeline missing from `/groups/{id}/members`
   (earlier lineups, members posting in official rooms) plus member 0 for
   messages without `member_id`. Sync them with `sync_member` so their messages
-  are no longer dropped.
+  are no longer dropped. Rows that sync skips as empty (non-canceled text with
+  no text and no media) do not create an author, so a 1:1 room gets no empty
+  member 0 folder.
 - `SyncManager.history_scanned`, `mark_history_scanned` and `room_archive_complete`
   let callers re-read each room's whole timeline once (flag in `sync_state.json`
   as `room_<gid>`), recovering messages from authors that earlier versions

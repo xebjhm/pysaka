@@ -13,8 +13,8 @@ GROUP = {"id": 79, "name": "18th Single ひなた坂46 LIVE", "thumbnail": "http
 API = [{"id": 120, "name": "石塚 瑶季"}]
 
 
-def _m(i, member_id=None):
-    msg = {"id": i, "published_at": "2026-02-18T13:48:09Z", "type": "text"}
+def _m(i, member_id=None, **kw):
+    msg = {"id": i, "published_at": "2026-02-18T13:48:09Z", "type": "text", "text": "hi", **kw}
     if member_id is not None:
         msg["member_id"] = member_id
     return msg
@@ -107,3 +107,36 @@ async def test_local_member_block_with_non_string_name_is_ignored(manager, bad_n
     out = await manager.extra_room_members(AsyncMock(), GROUP, API, [_m(1, 89)])
     assert out[0]["name"] == "上村 ひなの"
     manager.client.get_member.assert_awaited_once()
+
+
+def _empty(i, member_id=None, **kw):
+    return {**_m(i, member_id), "text": "", **kw}
+
+
+async def test_skipped_empty_rows_create_no_extra_author(manager):
+    from structlog.testing import capture_logs
+
+    msgs = [_m(1, 98, text="hi"), _empty(2), _empty(3, 29), _m(4, 120, text="x")]
+    with capture_logs() as logs:
+        out = await manager.extra_room_members(AsyncMock(), GROUP, API, msgs)
+    assert [m["id"] for m in out] == [98]  # no member 0, no 29 (only skipped-empty rows)
+    (dbg,) = [e for e in logs if e["event"] == "Skipped-empty rows ignored for extra members"]
+    assert dbg["log_level"] == "debug" and dbg["ignored"] == 2 and dbg["group_id"] == 79
+
+
+async def test_canceled_rows_still_create_authors(manager):
+    msgs = [_empty(1, state="canceled"), _empty(2, 29, state="canceled")]
+    out = await manager.extra_room_members(AsyncMock(), GROUP, API, msgs)
+    assert [m["id"] for m in out] == [29, roster.ROOM_AUTHOR_ID]
+
+
+async def test_author_with_empty_and_real_rows_is_kept(manager):
+    out = await manager.extra_room_members(AsyncMock(), GROUP, API, [_empty(1, 29), _m(2, 29, text="hi")])
+    assert [m["id"] for m in out] == [29]
+
+
+async def test_empty_row_with_media_is_not_skipped(manager):
+    out = await manager.extra_room_members(
+        AsyncMock(), GROUP, API, [_empty(1, 29, type="picture", file="https://cdn/p.jpg")]
+    )
+    assert [m["id"] for m in out] == [29]

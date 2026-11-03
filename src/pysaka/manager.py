@@ -720,7 +720,9 @@ class SyncManager:
         members posting in official rooms are missing from it, and sync would drop
         their messages. This returns one member dict per author of ``messages``
         not in ``api_members`` (ascending id), then member 0 (the room author,
-        ``pysaka.roster.room_author``) when a message has no ``member_id``.
+        ``pysaka.roster.room_author``) when a message has no ``member_id``. Rows sync
+        skips as empty (non-canceled text with no text and no media) are ignored, so
+        they never create an author or an empty folder.
 
         A name is resolved from, in order: ``name_hints`` (id -> member dict, e.g.
         every room's member list fetched in this sync); the member block of a local
@@ -734,6 +736,15 @@ class SyncManager:
         """
         hints = name_hints or {}
         gid = group["id"]
+        # Rows sync skips as empty (see _is_skipped_empty) are never stored, so their
+        # author must not get a folder: an empty "<mid> <name>" or "0 <room>" folder
+        # would make a 1:1 room look like a group chat.
+        stored = [m for m in messages if not _is_skipped_empty(m)]
+        if len(stored) != len(messages):
+            logger.debug(
+                "Skipped-empty rows ignored for extra members", group_id=gid, ignored=len(messages) - len(stored)
+            )
+        messages = stored
         # author_id maps a member_id it cannot read to the room author; say so, or a
         # malformed id would silently merge a member's messages into member 0.
         unusable = [
