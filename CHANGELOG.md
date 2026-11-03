@@ -90,6 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `None` when it is absent, not a number, not finite or negative. Callers that
   already handle `ApiError` need no change; others should catch
   `RateLimitedError` and back off.
+- `SyncManager.save_sync_state()` now returns `True` when `sync_state.json`
+  was written and `False` when the write failed (before: always `None`).
+  Callers that ignore the result need no change.
 
 ### Fixed
 - Error logs no longer carry exception text, which could quote message content,
@@ -132,6 +135,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pages collected so far (a repeated continuation only logged `Timeline
   pagination stuck without a cursor`). A partial last page, with or without an
   echoed continuation, still ends the timeline normally.
+- `SyncManager.mark_history_scanned` logged `Room history scan recorded` even
+  when saving `sync_state.json` failed. It now returns `True` when the flag was
+  saved, and `False` (with a `Room history scan not saved` warning) when the
+  save failed; the flag then stays set in memory only, and the room is scanned
+  again after a restart.
 
 ## [0.4.5] - 2026-11-03
 

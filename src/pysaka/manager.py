@@ -134,13 +134,17 @@ class SyncManager:
                 )
                 self.sync_state = {}
 
-    def save_sync_state(self) -> None:
+    def save_sync_state(self) -> bool:
         """Save synchronization state to JSON file (atomic write).
 
         Uses a unique temp filename and retries os.replace to handle
         Windows file locking (antivirus, search indexer).
+
+        Returns:
+            True when the file was written, False when the write failed (the
+            failure is logged; ``self.sync_state`` in memory is unchanged).
         """
-        self._atomic_write_json(self.state_file, self.sync_state)
+        return self._atomic_write_json(self.state_file, self.sync_state)
 
     @staticmethod
     def _atomic_write_json(target: Path, data: Any, retries: int = 5) -> bool:
@@ -374,15 +378,25 @@ class SyncManager:
         """
         return bool((self.sync_state.get(self._room_state_key(group_id)) or {}).get("history_scanned_at"))
 
-    def mark_history_scanned(self, group_id: int) -> None:
+    def mark_history_scanned(self, group_id: int) -> bool:
         """Record that the room's full history is archived (call only after
-        :meth:`room_archive_complete` returned True for the scan's timeline)."""
+        :meth:`room_archive_complete` returned True for the scan's timeline).
+
+        Returns:
+            True when ``sync_state.json`` was saved. False when the save failed:
+            a warning ``Room history scan not saved`` is logged, the flag stays
+            set in memory (:meth:`history_scanned` is True for this manager), and
+            the room is scanned again after a restart.
+        """
         key = self._room_state_key(group_id)
         entry = dict(self.sync_state.get(key) or {})
         entry["history_scanned_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.sync_state[key] = entry
-        self.save_sync_state()
+        if not self.save_sync_state():
+            logger.warning("Room history scan not saved", group_id=group_id)
+            return False
         logger.info("Room history scan recorded", group_id=group_id, history_scanned_at=entry["history_scanned_at"])
+        return True
 
     async def room_archive_complete(self, group: dict[str, Any], messages: list[dict[str, Any]]) -> bool:
         """True when every message id in ``messages`` that sync stores is in its author's ``messages.json``.

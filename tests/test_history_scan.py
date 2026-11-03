@@ -128,3 +128,29 @@ async def test_early_false_paths_log_reason(manager, body, reason):
     if reason == "unreadable":
         expected["error_type"] = "JSONDecodeError"
     assert warnings == [expected]
+
+
+def test_save_sync_state_returns_true_on_success(manager):
+    assert manager.save_sync_state() is True
+
+
+def test_mark_history_scanned_returns_true_and_logs_when_saved(manager, time_machine):
+    time_machine.move_to(NOW)
+    with structlog.testing.capture_logs() as logs:
+        assert manager.mark_history_scanned(43) is True
+    assert [e["event"] for e in logs if e["event"].startswith("Room history scan")] == ["Room history scan recorded"]
+
+
+def test_mark_history_scanned_returns_false_when_save_fails(manager, monkeypatch):
+    """A failed save must not log success: warn and return False. The in-memory
+    flag stays set, but the room is scanned again after a restart."""
+    monkeypatch.setattr(SyncManager, "_atomic_write_json", staticmethod(lambda target, data, retries=5: False))
+    assert manager.save_sync_state() is False
+    with structlog.testing.capture_logs() as logs:
+        assert manager.mark_history_scanned(43) is False
+    events = [e for e in logs if e["event"].startswith("Room history scan")]
+    assert [(e["event"], e["log_level"], e["group_id"]) for e in events] == [
+        ("Room history scan not saved", "warning", 43)
+    ]
+    assert manager.history_scanned(43) is True
+    assert SyncManager(manager.client, manager.output_dir).history_scanned(43) is False

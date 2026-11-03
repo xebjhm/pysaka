@@ -521,6 +521,10 @@ then re-check disk truth and persist any new dimension metadata.
   signed URLs keyed by `message_id`.
 - **Returns**: `{"repaired": int, "failed": int, "still_missing": int}`.
 
+#### `save_sync_state() -> bool`
+Write `sync_state.json` atomically. Returns `True` on success, `False` when the write failed (the
+failure is logged; the in-memory state is unchanged).
+
 ### One-time history scan
 
 Earlier versions dropped messages from authors missing from `/groups/{id}/members`, so callers
@@ -531,9 +535,13 @@ re-read each room's whole timeline once. The flag lives in `sync_state.json` as
 #### `history_scanned(group_id: int) -> bool`
 True when `room_<gid>.history_scanned_at` is set.
 
-#### `mark_history_scanned(group_id: int) -> None`
+#### `mark_history_scanned(group_id: int) -> bool`
 Set `history_scanned_at` to the current UTC time and save `sync_state.json`. Call it only after
 `room_archive_complete` returned True for the scan's timeline.
+- **Returns**: `True` when `sync_state.json` was saved (info `Room history scan recorded`).
+  `False` when the save failed (warning `Room history scan not saved`, with `group_id`): the flag
+  stays set in memory, so `history_scanned` is True for this `SyncManager`, but the room is
+  scanned again after a restart.
 
 #### `room_archive_complete(group: dict, messages: list[dict]) -> bool` (async)
 True when every message id in `messages` that `sync_member` stores is in `messages.json` of its
