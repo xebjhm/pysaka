@@ -801,8 +801,8 @@ class SyncManager:
         from the file/avatar work after it, yields all-zero counts and this
         method's own error log carries the exception type only (never the
         nickname). A failed avatar download is logged by
-        :meth:`Client.download_file` with the URL's scheme, host and path (the
-        signed query string is redacted).
+        :meth:`Client.download_file` with the URL's scheme, host, port and path
+        (the signed query string and any ``user:password@`` are redacted).
 
         Returns:
             ``{"downloaded": n, "skipped": n, "failed": n}`` for the avatar

@@ -47,7 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `Client.download_file` failure logs no longer include the signed query string of
-  the media URL (only scheme, host and path), nor exception text that may embed it.
+  the media URL, nor any `user:password@` in it (only scheme, host, port and
+  path), nor exception text that may embed it.
 - **A favorite (or any local `messages.json` edit) made while a sync was writing
   the same file could drop the newly synced messages permanently**, because the
   cursor had already advanced past them. `sync_member` and

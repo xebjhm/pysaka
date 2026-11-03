@@ -82,7 +82,8 @@ Main API client supporting all Sakamichi groups.
   room's first message (an `order=asc` probe) was collected.
 
 #### `download_file(session, url: str, filepath: Path, timestamp: str = None) -> bool`
-- **url**: Signed media URL.
+- **url**: Signed media URL. Failure logs carry only its scheme, host, port and path (never the
+  query string or `user:password@`).
 - **filepath**: Local destination path.
 - **timestamp**: (Optional) Timestamp metadata.
 - **Returns**: `True` if success/exists.
@@ -329,7 +330,8 @@ service.
 - **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. Any other error (the fetch,
   or the file and avatar work after it, e.g. `OSError`) returns all-zero counts, and this method's
   own error log carries the exception type only (never the nickname). A failed avatar download is
-  logged by `Client.download_file` with the URL's scheme, host and path (query string redacted).
+  logged by `Client.download_file` with the URL's scheme, host, port and path (query string and any
+  `user:password@` redacted).
 
 #### `process_media_queue(session, queue: list, concurrency: int = 5, progress_callback = None) -> dict[Path, dict[int, dict]]`
 Download every media item in `queue` and extract media metadata.

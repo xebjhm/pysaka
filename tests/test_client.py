@@ -667,6 +667,24 @@ def test_redact_url_tolerates_unparseable_urls():
     assert _redact_url("http://[abc/x.jpg?sig=SECRET") == "<unparseable url>"
 
 
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://user:pass@cdn.example.com/a.jpg?sig=S", "https://cdn.example.com/a.jpg"),
+        ("https://user:pass@cdn.example.com:8443/a.jpg#f", "https://cdn.example.com:8443/a.jpg"),
+        ("https://token@CDN.example.com/a.jpg", "https://cdn.example.com/a.jpg"),
+        ("http://u:p@[::1]:8080/x.jpg", "http://[::1]:8080/x.jpg"),
+        ("https://cdn.example.com:99999/a.jpg", "https://cdn.example.com/a.jpg"),  # invalid port dropped
+        ("/relative/path.jpg?sig=S", "/relative/path.jpg"),
+    ],
+)
+def test_redact_url_drops_userinfo(url, expected):
+    """Credentials in the authority (``user:pass@``) must never reach the logs."""
+    from pysaka.client import _redact_url
+
+    assert _redact_url(url) == expected
+
+
 @pytest.mark.asyncio
 async def test_download_file_with_unparseable_url_fails_cleanly(tmp_path, client, mock_session):
     from structlog.testing import capture_logs

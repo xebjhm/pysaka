@@ -18,17 +18,26 @@ logger = structlog.get_logger()
 
 
 def _redact_url(url: str) -> str:
-    """Return ``scheme://host/path`` of ``url`` for logging.
+    """Return ``scheme://host[:port]/path`` of ``url`` for logging.
 
     Signed media URLs carry their credentials in the query string, so the query
-    and fragment are dropped. A URL that cannot be parsed is replaced by
-    ``"<unparseable url>"`` so that logging never raises.
+    and fragment are dropped, and so is any ``user:password@`` in the authority
+    (the host is lowercased; an invalid port is dropped). A URL that cannot be
+    parsed is replaced by ``"<unparseable url>"`` so that logging never raises.
     """
     try:
         parts = urlsplit(url)
     except ValueError:
         return "<unparseable url>"
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    host = parts.hostname or ""
+    if ":" in host:  # IPv6 literal
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    netloc = f"{host}:{port}" if host and port is not None else host
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 class Group(Enum):
