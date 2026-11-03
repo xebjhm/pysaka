@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,11 +14,19 @@ import aiofiles
 import aiohttp
 import structlog
 
-from . import profile_images
+from . import profile_images, roster
 from .client import Client
 from .exceptions import RefreshFailedError, SessionExpiredError
 from .media import get_audio_metadata, get_media_dimensions
-from .utils import get_media_extension, media_file_is_present, normalize_message, sanitize_name
+from .utils import (
+    CANCELED_STATES,
+    _normalized_type,
+    _short_path,
+    get_media_extension,
+    media_file_is_present,
+    normalize_message,
+    sanitize_name,
+)
 
 logger = structlog.get_logger()
 
@@ -25,7 +34,7 @@ logger = structlog.get_logger()
 # media (confirmed via the live timeline probe). ANY OTHER non-"published" state is
 # treated as a potential real gap and surfaced in `unresolved`, so completeness is
 # never overclaimed on an unexpected/transient state (e.g. "processing").
-_MEDIA_STRIPPING_STATES = frozenset({"canceled", "cancelled"})
+_MEDIA_STRIPPING_STATES = CANCELED_STATES
 
 T = TypeVar("T")
 
@@ -36,6 +45,47 @@ T = TypeVar("T")
 # consumer (SakaDesk's DataDirLock).
 _FILE_LOCKS: dict[str, threading.Lock] = {}
 _FILE_LOCKS_GUARD = threading.Lock()
+
+
+def _error_origin(exc: BaseException) -> dict[str, str]:
+    """Text-free origin of ``exc`` for logging; never includes the exception message.
+
+    ``origin`` is the innermost traceback frame as ``<basename>:<lineno>:<function>``,
+    ``pysaka_frame`` the innermost frame whose path has a ``pysaka`` component (same
+    format), ``cause_type`` the type name of ``__cause__``. Keys that do not apply are
+    omitted. The exception text and traceback can quote message content, so neither is used.
+    """
+
+    def label(frame: traceback.FrameSummary) -> str:
+        return f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+
+    out: dict[str, str] = {}
+    frames = traceback.extract_tb(exc.__traceback__)
+    if frames:
+        out["origin"] = label(frames[-1])
+        for frame in reversed(frames):
+            if "pysaka" in Path(frame.filename).parts:
+                out["pysaka_frame"] = label(frame)
+                break
+    if exc.__cause__ is not None:
+        out["cause_type"] = type(exc.__cause__).__name__
+    return out
+
+
+def _is_skipped_empty(msg: dict[str, Any]) -> bool:
+    """True for a raw API message that ``prepare_messages`` skips instead of storing.
+
+    A text message with no text and no media (``file``/``thumbnail``) whose state is
+    not canceled: these are often system/metadata entries from the subscription. A
+    canceled one is a withdrawn message, not metadata, and is kept so the withdrawal
+    is recorded.
+    """
+    return (
+        _normalized_type(msg.get("type")) == "text"
+        and not msg.get("text")
+        and not (msg.get("file") or msg.get("thumbnail"))
+        and msg.get("state") not in CANCELED_STATES
+    )
 
 
 def _lock_for(path: Path) -> threading.Lock:
@@ -68,6 +118,8 @@ class SyncManager:
         self.output_dir = output_dir
         self.state_file = output_dir / "sync_state.json"
         self.sync_state: dict[str, dict[str, Any]] = {}
+        # member id -> /members/{id} result for this manager's lifetime (None = unknown)
+        self._member_cache: dict[int, Optional[dict[str, Any]]] = {}
         self.load_sync_state()
 
     def load_sync_state(self) -> None:
@@ -77,7 +129,9 @@ class SyncManager:
                 with open(self.state_file, encoding="utf-8") as f:
                     self.sync_state = json.load(f)
             except Exception as e:
-                logger.error("Failed to load sync state", error=str(e))
+                logger.error(
+                    "Failed to load sync state", file=_short_path(self.state_file), error_type=type(e).__name__
+                )
                 self.sync_state = {}
 
     def save_sync_state(self) -> None:
@@ -119,10 +173,14 @@ class SyncManager:
                     if attempt < retries - 1:
                         time.sleep(0.05 * (attempt + 1))
 
-            logger.error("Failed to write file after retries", file=str(target), error=str(last_err))
+            logger.error(
+                "Failed to write file after retries",
+                file=_short_path(target),
+                error_type=type(last_err).__name__,
+            )
             return False
         except Exception as e:
-            logger.error("Failed to write file", file=str(target), error=str(e))
+            logger.error("Failed to write file", file=_short_path(target), error_type=type(e).__name__)
             return False
         finally:
             try:
@@ -303,6 +361,94 @@ class SyncManager:
             return state.get("last_message_id")
         return None
 
+    @staticmethod
+    def _room_state_key(group_id: int) -> str:
+        # Never collides with "<gid>_<mid>" member keys.
+        return f"room_{group_id}"
+
+    def history_scanned(self, group_id: int) -> bool:
+        """True once the room's one-time full-history scan has completed.
+
+        Stored as ``sync_state["room_<gid>"]["history_scanned_at"]``; deleting
+        ``sync_state.json`` (a force resync) clears it, so the next sync scans again.
+        """
+        return bool((self.sync_state.get(self._room_state_key(group_id)) or {}).get("history_scanned_at"))
+
+    def mark_history_scanned(self, group_id: int) -> None:
+        """Record that the room's full history is archived (call only after
+        :meth:`room_archive_complete` returned True for the scan's timeline)."""
+        key = self._room_state_key(group_id)
+        entry = dict(self.sync_state.get(key) or {})
+        entry["history_scanned_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.sync_state[key] = entry
+        self.save_sync_state()
+        logger.info("Room history scan recorded", group_id=group_id, history_scanned_at=entry["history_scanned_at"])
+
+    async def room_archive_complete(self, group: dict[str, Any], messages: list[dict[str, Any]]) -> bool:
+        """True when every message id in ``messages`` that sync stores is in its author's ``messages.json``.
+
+        Authors are taken with :func:`pysaka.roster.author_id` (member 0 for messages
+        without ``member_id``). Messages that sync skips (a text message with no text
+        and no media whose state is not canceled), entries without an ``id`` and
+        non-dict entries are not expected. A stored ``"messages": null`` counts as
+        empty. False when an author's ids are missing, or when a ``messages.json`` is
+        unreadable, not a JSON object, or has a ``messages`` value that is not a list
+        (a warning with group id, member id and the reason is logged). Catches what a
+        raised exception would not: a write that failed (``sync_member`` returns 0)
+        or a message that failed to normalize.
+        """
+        return await asyncio.to_thread(self._room_archive_complete_sync, group, messages)
+
+    def _room_archive_complete_sync(self, group: dict[str, Any], messages: list[dict[str, Any]]) -> bool:
+        gid = group["id"]
+        wanted: dict[int, set[int]] = {}
+        skipped = 0
+        for m in messages:
+            if not isinstance(m, dict) or m.get("id") is None or _is_skipped_empty(m):
+                skipped += 1
+                continue
+            wanted.setdefault(roster.author_id(m), set()).add(m["id"])
+        messages_dir = self.output_dir / "messages"
+        group_dirs = list(messages_dir.glob(f"{gid} *")) if messages_dir.exists() else []
+        for aid, ids in wanted.items():
+            stored: set[Any] = set()
+            for group_dir in group_dirs:
+                for path in group_dir.glob(f"{aid} */messages.json"):
+                    reason: Optional[str] = None
+                    error_type: Optional[str] = None
+                    try:
+                        with open(path, encoding="utf-8") as f:
+                            data = json.load(f)
+                    except (OSError, ValueError) as e:
+                        reason = "unreadable"
+                        error_type = type(e).__name__
+                    else:
+                        if not isinstance(data, dict):
+                            reason = "not_an_object"
+                        elif not isinstance(data.get("messages") or [], list):
+                            reason = "messages_not_a_list"
+                    if reason is not None:
+                        logger.warning(
+                            "Room archive unreadable",
+                            group_id=gid,
+                            member_id=aid,
+                            reason=reason,
+                            **({"error_type": error_type} if error_type else {}),
+                        )
+                        return False
+                    stored |= {m.get("id") for m in data.get("messages") or [] if isinstance(m, dict)}
+            if not ids <= stored:
+                logger.warning("Room archive incomplete", group_id=gid, member_id=aid, missing=len(ids - stored))
+                return False
+        logger.debug(
+            "Room archive complete",
+            group_id=gid,
+            checked=sum(len(ids) for ids in wanted.values()),
+            authors=len(wanted),
+            skipped=skipped,
+        )
+        return True
+
     def _member_dir_path(self, group: dict[str, Any], member: dict[str, Any]) -> Path:
         """The on-disk directory of a member's archive (same naming as sync_member)."""
         return (
@@ -317,8 +463,13 @@ class SyncManager:
 
         If the room was renamed on the server (e.g. "12th Single" -> "16th Single")
         and only a ``messages/<gid> <old name>`` folder exists, it is renamed
-        instead of leaving a duplicate. Call this before creating anything under
+        instead of leaving a duplicate, and the ``media_file`` paths under the old
+        folder are rewritten in every member folder's ``messages.json`` (see
+        :meth:`_rewrite_media_paths`). Call this before creating anything under
         the group directory; it does not create the directory itself.
+
+        Raises:
+            OSError: the rename failed (nothing was changed).
         """
         gid = group["id"]
         messages_dir = self.output_dir / "messages"
@@ -328,8 +479,107 @@ class SyncManager:
                 if existing.is_dir() and existing.name.startswith(f"{gid} "):
                     logger.info("Group renamed on server, renaming directory", old=existing.name, new=group_dir.name)
                     existing.rename(group_dir)
+                    for member_dir in sorted(group_dir.iterdir()):
+                        if (member_dir / "messages.json").is_file():
+                            self._rewrite_media_paths(member_dir / "messages.json", existing, group_dir)
                     break
         return group_dir
+
+    def _ensure_member_dir(self, group_dir: Path, member_id: int, name: str) -> Path:
+        """Return ``group_dir/<mid> <name>``, renaming a member folder left under an old name.
+
+        A member who changed their display name, or an author first archived under
+        a fallback name (their id), keeps one folder instead of a duplicate, and the
+        ``media_file`` paths under the old folder are rewritten in its
+        ``messages.json`` (see :meth:`_rewrite_media_paths`). Only renames when the
+        target does not exist yet; never creates the directory.
+
+        Raises:
+            OSError: the rename failed (a warning is logged; nothing was changed).
+        """
+        member_dir = group_dir / f"{member_id} {name}"
+        if not member_dir.exists() and group_dir.exists():
+            prefix = f"{member_id} "
+            for existing in group_dir.iterdir():
+                if existing.is_dir() and existing.name.startswith(prefix):
+                    logger.info(
+                        "Member renamed, renaming directory",
+                        member_id=member_id,
+                        old=existing.name,
+                        new=member_dir.name,
+                    )
+                    try:
+                        existing.rename(member_dir)
+                    except OSError as e:
+                        logger.warning(
+                            "Member folder rename failed",
+                            member_id=member_id,
+                            old=existing.name,
+                            new=member_dir.name,
+                            error_type=type(e).__name__,
+                        )
+                        raise
+                    if (member_dir / "messages.json").is_file():
+                        self._rewrite_media_paths(member_dir / "messages.json", existing, member_dir)
+                    break
+        return member_dir
+
+    def _renamed_member_dir(self, group: dict[str, Any], member_id: int, name: str) -> Optional[Path]:
+        """:meth:`_ensure_group_dir` + :meth:`_ensure_member_dir`, or None when a rename failed.
+
+        A failed rename (``OSError``, e.g. a file locked on Windows) is logged as a
+        warning with group id, member id and the error type; the caller must then
+        skip the member without writing anything or moving a cursor, so the next
+        sync retries the rename instead of creating a second folder.
+        """
+        try:
+            return self._ensure_member_dir(self._ensure_group_dir(group), member_id, name)
+        except OSError as e:
+            logger.warning(
+                "Sync skipped: folder rename failed",
+                group_id=group["id"],
+                member_id=member_id,
+                error_type=type(e).__name__,
+            )
+            return None
+
+    def _rewrite_media_paths(self, messages_file: Path, old_dir: Path, new_dir: Path) -> None:
+        """After renaming ``old_dir`` to ``new_dir``, point ``media_file`` values at the new folder.
+
+        ``media_file`` is relative to ``output_dir`` with the separator of the OS
+        that wrote it (``\\`` on Windows, ``/`` elsewhere), so the old prefix is
+        matched with either separator. Only the prefix is replaced, in the record's
+        own separator style; a value that does not start with the old folder, and
+        every other field, are left as they are. Runs under the file lock. A failure
+        is logged (file and error type) and not raised: the folder is already renamed.
+        """
+        old_prefix = old_dir.relative_to(self.output_dir).as_posix() + "/"
+        new_prefix = new_dir.relative_to(self.output_dir).as_posix()
+
+        def mutate(current: Optional[Any]) -> tuple[Optional[Any], int]:
+            messages = current.get("messages") if isinstance(current, dict) else None
+            if not isinstance(messages, list):
+                return None, 0
+            updated = 0
+            for msg in messages:
+                value = msg.get("media_file") if isinstance(msg, dict) else None
+                if not isinstance(value, str) or not value.replace("\\", "/").startswith(old_prefix):
+                    continue
+                sep = value[len(old_prefix) - 1]
+                msg["media_file"] = new_prefix.replace("/", sep) + sep + value[len(old_prefix) :]
+                updated += 1
+            return (current if updated else None), updated
+
+        rel_file = str(messages_file.relative_to(self.output_dir))
+        try:
+            wrote, updated = self._locked_update(messages_file, mutate, on_corrupt="discard")
+        except OSError as e:
+            logger.warning("Media paths not updated after folder rename", file=rel_file, error_type=type(e).__name__)
+            return
+        if not wrote:
+            logger.warning("Media paths not updated after folder rename", file=rel_file, error_type="write_failed")
+        elif updated:
+            logger.info("Media paths updated after folder rename", file=rel_file, updated=updated)
 
     @staticmethod
     def _type_counts(messages: list[dict[str, Any]]) -> dict[str, int]:
@@ -372,6 +622,7 @@ class SyncManager:
         prefetched_messages: Optional[list[dict[str, Any]]] = None,
         *,
         on_new_messages: Optional[Callable[[dict[str, Any], list[dict[str, Any]]], Any]] = None,
+        ignore_cursor: bool = False,
     ) -> int:
         """
         Syncs messages for a member, prepares the media queue, and archives the
@@ -389,7 +640,8 @@ class SyncManager:
             on_new_messages: Optional ``callback(member_info, new_messages)``
                 (sync or async) called once after a successful write when at
                 least one message was not on disk before. Not called during
-                corrupt-file / count-mismatch recovery. Exceptions it raises are
+                corrupt-file / count-mismatch recovery or when
+                ``ignore_cursor`` is True. Exceptions it raises are
                 logged (exception type only) and swallowed. The callback is
                 awaited inline, so a slow callback delays that member's sync;
                 hand heavy work off (e.g. schedule a task). ``member_info`` has
@@ -401,6 +653,32 @@ class SyncManager:
                 The callback runs before the profile-image step, so a just-changed
                 ``phone_image`` may not be archived yet; use the ``phone_image``
                 URL from ``member_info``.
+            ignore_cursor: Take all of this member's rows from ``prefetched_messages``
+                (or a full fetch) instead of only those at/after the cursor. Used by a
+                room's one-time history scan so rows older than the cursor (e.g.
+                canceled ones) are merged. Merging is idempotent; the cursor is
+                recomputed from the merged file as usual, except that only messages
+                published at or after the previous cursor can hold it back: an older
+                message whose media is still missing, or that failed to normalize, is
+                still queued (or logged) but does not pull the cursor back to its date
+                (``room_archive_complete`` and Verify & Fix cover it). Without a
+                previous cursor every message can hold it back, as in a normal sync.
+                ``on_new_messages`` is not called for any row merged in this call,
+                including genuinely new posts that arrived since the last sync, so a
+                consumer that notifies should not rely on scan runs.
+
+        Messages without a ``member_id`` belong to member 0, the room author (see
+        :mod:`pysaka.roster`). Member 0 has no profile images, so none are
+        archived for it. A member folder left under an old name (or a room folder
+        left under an old room name) is renamed to the current name instead of
+        creating a second folder, and ``media_file`` paths into the old folder are
+        rewritten in the affected ``messages.json`` files.
+
+        If a room or member folder left under an old name cannot be renamed
+        (``OSError``, e.g. a file locked on Windows), a warning with group id,
+        member id and error type is logged and 0 is returned: nothing is written,
+        the cursor is untouched and profile images are skipped, so the next sync
+        retries the rename.
 
         Returns:
             Number of messages processed in this run (includes re-fetched
@@ -414,9 +692,151 @@ class SyncManager:
             progress_callback,
             prefetched_messages,
             on_new_messages=on_new_messages,
+            ignore_cursor=ignore_cursor,
         )
-        await self._archive_profile_images_safely(session, group, member)
+        if processed is None:
+            # A folder rename failed: archiving profile images now would create the
+            # new folder next to the old one and split the archive.
+            return 0
+        if member["id"] != roster.ROOM_AUTHOR_ID:
+            await self._archive_profile_images_safely(session, group, member)
+        else:
+            logger.debug("Profile images skipped: room author", group_id=group["id"], member_id=member["id"])
         return processed
+
+    _MEMBER_PROFILE_KEYS = ("thumbnail", "phone_image", "portrait")
+
+    async def extra_room_members(
+        self,
+        session: aiohttp.ClientSession,
+        group: dict[str, Any],
+        api_members: list[dict[str, Any]],
+        messages: list[dict[str, Any]],
+        name_hints: Optional[dict[int, dict[str, Any]]] = None,
+    ) -> list[dict[str, Any]]:
+        """Members to sync for this room **in addition to** ``api_members``.
+
+        ``/groups/{id}/members`` is the room's current lineup; earlier lineups and
+        members posting in official rooms are missing from it, and sync would drop
+        their messages. This returns one member dict per author of ``messages``
+        not in ``api_members`` (ascending id), then member 0 (the room author,
+        ``pysaka.roster.room_author``) when a message has no ``member_id``. Rows sync
+        skips as empty (non-canceled text with no text and no media) are ignored, so
+        they never create an author or an empty folder.
+
+        A name is resolved from, in order: ``name_hints`` (id -> member dict, e.g.
+        every room's member list fetched in this sync); the member block of a local
+        ``messages/* */<id> */messages.json`` (only when its ``name`` is a non-empty
+        string other than the fallback ``str(id)``); ``Client.get_member`` (cached per manager); else ``str(id)``. A
+        message is never dropped because its author's name is unknown; a later sync
+        that learns the name renames the folder.
+
+        Raises:
+            ApiError: From ``Client.get_member`` (including ``RateLimitedError``).
+        """
+        hints = name_hints or {}
+        gid = group["id"]
+        # Rows sync skips as empty (see _is_skipped_empty) are never stored, so their
+        # author must not get a folder: an empty "<mid> <name>" or "0 <room>" folder
+        # would make a 1:1 room look like a group chat.
+        stored = [m for m in messages if not _is_skipped_empty(m)]
+        if len(stored) != len(messages):
+            logger.debug(
+                "Skipped-empty rows ignored for extra members", group_id=gid, ignored=len(messages) - len(stored)
+            )
+        messages = stored
+        # author_id maps a member_id it cannot read to the room author; say so, or a
+        # malformed id would silently merge a member's messages into member 0.
+        unusable = [
+            type(m.get("member_id")).__name__
+            for m in messages
+            if m.get("member_id") is not None
+            and roster.author_id(m) == roster.ROOM_AUTHOR_ID
+            and (isinstance(m["member_id"], bool) or m["member_id"] not in (0, "0"))
+        ]
+        if unusable:
+            logger.warning(
+                "Messages with unusable member_id attributed to room author",
+                group_id=gid,
+                count=len(unusable),
+                id_types=sorted(set(unusable)),
+            )
+        extra_ids = roster.extra_author_ids((m["id"] for m in api_members), messages)
+        result: list[dict[str, Any]] = []
+        for aid in extra_ids:
+            if aid == roster.ROOM_AUTHOR_ID:
+                result.append(roster.room_author(group))
+                logger.debug("Room member resolved", group_id=gid, member_id=aid, source="room")
+            else:
+                result.append(await self._resolve_member(session, aid, hints, group_id=gid))
+        if extra_ids:
+            logger.info("Extra room members", group_id=gid, member_ids=extra_ids, count=len(extra_ids))
+        return result
+
+    async def _resolve_member(
+        self,
+        session: aiohttp.ClientSession,
+        member_id: int,
+        hints: dict[int, dict[str, Any]],
+        *,
+        group_id: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Resolve one extra author's member dict; logs the source (hint/local/api/fallback)."""
+        hinted = hints.get(member_id)
+        if hinted and hinted.get("name"):
+            logger.debug("Room member resolved", group_id=group_id, member_id=member_id, source="hint")
+            return dict(hinted)
+        local = await asyncio.to_thread(self._local_member_block, member_id)
+        if local:
+            logger.debug("Room member resolved", group_id=group_id, member_id=member_id, source="local")
+            return local
+        cached_lookup = member_id in self._member_cache
+        if not cached_lookup:
+            fetched = await self.client.get_member(session, member_id)
+            self._member_cache[member_id] = fetched if fetched and fetched.get("name") else None
+        cached = self._member_cache[member_id]
+        if cached:
+            logger.debug(
+                "Room member resolved",
+                group_id=group_id,
+                member_id=member_id,
+                source="api",
+                cached=cached_lookup,
+            )
+            return {"id": member_id, "name": cached["name"], **{k: cached.get(k) for k in self._MEMBER_PROFILE_KEYS}}
+        logger.warning(
+            "Room member name unknown, using id as name",
+            group_id=group_id,
+            member_id=member_id,
+            source="fallback",
+            cached=cached_lookup,
+        )
+        return {"id": member_id, "name": str(member_id)}
+
+    def _local_member_block(self, member_id: int) -> Optional[dict[str, Any]]:
+        """Member block of any archived room folder for ``member_id`` with a real name.
+
+        A real name is a non-empty string other than the fallback ``str(member_id)``.
+        """
+        messages_dir = self.output_dir / "messages"
+        if not messages_dir.exists():
+            return None
+        for path in messages_dir.glob(f"* */{member_id} */messages.json"):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    block = json.load(f).get("member")
+            except (OSError, ValueError, AttributeError) as e:
+                logger.warning(
+                    "Local member block unreadable",
+                    member_id=member_id,
+                    file=str(path.relative_to(self.output_dir)),
+                    error_type=type(e).__name__,
+                )
+                continue
+            name = block.get("name") if isinstance(block, dict) else None
+            if isinstance(name, str) and name and name != str(member_id):
+                return {"id": member_id, "name": name, **{k: block.get(k) for k in self._MEMBER_PROFILE_KEYS}}
+        return None
 
     async def backfill_past_messages(
         self, session: aiohttp.ClientSession, group: dict[str, Any], member: dict[str, Any]
@@ -432,6 +852,9 @@ class SyncManager:
         every queued file is on disk; otherwise it stays unset and later calls
         retry (merging is idempotent). Cursor fields are never touched and
         ``on_new_messages`` is never fired.
+
+        Returns 0 for member 0 (the room author), which has no own timeline or
+        letters.
 
         Returns:
             Number of messages that were not in the archive before.
@@ -450,6 +873,9 @@ class SyncManager:
                 write; 0 returned).
         """
         gid, mid = group["id"], member["id"]
+        if mid == roster.ROOM_AUTHOR_ID:
+            logger.debug("Backfill skipped: room author", group_id=gid, member_id=mid)
+            return 0
         key = f"{gid}_{mid}"
         entry = self.sync_state.get(key)
         if not entry or entry.get("past_backfilled_at"):
@@ -470,7 +896,7 @@ class SyncManager:
             logger.warning("Past message fetch failed", group_id=gid)
             return 0
 
-        mine = [m for m in past if m.get("member_id") == mid]
+        mine = [m for m in past if roster.author_id(m) == mid]
         queue: list[dict[str, Any]] = []
         processed, earliest_failed_ts, _ = self.prepare_messages(mine, member_dir, queue)
 
@@ -484,7 +910,7 @@ class SyncManager:
                 base = current.get("messages", [])
                 base_ids = {m.get("id") for m in base}
                 new_count = sum(1 for m in processed if m["id"] not in base_ids)
-                merged = self._merge_messages(base, processed)
+                merged = self._merge_messages(base, processed, group_id=gid, member_id=mid)
                 merged.sort(key=lambda x: x.get("timestamp") or "")
                 current["messages"] = merged
                 current["total_messages"] = len(merged)
@@ -574,12 +1000,16 @@ class SyncManager:
         JSON it is renamed to ``letters.json.corrupt-<UTC timestamp>`` (kept for
         inspection), the cursor is dropped, and the letters are rebuilt from a
         full fetch in the same call.
+        Returns 0 for member 0 (the room author), which has no own timeline or
+        letters.
         Works for expired subscriptions (the server still returns their letters).
         Never touches the message cursor and never fires ``on_new_messages``.
         ``letters.json`` is written only when its content changes or it is
         created. Before that write (and only when there is something to write),
-        a room folder left under an old room name is renamed, so letters and
-        messages share one folder.
+        a room folder left under an old room name and a member folder left under
+        an old member name are renamed (with their ``media_file`` paths
+        rewritten, as in :meth:`sync_member`), so letters and messages share one
+        folder.
 
         Raises:
             SessionExpiredError, RefreshFailedError: auth failures propagate.
@@ -587,13 +1017,19 @@ class SyncManager:
                 failed (other unexpected errors after the fetch also propagate),
                 so callers should wrap the call. A failed fetch does not raise: it
                 logs and returns 0 (a corrupt ``letters.json`` is already set aside
-                by then, so the next call rebuilds it).
+                by then, so the next call rebuilds it). A failed folder rename does
+                not raise either: a warning with group id, member id and error type
+                is logged and 0 returned, nothing is written and the letters cursor
+                is untouched.
 
         Returns:
             Number of letters that were not in ``letters.json`` before (all of
             them after a corrupt or missing file).
         """
         gid, mid = group["id"], member["id"]
+        if mid == roster.ROOM_AUTHOR_ID:
+            logger.debug("Letters skipped: room author", group_id=gid, member_id=mid)
+            return 0
         key = f"{gid}_{mid}"
         member_dir = self._member_dir_path(group, member)
         letters_file = member_dir / "letters.json"
@@ -692,7 +1128,11 @@ class SyncManager:
                 merged = {"version": 1, "letters": letters}
                 return (None if merged == current else merged), new_count
 
-            self._ensure_group_dir(group)  # rename a renamed room's folder before creating anything
+            # Rename a renamed room's / member's folder before creating anything.
+            renamed = self._renamed_member_dir(group, mid, sanitize_name(member["name"]))
+            if renamed is None:
+                return 0
+            member_dir = renamed
             member_dir.mkdir(parents=True, exist_ok=True)
             try:
                 wrote, added = await asyncio.to_thread(self._locked_update, letters_file, mutate)
@@ -864,13 +1304,15 @@ class SyncManager:
         prefetched_messages: Optional[list[dict[str, Any]]] = None,
         *,
         on_new_messages: Optional[Callable[[dict[str, Any], list[dict[str, Any]]], Any]] = None,
-    ) -> int:
+        ignore_cursor: bool = False,
+    ) -> Optional[int]:
         """
         Message part of :meth:`sync_member` (see there for arguments).
 
         Returns:
             Number of messages processed in this run (re-fetched overlap
-            included).
+            included), or None when a room/member folder rename failed (nothing
+            was written and the cursor is untouched).
         """
         gid = group["id"]
         mid = member["id"]
@@ -878,9 +1320,10 @@ class SyncManager:
 
         # output_dir is already service-specific (e.g., output/日向坂46/)
         # so we only need to add messages/ and the group directory
-        group_dir = self._ensure_group_dir(group)
-
-        member_dir = group_dir / f"{mid} {mname}"
+        renamed = self._renamed_member_dir(group, mid, mname)
+        if renamed is None:
+            return None
+        member_dir = renamed
         member_dir.mkdir(parents=True, exist_ok=True)
         for t in ["picture", "video", "voice"]:
             (member_dir / t).mkdir(exist_ok=True)
@@ -909,7 +1352,7 @@ class SyncManager:
                 filtered = [
                     x
                     for x in prefetched_messages
-                    if x.get("member_id") == mid and (since_ts is None or (x.get("published_at") or "") >= since_ts)
+                    if roster.author_id(x) == mid and (since_ts is None or (x.get("published_at") or "") >= since_ts)
                 ]
                 logger.info("Filtered prefetched messages for member", count=len(filtered), member=mname)
                 return filtered
@@ -920,12 +1363,16 @@ class SyncManager:
             logger.info("Fetched messages", count=len(fetched), group_id=gid)
 
             # Filter for member
-            fetched = [x for x in fetched if x.get("member_id") == mid]
+            fetched = [x for x in fetched if roster.author_id(x) == mid]
             logger.info("Filtered messages for member", count=len(fetched), member=mname)
             return fetched
 
         try:
-            messages = await fetch_for_member(last_ts)
+            messages = await fetch_for_member(None if ignore_cursor else last_ts)
+            if ignore_cursor:
+                logger.debug(
+                    "Cursor ignored for room scan", group_id=gid, member_id=mid, last_ts=last_ts, count=len(messages)
+                )
 
             # Load existing (may be corrupt / truncated — see recovery below)
             existing_msgs: list[dict[str, Any]] = []
@@ -1003,8 +1450,12 @@ class SyncManager:
                 return 0
 
             # Process & Prepare (on the recovered full set when recovering)
+            # A scan re-reads rows older than the cursor. Their missing media or a
+            # failed normalize must not drag the cursor back to an old date for good
+            # (every later sync would re-read from there): room_archive_complete and
+            # Verify & Fix cover those rows. Rows at/after the old cursor still clamp.
             processed, earliest_failed_ts, earliest_pending_media_ts = self.prepare_messages(
-                messages, member_dir, media_queue
+                messages, member_dir, media_queue, cursor_floor=last_ts if ignore_cursor else None
             )
 
             member_block = {
@@ -1037,7 +1488,7 @@ class SyncManager:
                 new_msgs = [m for m in processed if m["id"] not in base_ids]
                 # Dedupe (Upsert: prefer fresh API data, but preserve locally-derived
                 # media metadata the API never returns — see _merge_messages).
-                merged = self._merge_messages(base, processed)
+                merged = self._merge_messages(base, processed, group_id=gid, member_id=mid)
                 merged.sort(key=lambda x: x.get("timestamp") or "")
                 export_data = {
                     "exported_at": datetime.now(timezone.utc).isoformat() + "Z",
@@ -1091,7 +1542,7 @@ class SyncManager:
                 newest_ts = min(newest_ts, earliest_pending_media_ts)
             self.update_sync_state(gid, mid, max_id, len(merged), last_ts=newest_ts)
 
-            if on_new_messages is not None and new_msgs and not recovering:
+            if on_new_messages is not None and new_msgs and not recovering and not ignore_cursor:
                 member_info = {
                     "group_id": gid,
                     "group_name": group["name"],
@@ -1110,11 +1561,24 @@ class SyncManager:
             # can prompt re-login instead of reporting a successful empty sync.
             raise
         except Exception as e:
-            logger.error("Error syncing member", member=mname, error=str(e), exc_info=True)
+            # Only the type: the exception text (or its traceback) may quote message content.
+            logger.error(
+                "Error syncing member",
+                member=mname,
+                member_id=mid,
+                group_id=gid,
+                error_type=type(e).__name__,
+                **_error_origin(e),
+            )
             return 0
 
     def prepare_messages(
-        self, messages: list[dict[str, Any]], member_dir: Path, queue: list[dict[str, Any]]
+        self,
+        messages: list[dict[str, Any]],
+        member_dir: Path,
+        queue: list[dict[str, Any]],
+        *,
+        cursor_floor: Optional[str] = None,
     ) -> tuple[list[dict[str, Any]], Optional[str], Optional[str]]:
         """
         Normalize messages and queue media downloads.
@@ -1123,6 +1587,10 @@ class SyncManager:
             messages: List of raw message dicts.
             member_dir: Directory for member's files.
             queue: Media download waiting queue.
+            cursor_floor: When set, only messages whose ``published_at`` is at or
+                after it count toward ``earliest_failed_ts`` and
+                ``earliest_pending_media_ts`` (older ones are still queued, and
+                logged when they fail). None (default): every message counts.
 
         Returns:
             A tuple ``(processed, earliest_failed_ts, earliest_pending_media_ts)``.
@@ -1139,6 +1607,8 @@ class SyncManager:
         processed = []
         earliest_failed_ts: Optional[str] = None
         earliest_pending_media_ts: Optional[str] = None
+        below_floor_pending = 0
+        below_floor_failed = 0
         for msg in messages:
             try:
                 # Normalize core fields
@@ -1179,8 +1649,11 @@ class SyncManager:
                         # Hold the cursor behind this message until its media is on
                         # disk, so an interrupted download is re-fetched next run.
                         pending_ts = msg.get("published_at") or ""
-                        if earliest_pending_media_ts is None or pending_ts < earliest_pending_media_ts:
-                            earliest_pending_media_ts = pending_ts
+                        if cursor_floor is None or pending_ts >= cursor_floor:
+                            if earliest_pending_media_ts is None or pending_ts < earliest_pending_media_ts:
+                                earliest_pending_media_ts = pending_ts
+                        else:
+                            below_floor_pending += 1
 
                     p_msg["media_file"] = str(filepath.relative_to(self.output_dir))
 
@@ -1191,9 +1664,9 @@ class SyncManager:
                             p_msg["width"] = width
                             p_msg["height"] = height
 
-                # Skip empty text messages (no content and no media)
-                # These are often system/metadata entries from subscription
-                if msg_type == "text" and not p_msg.get("content") and not media_url:
+                # Skip empty text messages (see _is_skipped_empty; room_archive_complete
+                # uses the same rule, so a skipped message is never expected on disk).
+                if _is_skipped_empty(msg):
                     logger.debug("Skipping empty text message", message_id=msg.get("id"))
                     continue
 
@@ -1203,9 +1676,21 @@ class SyncManager:
                 # Track the oldest failure's timestamp so the caller can hold the
                 # cursor behind it and re-fetch next run instead of losing it.
                 failed_ts = msg.get("published_at") or ""
-                if earliest_failed_ts is None or failed_ts < earliest_failed_ts:
-                    earliest_failed_ts = failed_ts
-                logger.error("Prepare error", message_id=mid, error=str(e))
+                if cursor_floor is None or failed_ts >= cursor_floor:
+                    if earliest_failed_ts is None or failed_ts < earliest_failed_ts:
+                        earliest_failed_ts = failed_ts
+                else:
+                    below_floor_failed += 1
+                # Only the type: the exception text may quote the message that failed.
+                logger.error("Prepare error", message_id=mid, error_type=type(e).__name__, **_error_origin(e))
+        if below_floor_pending or below_floor_failed:
+            logger.debug(
+                "Old rows excluded from cursor clamp",
+                member_dir=member_dir.name,
+                cursor_floor=cursor_floor,
+                pending_media=below_floor_pending,
+                failed=below_floor_failed,
+            )
         return processed, earliest_failed_ts, earliest_pending_media_ts
 
     # Media metadata derived locally from the downloaded file — the message API
@@ -1225,13 +1710,27 @@ class SyncManager:
     _LOCAL_DERIVED_FIELDS = ("width", "height", "media_duration", "is_muted", "media_file")
 
     @staticmethod
-    def _merge_messages(existing_msgs: list[dict[str, Any]], processed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _merge_messages(
+        existing_msgs: list[dict[str, Any]],
+        processed: list[dict[str, Any]],
+        *,
+        group_id: Optional[int] = None,
+        member_id: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
         """Upsert ``processed`` over ``existing_msgs`` (prefer fresh API data),
         carrying forward locally-derived media metadata the API cannot supply.
 
         A field is only inherited from the stored record when the fresh message
         omits it — a freshly re-derived value (e.g. is_muted recomputed on a
-        re-download) always wins.
+        re-download) always wins. A canceled (withdrawn) message arrives without
+        text: it keeps the ``content`` captured earlier and the first non-empty
+        ``canceled_at`` seen. A fresh row without ``canceled_at`` (the API sent no
+        ``updated_at``) inherits the stored one; when none is stored yet (or a
+        stored ``None`` from an earlier write), the fresh value is recorded.
+
+        ``group_id`` / ``member_id`` only label the log lines: ``info`` when a stored
+        message turns canceled (ids, ``canceled_at`` and whether its content was
+        kept, never the text), ``debug`` when a canceled message is first stored.
         """
         merged = {m["id"]: m for m in existing_msgs}
         for pm in processed:
@@ -1240,6 +1739,30 @@ class SyncManager:
                 for key in SyncManager._LOCAL_DERIVED_FIELDS:
                     if key not in pm and key in prev:
                         pm[key] = prev[key]
+                if pm.get("state") in CANCELED_STATES:
+                    # A withdrawn message comes back without text: keep what we
+                    # captured before the withdrawal, and the first cancel time seen.
+                    if not pm.get("content") and prev.get("content"):
+                        pm["content"] = prev["content"]
+                    if prev.get("canceled_at"):
+                        pm["canceled_at"] = prev["canceled_at"]
+                    if prev.get("state") not in CANCELED_STATES:
+                        logger.info(
+                            "Stored message turned canceled",
+                            group_id=group_id,
+                            member_id=member_id,
+                            message_id=pm["id"],
+                            canceled_at=pm.get("canceled_at"),
+                            content_kept=bool(pm.get("content")),
+                        )
+            elif pm.get("state") in CANCELED_STATES:
+                logger.debug(
+                    "Canceled message stored without earlier copy",
+                    group_id=group_id,
+                    member_id=member_id,
+                    message_id=pm["id"],
+                    canceled_at=pm.get("canceled_at"),
+                )
             merged[pm["id"]] = pm
         return list(merged.values())
 
@@ -1282,12 +1805,14 @@ class SyncManager:
         except Exception as e:  # noqa: BLE001
             # A corrupt/unreadable manifest must be surfaced, not collapsed into a
             # clean-looking empty result that reads as "fully synced".
-            logger.warning("saka.scan.manifest_unreadable", file=str(messages_file), error=str(e))
+            logger.warning(
+                "saka.scan.manifest_unreadable", file=_short_path(messages_file), error_type=type(e).__name__
+            )
             result["error"] = "manifest_unreadable"
             return result
 
         if not isinstance(data, dict):
-            logger.warning("saka.scan.manifest_invalid", file=str(messages_file))
+            logger.warning("saka.scan.manifest_invalid", file=_short_path(messages_file))
             result["error"] = "manifest_invalid"
             return result
 
@@ -1436,9 +1961,11 @@ class SyncManager:
         try:
             wrote, _ = await asyncio.to_thread(self._locked_update, messages_file, mutate)
             if not wrote:
-                logger.error("Failed to write message metadata", file=str(messages_file))
+                logger.error("Failed to write message metadata", file=_short_path(messages_file))
         except Exception as e:
-            logger.error("Failed to update message metadata", file=str(messages_file), error=str(e))
+            logger.error(
+                "Failed to update message metadata", file=_short_path(messages_file), error_type=type(e).__name__
+            )
 
     async def reconcile_member_media(
         self,

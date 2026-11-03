@@ -1,6 +1,10 @@
 import asyncio
 import contextlib
+import math
 import os
+import re
+import time
+from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Optional, Union, overload
@@ -11,10 +15,20 @@ import aiohttp
 import structlog
 
 from .credentials import get_token_manager
-from .exceptions import ApiError, RefreshFailedError, SessionExpiredError
+from .exceptions import ApiError, RateLimitedError, RefreshFailedError, SessionExpiredError
 from .utils import get_jwt_remaining_seconds, get_media_extension, media_file_is_present
 
 logger = structlog.get_logger()
+
+# Endpoint path of a group's timeline; the only endpoint ``timeline_min_interval`` paces.
+_TIMELINE_ENDPOINT = re.compile(r"^/groups/\d+/timeline$")
+
+# Seconds a client refuses further timeline requests after one returned HTTP 429 without
+# a usable ``Retry-After`` (observed cooldown: under 2.5 minutes).
+TIMELINE_429_COOLDOWN = 150.0
+# Upper bound in seconds for a cooldown taken from ``Retry-After``, so an absurd header
+# cannot block the timeline for hours.
+TIMELINE_429_MAX_COOLDOWN = 900.0
 
 
 def _redact_url(url: str) -> str:
@@ -44,6 +58,27 @@ def _int_or_none(value: Any) -> Optional[int]:
     """``value`` if it is a true integer (not a bool), else None — for logging
     server-supplied ids without echoing arbitrary content."""
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _rate_limited(endpoint: str, resp: Any) -> RateLimitedError:
+    """Build the error for a 429 response.
+
+    ``retry_after`` is the ``Retry-After`` header as seconds when it is a finite,
+    non-negative number, else None (absent, an HTTP date, ``nan``, ``inf``, negative).
+    """
+    headers = getattr(resp, "headers", None)
+    raw = headers.get("Retry-After") if isinstance(headers, Mapping) else None
+    ignored: dict[str, str] = {}  # why a present Retry-After header was not used
+    try:
+        retry_after: Optional[float] = float(raw) if raw is not None else None
+    except (TypeError, ValueError) as e:
+        retry_after = None
+        ignored = {"retry_after_ignored": "unparsable", "error_type": type(e).__name__}
+    if retry_after is not None and not (math.isfinite(retry_after) and retry_after >= 0):
+        retry_after = None
+        ignored = {"retry_after_ignored": "not_finite_or_negative"}
+    logger.warning("API rate limited", endpoint=endpoint, retry_after=retry_after, **ignored)
+    return RateLimitedError(f"Rate limited at {endpoint}", retry_after)
 
 
 class Group(Enum):
@@ -96,6 +131,10 @@ class Client:
     Provides methods to authenticate, explore groups/members, and fetch messages.
     Handles token refresh automatically via cookies or refresh_token.
 
+    A ``Client`` may be reused one after another across event loops (for example successive
+    ``asyncio.run`` calls): its internal locks are rebuilt for each loop. It must not be used from
+    several event loops running at the same time (for example in different threads).
+
     Attributes:
         group (Group): The target Sakamichi group.
         access_token (str): Current OAuth2 access token.
@@ -115,6 +154,7 @@ class Client:
         auth_dir: Optional[Union[str, Path]] = None,
         use_token_storage: bool = False,
         platform: str = "web",
+        timeline_min_interval: float = 0.0,
     ):
         """
         Initialize the client.
@@ -129,9 +169,13 @@ class Client:
             use_token_storage: If True, attempts to load/save credentials using system keyring (or file fallback).
             platform: Request profile — "web" (default, browser-like) or "android"
                 (Flutter app: Dart UA, mobile host, x-talk-app-platform=android).
+            timeline_min_interval: Minimum seconds between the starts of two
+                ``/groups/{id}/timeline`` requests made through this client
+                (default 0.0 = no pacing). See the ``timeline_min_interval`` property.
 
         Raises:
-            ValueError: If an invalid group string is provided.
+            ValueError: If an invalid group string is provided, or
+                ``timeline_min_interval`` is negative, NaN or infinite.
         """
         if isinstance(group, str):
             try:
@@ -170,6 +214,21 @@ class Client:
         # then awaited under asyncio.run() would raise "bound to a different event
         # loop". Deferring creation to the running loop avoids that.
         self._refresh_lock: Optional[asyncio.Lock] = None
+        self._refresh_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+
+        # Timeline pacing (see the ``timeline_min_interval`` property). The lock is
+        # created lazily for the same reason as ``_refresh_lock``.
+        self._timeline_min_interval = 0.0
+        self._timeline_lock: Optional[asyncio.Lock] = None
+        self._timeline_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._timeline_last_start: Optional[float] = None
+        self._timeline_paced_requests = 0
+        self._timeline_waited = 0.0
+        # Fail-fast after a timeline 429 (see ``timeline_blocked_remaining``): a
+        # ``time.monotonic()`` deadline, None when not blocked.
+        self._timeline_blocked_until: Optional[float] = None
+        self._timeline_short_circuited = 0
+        self.timeline_min_interval = timeline_min_interval
 
         # Platform profile: "web" (default) mimics the browser client;
         # "android" mimics the Flutter/Dart app (different UA, host, headers).
@@ -200,6 +259,138 @@ class Client:
         self.headers = self._build_headers()
         if self.access_token:
             self.headers["Authorization"] = f"Bearer {self.access_token}"
+
+    @property
+    def timeline_min_interval(self) -> float:
+        """Minimum seconds between the starts of two timeline requests (0.0 = off).
+
+        While above 0, every HTTP request to ``/groups/{id}/timeline`` made through
+        this client (``get_messages`` pages, the ``order=asc`` probe, the 401 retry
+        inside ``fetch_json``, ``mark_group_read``) waits so that consecutive request
+        starts are at least this many seconds apart, also under concurrent callers.
+        Other endpoints and CDN downloads are never paced. May be changed at any time;
+        setting a negative, NaN or infinite value raises ``ValueError``. Pacing is per client,
+        i.e. per service. Callers that enable it can pass ``page_delay=0`` to
+        ``get_messages`` so the pause is not doubled. The spacing is between request
+        starts at this client, not on the wire: a slow response or a retry does not
+        shift it.
+
+        Independently of this setting, a timeline request that returns HTTP 429 blocks
+        all timeline requests of this client for the ``Retry-After`` seconds (or
+        ``TIMELINE_429_COOLDOWN`` when absent or unusable, at most
+        ``TIMELINE_429_MAX_COOLDOWN``): see ``fetch_json`` and ``timeline_blocked_remaining``.
+        """
+        return self._timeline_min_interval
+
+    @timeline_min_interval.setter
+    def timeline_min_interval(self, value: float) -> None:
+        value = float(value)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"timeline_min_interval must be a finite number >= 0, got {value}")
+        old = self._timeline_min_interval
+        if value == old:
+            return
+        if value == 0.0 and self._timeline_paced_requests:
+            logger.info(
+                "Timeline pacing summary",
+                requests=self._timeline_paced_requests,
+                waited_seconds=round(self._timeline_waited, 3),
+            )
+        if old == 0.0:
+            self._timeline_paced_requests = 0
+            self._timeline_waited = 0.0
+        self._timeline_min_interval = value
+        logger.debug("Timeline pacing set", interval=value)
+
+    async def _pace_timeline(self, endpoint: str) -> None:
+        """Wait until a request to ``endpoint`` may start (timeline endpoints only).
+
+        Serialised with one lock per client; the start time is recorded after any
+        wait, so concurrent callers queue up ``timeline_min_interval`` apart.
+        """
+        if self._timeline_min_interval <= 0 or not _TIMELINE_ENDPOINT.match(endpoint):
+            return
+        loop = asyncio.get_running_loop()
+        if self._timeline_lock is None or self._timeline_lock_loop is not loop:
+            # First use, or the client moved to another event loop (e.g. a second
+            # ``asyncio.run``): a lock with waiters is bound to its loop. The last
+            # start time is kept, so the spacing carries over.
+            self._timeline_lock = asyncio.Lock()
+            self._timeline_lock_loop = loop
+        async with self._timeline_lock:
+            # A 429 may have landed while this request queued: drain without waiting and
+            # without counting it as a paced request.
+            self._raise_if_timeline_blocked(endpoint)
+            interval = self._timeline_min_interval  # may have changed while queued
+            if interval > 0:
+                if self._timeline_last_start is not None:
+                    wait = self._timeline_last_start + interval - time.monotonic()
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                        self._timeline_waited += wait
+                self._timeline_paced_requests += 1
+            self._timeline_last_start = time.monotonic()
+
+    @property
+    def timeline_blocked_remaining(self) -> Optional[float]:
+        """Seconds left of the timeline cooldown after an HTTP 429, or None if not blocked.
+
+        While it is not None, every ``/groups/{id}/timeline`` request through this client
+        raises ``RateLimitedError`` without being sent (see ``fetch_json``). Read-only;
+        the block ends by itself.
+        """
+        remaining = self._timeline_block_left()
+        return remaining if remaining > 0 else None
+
+    def _timeline_block_left(self) -> float:
+        """Seconds left of the timeline block, 0.0 when not blocked (clears an expired one)."""
+        until = self._timeline_blocked_until
+        if until is None:
+            return 0.0
+        remaining = until - time.monotonic()
+        if remaining <= 0:
+            self._timeline_blocked_until = None
+            if self._timeline_short_circuited:
+                logger.debug("Timeline block expired", short_circuited=self._timeline_short_circuited)
+                self._timeline_short_circuited = 0
+            return 0.0
+        return remaining
+
+    def _raise_if_timeline_blocked(self, endpoint: str) -> None:
+        """Raise ``RateLimitedError`` without sending if ``endpoint`` is a blocked timeline."""
+        if not _TIMELINE_ENDPOINT.match(endpoint):
+            return
+        remaining = self._timeline_block_left()
+        if remaining > 0:
+            self._timeline_short_circuited += 1
+            logger.debug(
+                "Timeline request short-circuited",
+                endpoint=endpoint,
+                retry_after=round(remaining, 3),
+                short_circuited=self._timeline_short_circuited,
+            )
+            raise RateLimitedError(f"Timeline requests blocked after HTTP 429 at {endpoint}", remaining)
+
+    def _block_timeline(self, endpoint: str, err: RateLimitedError) -> RateLimitedError:
+        """Start (or extend, never shorten) the timeline cooldown after a 429; returns ``err``.
+
+        The cooldown is ``err.retry_after`` (finite, >= 0) capped at
+        ``TIMELINE_429_MAX_COOLDOWN``, else ``TIMELINE_429_COOLDOWN``. A cooldown of 0
+        blocks nothing.
+        """
+        if not _TIMELINE_ENDPOINT.match(endpoint):
+            return err
+        cooldown = err.retry_after if err.retry_after is not None else TIMELINE_429_COOLDOWN
+        if not (math.isfinite(cooldown) and cooldown >= 0):
+            cooldown = TIMELINE_429_COOLDOWN
+        cooldown = min(cooldown, TIMELINE_429_MAX_COOLDOWN)
+        if cooldown <= 0:
+            return err
+        if self._timeline_block_left() <= 0:
+            self._timeline_short_circuited = 0
+            logger.warning("Timeline requests blocked", cooldown=cooldown)
+        self._timeline_blocked_until = max(self._timeline_blocked_until or 0.0, time.monotonic() + cooldown)
+        return err
 
     def _build_headers(self) -> dict[str, str]:
         """Build request headers for the active platform profile.
@@ -258,14 +449,27 @@ class Client:
 
         Args:
             session: Active aiohttp ClientSession.
-            endpoint: API endpoint path (e.g. "/groups").
+            endpoint: API endpoint path (e.g. "/groups"). Requests to
+                ``/groups/{id}/timeline``, including the retry after a 401, wait
+                first when ``timeline_min_interval`` is above 0. After any
+                timeline request returned HTTP 429, timeline requests through this
+                client raise ``RateLimitedError`` without being sent until the
+                cooldown ends (``Retry-After`` seconds when the 429 carried a finite
+                value >= 0, capped at ``TIMELINE_429_MAX_COOLDOWN``, else
+                ``TIMELINE_429_COOLDOWN``; a later 429 never shortens it); requests
+                waiting in the pacing gate raise at once and check again after a wait. Other endpoints are unaffected.
             params: Query parameters.
 
         Returns:
-            JSON response as dict or None if failed.
+            JSON response as dict, or None for any other failure: a client error
+            (4xx other than 429), a 401 that the token refresh could not fix, or an
+            unexpected error while handling the response.
 
         Raises:
-            ApiError: If the API returns a server error (5xx) or other unhandled status.
+            ApiError: On a server error (5xx) or a network error / timeout.
+            RateLimitedError: On HTTP 429 (also after a token refresh), and for a
+                timeline request made during the cooldown that follows such a 429
+                (not sent; ``retry_after`` is the remaining cooldown in seconds).
             SessionExpiredError: If the session is invalidated during the request.
             RefreshFailedError: If a 401 triggers a token refresh and all refresh
                 plans fail (surfaced so callers can prompt re-login).
@@ -273,6 +477,9 @@ class Client:
         url = f"{self.api_base}{endpoint}"
         logger.debug("API GET request", endpoint=endpoint, params=params)
         try:
+            self._raise_if_timeline_blocked(endpoint)
+            await self._pace_timeline(endpoint)
+            self._raise_if_timeline_blocked(endpoint)  # a 429 may have arrived while waiting
             async with session.get(url, headers=self.headers, params=params) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -282,15 +489,21 @@ class Client:
                     logger.warning("API returned 401 Unauthorized", endpoint=endpoint, will_retry=True)
                     if await self.refresh_access_token(session):
                         # Retry the request with new token
+                        await self._pace_timeline(endpoint)
+                        self._raise_if_timeline_blocked(endpoint)
                         async with session.get(url, headers=self.headers, params=params) as resp_retry:
                             if resp_retry.status == 200:
                                 return await resp_retry.json()
                             elif resp_retry.status == 401:
                                 logger.warning(f"Unauthorized at {endpoint} even after refresh.")
                                 return None
+                            elif resp_retry.status == 429:
+                                raise self._block_timeline(endpoint, _rate_limited(endpoint, resp_retry))
                             elif resp_retry.status >= 500:
                                 raise ApiError(f"Server error {resp_retry.status}", resp_retry.status)
                     return None
+                elif resp.status == 429:
+                    raise self._block_timeline(endpoint, _rate_limited(endpoint, resp))
                 elif resp.status >= 500:
                     logger.error(f"Server error {resp.status} at {endpoint}")
                     raise ApiError(f"Server error {resp.status}", resp.status)
@@ -307,8 +520,9 @@ class Client:
             logger.debug(f"Auth error during request to {endpoint}: {e}")
             raise
         except aiohttp.ClientError as e:
-            logger.error(f"Network error fetching {url}: {e}")
-            raise ApiError(f"Network error: {e}") from e
+            # Only the type: aiohttp's text can embed the full (possibly signed) URL.
+            logger.error("Network error fetching", url=_redact_url(url), error_type=type(e).__name__)
+            raise ApiError(f"Network error: {type(e).__name__}") from e
         except asyncio.TimeoutError as e:
             # PY-CORE-02: aiohttp's TOTAL request timeout raises asyncio.TimeoutError,
             # which is NOT an aiohttp.ClientError subclass. Without this branch a hung
@@ -316,10 +530,11 @@ class Client:
             # None — indistinguishable from "no data" — letting callers treat a
             # transient timeout as an empty result. Surface it as an ApiError so the
             # docstring contract (network problems raise) actually holds.
-            logger.error(f"Timeout fetching {url}: {e}")
-            raise ApiError(f"Timeout: {e}") from e
+            logger.error("Timeout fetching", url=_redact_url(url), error_type=type(e).__name__)
+            raise ApiError(f"Timeout: {type(e).__name__}") from e
         except Exception as e:
-            logger.error(f"Unexpected error fetching {url}: {e}")
+            # Only the type: the response body being handled may be quoted in the text.
+            logger.error("Unexpected error fetching", endpoint=endpoint, error_type=type(e).__name__)
             return None
 
     def _get_refresh_lock(self) -> asyncio.Lock:
@@ -328,10 +543,15 @@ class Client:
         PY-CORE-05: the lock is created on first use (inside a running coroutine)
         rather than in ``__init__`` so that on Python 3.9 it binds to the event
         loop that actually awaits it, not whichever loop happened to exist at
-        construction time.
+        construction time. It is rebuilt when the running loop is not the one it
+        was created on (a client reused across ``asyncio.run`` calls), because a
+        lock that has waiters is bound to its loop and raises ``RuntimeError`` on
+        another.
         """
-        if self._refresh_lock is None:
+        loop = asyncio.get_running_loop()
+        if self._refresh_lock is None or self._refresh_lock_loop is not loop:
             self._refresh_lock = asyncio.Lock()
+            self._refresh_lock_loop = loop
         return self._refresh_lock
 
     async def refresh_access_token(self, session: aiohttp.ClientSession) -> bool:
@@ -648,6 +868,12 @@ class Client:
             List of group objects. Includes closed groups (state='closed')
             for graduation detection — callers should skip syncing these
             as their timeline/members endpoints return 404.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         org_id = self.config.get("organization_id")
         params = {"organization_id": org_id} if org_id is not None else None
@@ -686,6 +912,12 @@ class Client:
 
         Returns:
             List of member objects.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         result = await self.fetch_json(session, f"/groups/{group_id}/members")
         return result or []
@@ -711,6 +943,7 @@ class Client:
         max_id: Optional[int] = None,
         progress_callback=None,
         clear_unread: bool = False,
+        page_delay: float = 0.5,
     ) -> list[dict[str, Any]]:
         """
         Fetch all new messages from a group's timeline.
@@ -726,6 +959,10 @@ class Client:
                 this group (the official app sends this on chat-open). Defaults to
                 False so a background sync does NOT zero the user's unread count on
                 the official mobile app.
+            page_delay: Seconds to wait between page requests (default 0.5). To stay
+                under the API rate limit during long full-history fetches, set
+                ``timeline_min_interval`` on the client instead (and pass
+                ``page_delay=0`` so the pause is not doubled).
 
         Returns:
             List of message dicts, sorted by ID ascending. When the timeline ends
@@ -745,6 +982,8 @@ class Client:
                 continuation (always), a full page with a missing continuation
                 (unless the ``order=asc`` probe confirms the timeline start), or
                 a page that replays already-collected messages.
+            RateLimitedError: On HTTP 429 for any page (a subclass of
+                ``ApiError``), instead of returning ``[]`` or a partial list.
         """
         all_messages: dict[int, dict[str, Any]] = {}
         page = 0
@@ -900,7 +1139,7 @@ class Client:
                 break
 
             page += 1
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(page_delay)
 
         # Filter: keep only messages newer than the cursor
         if effective_ts:
@@ -986,7 +1225,7 @@ class Client:
 
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
-        logger.error("Download ultimately failed", url=safe_url, error=str(last_err))
+        logger.error("Download ultimately failed", url=safe_url, error_type=last_err)
         return False
 
     async def download_message_media(
@@ -1037,7 +1276,7 @@ class Client:
             if await self.download_file(session, media_url, filepath):
                 return filepath
         except Exception as e:
-            logger.error(f"Message media download error: {e}")
+            logger.error("Message media download error", error_type=type(e).__name__)
 
         return None
 
@@ -1049,7 +1288,15 @@ class Client:
             session: Active aiohttp ClientSession.
 
         Returns:
-            Dict containing profile info (nickname, etc.) or None if failed.
+            Dict containing profile info (nickname, etc.), or None when the
+            request failed without raising (e.g. a 4xx other than 429; see
+            ``fetch_json``).
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning None.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         return await self.fetch_json(session, "/profile")
 
@@ -1063,6 +1310,12 @@ class Client:
 
         Returns:
             List of news items.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         params = {"platform": self.platform, "count": count}
         data = await self.fetch_json(session, "/announcements", params)
@@ -1079,6 +1332,12 @@ class Client:
 
         Returns:
             List of tags.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         data = await self.fetch_json(session, "/tags")
         if data and "tags" in data:
@@ -1095,6 +1354,12 @@ class Client:
 
         Returns:
             List of FC content items.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         data = await self.fetch_json(session, "/fc-contents", {"organization_id": organization_id})
         if data and "contents" in data:
@@ -1110,6 +1375,12 @@ class Client:
 
         Returns:
             List of organizations.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         data = await self.fetch_json(session, "/organizations")
         if data and "organizations" in data:
@@ -1128,6 +1399,12 @@ class Client:
 
         Returns:
             List of products.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         params = {}
         if product_type:
@@ -1178,8 +1455,8 @@ class Client:
         except ApiError:
             raise
         except aiohttp.ClientError as e:
-            logger.error(f"Network error posting to {url}: {e}")
-            raise ApiError(f"Network error: {e}") from e
+            logger.error("Network error posting", url=_redact_url(url), error_type=type(e).__name__)
+            raise ApiError(f"Network error: {type(e).__name__}") from e
 
     async def delete_json(self, session: aiohttp.ClientSession, endpoint: str) -> bool:
         """
@@ -1208,7 +1485,7 @@ class Client:
         except (SessionExpiredError, RefreshFailedError):
             raise
         except Exception as e:
-            logger.error(f"Error deleting {url}: {e}")
+            logger.error("Error deleting", url=_redact_url(url), error_type=type(e).__name__)
             return False
 
     async def get_letters(
@@ -1225,6 +1502,12 @@ class Client:
 
         Returns:
             List of letter objects.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         params: dict[str, Any] = {"count": count}
         if updated_from:
@@ -1272,6 +1555,12 @@ class Client:
             List of historical message objects (possibly empty); None only when
             ``strict`` is True and the request failed or returned no
             ``messages`` list.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]`` (or None with ``strict``).
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         data = await self.fetch_json(session, f"/groups/{group_id}/past_messages")
         if strict:
@@ -1295,7 +1584,14 @@ class Client:
             group_id: The ID of the group/member room to mark read.
 
         Returns:
-            True if the request succeeded.
+            True if the request succeeded; False when it failed without raising
+            (e.g. a 4xx other than 429; see ``fetch_json``).
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning False.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         params: dict[str, Any] = {"count": 1, "order": "desc", "clear_unread": "true"}
         data = await self.fetch_json(session, f"/groups/{group_id}/timeline", params)
@@ -1310,22 +1606,45 @@ class Client:
             group_id: The ID of the group/member.
 
         Returns:
-            Dict with streak information or None if failed.
+            Dict with streak information, or None when the request failed
+            without raising (e.g. a 4xx other than 429; see ``fetch_json``).
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning None.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         return await self.fetch_json(session, f"/groups/{group_id}/consecutive-subscription-day")
 
     async def get_member(self, session: aiohttp.ClientSession, member_id: int) -> Optional[dict[str, Any]]:
         """
-        Fetch individual member details.
+        Fetch one member's public profile (``GET /members/{id}``).
+
+        Works for members who are no longer in any room's member list (e.g. a
+        graduated member who once posted in an official room).
 
         Args:
             session: Active aiohttp ClientSession.
-            member_id: The ID of the member.
+            member_id: The member's id.
 
         Returns:
-            Member details dict or None if failed.
+            The member dict (``id``, ``name``, ``thumbnail``, ``phone_image``, ...),
+            or None when the request failed without raising (e.g. a 4xx other
+            than 429; see ``fetch_json``) or the body is not a JSON object.
+
+        Raises:
+            ApiError: On a server error (5xx) or a network error.
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``).
+            SessionExpiredError: If the session is invalidated during the request.
+            RefreshFailedError: If a 401 triggers a token refresh and it fails.
         """
-        return await self.fetch_json(session, f"/members/{member_id}")
+        data = await self.fetch_json(session, f"/members/{member_id}")
+        if data is not None and not isinstance(data, dict):
+            logger.warning(
+                "Member lookup returned a non-object body", member_id=member_id, found_type=type(data).__name__
+            )
+        return data if isinstance(data, dict) else None
 
     async def get_account(self, session: aiohttp.ClientSession) -> Optional[dict[str, Any]]:
         """
@@ -1335,7 +1654,14 @@ class Client:
             session: Active aiohttp ClientSession.
 
         Returns:
-            Account info dict or None if failed.
+            Account info dict, or None when the request failed without raising
+            (e.g. a 4xx other than 429; see ``fetch_json``).
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning None.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         return await self.fetch_json(session, "/account")
 

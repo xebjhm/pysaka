@@ -158,6 +158,26 @@ def is_jwt_expired(token: str) -> bool:
     return remaining <= 0
 
 
+def _short_path(path: Path) -> str:
+    """``parent/name`` of ``path`` for logging (no absolute path, so no user name)."""
+    return f"{path.parent.name}/{path.name}"
+
+
+CANCELED_STATES = frozenset({"canceled", "cancelled"})
+"""Server states of a message the member withdrew (text and media stripped)."""
+
+
+def _normalized_type(raw_type: Any) -> str:
+    """Map an API message type to the export type: text, video, picture or voice."""
+    if raw_type in ["image", "picture"]:
+        return "picture"
+    if raw_type in ["video", "movie"]:
+        return "video"
+    if raw_type in ["voice"]:
+        return "voice"
+    return "text"
+
+
 def normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
     """
     Normalizes a raw API message into the standard export format.
@@ -166,18 +186,15 @@ def normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
     Args:
         msg: Raw API message dictionary.
 
+    A message in a non-``published`` state keeps it as ``state``; a canceled one
+    (see :data:`CANCELED_STATES`) also gets ``canceled_at`` = the API's
+    ``updated_at``, omitted when the row has no ``updated_at``.
+
     Returns:
         Normalized message dictionary.
     """
-    # Map type to spec: text, video, picture, voice
     raw_type = msg.get("type")
-    msg_type = "text"
-    if raw_type in ["image", "picture"]:
-        msg_type = "picture"
-    elif raw_type in ["video", "movie"]:
-        msg_type = "video"
-    elif raw_type in ["voice"]:
-        msg_type = "voice"
+    msg_type = _normalized_type(raw_type)
 
     normalized: dict[str, Any] = {
         "id": msg["id"],
@@ -199,4 +216,9 @@ def normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
     state = msg.get("state")
     if state and state != "published":
         normalized["state"] = state
+        if state in CANCELED_STATES and msg.get("updated_at"):
+            # When the member withdrew it (the server bumps updated_at on cancel).
+            # Omitted (never stored as None) when the row has no updated_at, so a
+            # later sync that sees one still records it.
+            normalized["canceled_at"] = msg["updated_at"]
     return normalized

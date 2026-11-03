@@ -294,9 +294,7 @@ class KeyringStore(CredentialStore):
                 self._keyring.delete_password(service, username)
                 logger.debug("Deleted credentials from keyring", service=service, group=group)
             except Exception as e:
-                logger.debug(
-                    "Keyring delete failed (may not exist)", service=service, group=group, error=str(e)
-                )
+                logger.debug("Keyring delete failed (may not exist)", service=service, group=group, error=str(e))
 
         # Explicitly clean up keyrings.alt (Plaintext) residue for both layouts.
         # This handles cases where a user switched between Headless/GUI environments.

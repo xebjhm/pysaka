@@ -40,7 +40,22 @@ interaction). Reuses the browser session stored in `auth_dir`.
 ### `Client`
 Main API client supporting all Sakamichi groups.
 
-#### `__init__(group: Union[Group, str] = Group.HINATAZAKA46, access_token: str = None, refresh_token: str = None, cookies: dict = None, app_id: str = None, user_agent: str = None, auth_dir: Union[str, Path] = None, use_token_storage: bool = False, platform: str = "web")`
+**Event loops.** A `Client` may be reused one after another across event loops (for example
+successive `asyncio.run` calls): its internal locks (token refresh, timeline pacing) are rebuilt
+for each loop. It must not be used from several event loops running at the same time (for
+example in different threads).
+
+**Errors of the GET methods.** Every method built on `fetch_json` (`get_groups`, `get_members`,
+`get_messages`, `get_profile`, `get_news`, `get_tags`, `get_fc_contents`, `get_organizations`,
+`get_products`, `get_member`, `get_account`, `get_letters`, `get_past_messages`,
+`get_subscription_streak`, `mark_group_read`) raises `RateLimitedError` (a subclass of `ApiError`)
+on HTTP 429 instead of returning its failure value (`None`, `[]` or `False`). They also raise
+`ApiError` on a server error (5xx) or a network error / timeout, and `SessionExpiredError` /
+`RefreshFailedError` on auth failures. The failure value is returned only when the request failed
+without raising: a 4xx other than 429, a 401 the token refresh could not fix, or an unexpected
+error while handling the response.
+
+#### `__init__(group: Union[Group, str] = Group.HINATAZAKA46, access_token: str = None, refresh_token: str = None, cookies: dict = None, app_id: str = None, user_agent: str = None, auth_dir: Union[str, Path] = None, use_token_storage: bool = False, platform: str = "web", timeline_min_interval: float = 0.0)`
 - **group**: Target group, enum or string (default `Group.HINATAZAKA46`).
 - **access_token** / **refresh_token** / **cookies**: Credentials from
   `BrowserAuth.login`. `cookies` are required for the web-session refresh path.
@@ -53,18 +68,61 @@ Main API client supporting all Sakamichi groups.
 - **platform**: Request profile — `"web"` (default, browser-like) or `"android"`
   (Flutter app: Dart UA, per-group mobile host, `x-talk-app-platform=android`).
   Android mode refreshes via `refresh_token` only (never web cookies).
-- **Raises**: `ValueError` if an invalid group string is provided.
+- **timeline_min_interval**: Minimum seconds between the starts of two
+  `/groups/{id}/timeline` requests made through this client (default `0.0` = off).
+  Also available as the settable attribute `Client.timeline_min_interval`; see
+  "Timeline pacing" below.
+- **Raises**: `ValueError` if an invalid group string is provided, or
+  `timeline_min_interval` is negative, NaN or infinite.
+
+#### Timeline pacing: `Client.timeline_min_interval: float`
+Only `/groups/{id}/timeline` has been observed to return HTTP 429, and only when it is hit
+hundreds of times in a few minutes, as during a one-time history scan. While the attribute is
+above `0`, every HTTP request to a group's timeline made through this client waits so that
+consecutive request **starts** are at least that many seconds apart (spacing at the client,
+not on the wire). That covers every
+`get_messages` page, its `order=asc` probe, `mark_group_read`, and the retry after a 401 inside
+`fetch_json`. Other endpoints (`/groups/{id}/letters`, `/members/{id}`, ...) and CDN downloads
+are never paced.
+- The default `0.0` never sleeps. The value can be changed at any time (for example, set `3.0`
+  before a history scan and back to `0.0` in a `finally`); a negative, NaN or infinite value
+  raises `ValueError`.
+- Safe under concurrent callers: waits are serialised per client, so tasks that share a client
+  also share the spacing. Each client (one per service) paces independently.
+- `get_messages(page_delay=)` is unchanged and adds to the pacing; pass `page_delay=0` when
+  the interval is enabled so the pause is not doubled.
+- Logging: `Timeline pacing set` (debug, `interval`) whenever the value changes, and one
+  `Timeline pacing summary` (info, `requests`, `waited_seconds`) when pacing is switched
+  back to `0.0` after at least one paced request.
+
+**Fail-fast after a timeline 429.** Independently of `timeline_min_interval` (also at `0.0`),
+once any `/groups/{id}/timeline` request through a client returns HTTP 429, that client raises
+`RateLimitedError` immediately for every further timeline request, **without sending it**, until
+the cooldown has passed. The cooldown is the response's `Retry-After` when it is a finite number
+>= 0, capped at `TIMELINE_429_MAX_COOLDOWN` (`900.0` seconds), else `TIMELINE_429_COOLDOWN`
+(`150.0` seconds); both constants live in `pysaka.client`. A later 429 can extend a running
+cooldown but never shortens it, and a `Retry-After` of `0` blocks nothing. The block covers requests
+already waiting in the pacing gate (they raise at once, and again after a wait if the 429 lands
+while they sleep), `get_messages` pages, the `order=asc` probe, `mark_group_read` and the 401
+retry. The `retry_after` of the raised error is the remaining cooldown in seconds. Other endpoints
+(`/groups/{id}/letters`, `/members/{id}`, ...) are unaffected, the block ends by itself, and it is
+per client (one per service). The read-only property `Client.timeline_blocked_remaining` gives
+the seconds left (`None` when not blocked). Logging: `Timeline requests blocked` (warning,
+`cooldown`) once when blocking starts, and a debug `Timeline request short-circuited` line
+(`endpoint`, `retry_after`, `short_circuited` count) per refused request.
 
 #### `get_groups(session: aiohttp.ClientSession, include_inactive: bool = False) -> List[dict]`
 - **session**: Active aiohttp session.
 - **include_inactive**: If True, returns `expired` and `suspended` subscriptions too.
-- **Returns**: List of group objects.
+- **Returns**: List of group objects (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
 #### `get_members(session, group_id: int) -> List[dict]`
 - **group_id**: Target group ID.
-- **Returns**: List of member objects.
+- **Returns**: List of member objects (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
-#### `get_messages(session, group_id: int, since_id: int = None, since_ts: str = None, max_id: int = None, progress_callback = None, clear_unread: bool = False) -> List[dict]`
+#### `get_messages(session, group_id: int, since_id: int = None, since_ts: str = None, max_id: int = None, progress_callback = None, clear_unread: bool = False, page_delay: float = 0.5) -> List[dict]`
 - **group_id**: Target group ID.
 - **since_ts**: (Primary cursor, since 0.3.0) ISO timestamp — fetch messages
   published after this time. Prefer this for incremental sync.
@@ -77,6 +135,9 @@ Main API client supporting all Sakamichi groups.
   this group (the official app's chat-open signal). Defaults to `False` so a
   background sync does **not** zero the user's unread count on the official
   mobile app.
+- **page_delay**: Seconds to wait between page requests (default `0.5`). To stay under the
+  API rate limit during long full-history fetches, set `Client.timeline_min_interval` instead
+  (and pass `page_delay=0` so the pause is not doubled).
 - **Returns**: List of message objects (sorted by ID ascending). A full last
   page without a continuation is accepted as the start of the timeline when the
   room's first message (an `order=asc` probe) has the smallest id among the
@@ -86,7 +147,8 @@ Main API client supporting all Sakamichi groups.
   earlier pages were collected, or, while the cursor is still unreached, a full
   page with a repeated continuation (always), a full page with a missing
   continuation (unless the `order=asc` probe confirms the timeline start), or a
-  page that replays already-collected messages.
+  page that replays already-collected messages. On HTTP 429 it raises
+  `RateLimitedError` instead of returning an empty list.
 
 #### `download_file(session, url: str, filepath: Path, timestamp: str = None) -> bool`
 - **url**: Signed media URL. Failure logs carry only its scheme, host, port and path (never the
@@ -96,38 +158,53 @@ Main API client supporting all Sakamichi groups.
 - **Returns**: `True` if success/exists.
 
 #### `get_profile(session) -> Optional[dict]`
-- **Returns**: Dict containing profile info (nickname, etc.) or `None` if failed.
+- **Returns**: Dict containing profile info (nickname, etc.), or `None` when the request failed
+  without raising.
+- **Raises**: `RateLimitedError` on HTTP 429 (not `None`); see "Errors of the GET methods".
 
 #### `get_news(session, count: int = 20) -> List[dict]`
 - **count**: Number of items to fetch (default 20).
-- **Returns**: List of news/announcement items.
+- **Returns**: List of news/announcement items (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
 #### `get_tags(session) -> List[dict]`
-- **Returns**: List of tags.
+- **Returns**: List of tags (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
 #### `get_fc_contents(session, organization_id: int = 1) -> List[dict]`
 - **organization_id**: Organization ID (default 1).
-- **Returns**: List of Fan Club content items.
+- **Returns**: List of Fan Club content items (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
 #### `get_organizations(session) -> List[dict]`
-- **Returns**: List of organizations.
+- **Returns**: List of organizations (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
 #### `get_products(session, product_type: str = None) -> List[dict]`
 - **product_type**: Optional filter (e.g. `'subscription'`, `'fc_subscription'`).
-- **Returns**: List of products.
+- **Returns**: List of products (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
 #### `get_member(session, member_id: int) -> Optional[dict]`
-- **member_id**: The ID of the member.
-- **Returns**: Member details dict or `None` if failed.
+- **member_id**: The member's id.
+- **Returns**: The member dict (`id`, `name`, `thumbnail`, `phone_image`, ...) from
+  `GET /members/{id}`, or `None` when the request failed without raising (e.g. a 4xx other than
+  429) or the body is not a JSON object. Works for members who are no
+  longer in any room's member list.
+- **Raises**: `ApiError` on a server (5xx) or network error; `RateLimitedError`
+  on HTTP 429; `SessionExpiredError` / `RefreshFailedError` on auth failures
+  (propagated from `fetch_json`).
 
 #### `get_account(session) -> Optional[dict]`
-- **Returns**: Account info dict or `None` if failed.
+- **Returns**: Account info dict, or `None` when the request failed without raising.
+- **Raises**: `RateLimitedError` on HTTP 429 (not `None`); see "Errors of the GET methods".
 
 #### `get_letters(session, group_id: int, updated_from: str = None, count: int = 200) -> List[dict]`
 - **group_id**: Target group ID.
 - **updated_from**: ISO timestamp to fetch letters updated after.
 - **count**: Number of letters to fetch (default 200).
-- **Returns**: List of letter objects.
+- **Returns**: List of letter objects (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
 #### `get_past_messages(session, group_id: int, *, strict: bool = False) -> List[dict]  # Optional[List[dict]] when strict=True`
 Messages from the ~1–1.5 days before the account's first subscription to the room (still returned
@@ -138,11 +215,13 @@ or the response has no `messages` list.
   returns `None` instead of `[]`, so it can be told apart from a room with no earlier messages. Type
   checkers see `list[dict]` for `strict=False` and `Optional[list[dict]]` for `strict=True`.
 - **Returns**: List of historical message objects; `None` only when `strict=True` and the request
-  failed or returned no `messages` list.
+  failed without raising or returned no `messages` list.
+- **Raises**: `RateLimitedError` on HTTP 429 (not `[]` or `None`); see "Errors of the GET methods".
 
 #### `get_subscription_streak(session, group_id: int) -> Optional[dict]`
 - **group_id**: Target group ID.
-- **Returns**: Dict with streak information or `None` if failed.
+- **Returns**: Dict with streak information, or `None` when the request failed without raising.
+- **Raises**: `RateLimitedError` on HTTP 429 (not `None`); see "Errors of the GET methods".
 
 #### `post_json(session, endpoint: str, data: dict = None) -> Optional[dict]`
 - **endpoint**: API endpoint path (e.g. `"/messages/123/favorite"`).
@@ -165,12 +244,18 @@ or the response has no `messages` list.
 - **group_id**: Target group ID.
 - Explicitly clears the room's unread count on the server (the official app's
   room-open signal). Opt-in; background sync does not call this.
-- **Returns**: `True` if successful, `False` otherwise.
+- **Returns**: `True` if successful, `False` when the request failed without raising.
+- **Raises**: `RateLimitedError` on HTTP 429 (not `False`); see "Errors of the GET methods".
 
 #### `fetch_json(session, endpoint: str, params: dict = None) -> Optional[dict]`
 Low-level authenticated GET returning parsed JSON (used internally by the
-higher-level `get_*` methods). Handles token refresh and raises `ApiError` on
-non-recoverable HTTP errors. See the `ApiError` example below.
+higher-level `get_*` methods). Handles token refresh. Returns `None` for a 4xx other than 429, a
+401 the refresh could not fix, or an unexpected error while handling the response. Raises
+`ApiError` on a server error (5xx) or a network error / timeout, `RateLimitedError` (a subclass of
+`ApiError`) on HTTP 429 instead of returning `None` (`retry_after` is `None` unless the header is a
+finite, non-negative number; a timeline request during the cooldown after a timeline 429 raises it
+without being sent), and `SessionExpiredError` / `RefreshFailedError` on auth failures.
+See the `ApiError` example below.
 
 #### `refresh_access_token(session) -> bool`
 - **session**: Active aiohttp session.
@@ -215,7 +300,7 @@ High-level manager for syncing messages and media.
 - **client**: Authenticated `Client` instance.
 - **output_dir**: Base directory for downloaded content (already service-specific).
 
-#### `sync_member(session, group: dict, member: dict, media_queue: list, progress_callback = None, prefetched_messages: list = None, *, on_new_messages = None) -> int`
+#### `sync_member(session, group: dict, member: dict, media_queue: list, progress_callback = None, prefetched_messages: list = None, *, on_new_messages = None, ignore_cursor: bool = False) -> int`
 Sync one member's messages, queue their media, and archive the member's profile images.
 - **group** / **member**: Group and member object dicts (as returned by
   `get_groups` / `get_members`).
@@ -228,9 +313,9 @@ Sync one member's messages, queue their media, and archive the member's profile 
   async, called once after a successful write when messages that were not on
   disk before were added. `member_info` has `group_id`, `group_name`,
   `member_id`, `member_name`, `member_dir` (`Path`), `phone_image` and
-  `initial_sync` (`bool`). Not called during corrupt-file/count-mismatch recovery
-  or by `backfill_past_messages`. It is awaited inline, so a slow callback delays
-  that member's sync (hand heavy work off, e.g. schedule a task). Its exceptions
+  `initial_sync` (`bool`). Not called during corrupt-file/count-mismatch recovery,
+  when `ignore_cursor=True`, or by `backfill_past_messages`. It is awaited inline,
+  so a slow callback delays that member's sync (hand heavy work off, e.g. schedule a task). Its exceptions
   are logged (exception type only, never their text) and swallowed.
   - `initial_sync` is True when `messages.json` did not exist before this write;
     `new_messages` is then the member's whole fetched history, not fresh posts, so
@@ -238,11 +323,44 @@ Sync one member's messages, queue their media, and archive the member's profile 
   - The callback runs before the profile-image step, so a just-changed
     `phone_image` may not be archived yet; use the `phone_image` URL from
     `member_info`.
+- **ignore_cursor**: (Optional, default `False`) Take all of this member's rows from
+  `prefetched_messages` (or a full fetch) instead of only those at/after the cursor. Used by a
+  room's one-time history scan so rows older than the cursor (e.g. canceled ones) are merged.
+  Merging is idempotent; the cursor is recomputed from the merged file as usual, except that only
+  messages published at or after the previous cursor can hold it back: an older message whose media
+  is still missing, or that failed to normalize, is still queued (or logged) but does not pull the
+  cursor back to its date (`room_archive_complete` and Verify & Fix cover it). Without a previous
+  cursor every message can hold it back, as in a normal sync. `on_new_messages` is not called for
+  any row merged when `ignore_cursor=True`, including genuinely new posts that arrived since the last
+  sync, so a consumer that notifies should not rely on scan runs.
 - **Returns**: The number of messages **processed** (re-fetched overlap
   included, so not a count of new messages).
+- A message the member withdrew has `state: "canceled"` (or `"cancelled"`, see
+  `pysaka.utils.CANCELED_STATES`) and `canceled_at`, the API's `updated_at`, kept from the first
+  time it was seen (omitted, never `null`, while the API row has no `updated_at`; recorded once a
+  later row has one). The API returns it without text or media, so `content` captured before the
+  withdrawal is kept, also when the fresh `content` is an empty string (and `media_file`, see
+  `update_message_fields`). A canceled text message never seen before is stored with `content` null
+  instead of being skipped; a text message with no text and no media in any state other than
+  canceled (not only `published`) is still skipped.
+  Published messages have neither `state` nor `canceled_at`.
 - On a corrupt or count-short `messages.json`, `sync_member` re-fetches the
   member's true full history from the API (bypassing `prefetched_messages`) and
   merges add-only, so recovery never truncates the archive.
+- Messages without a `member_id` belong to member 0, the room author (`pysaka.roster`). Member 0
+  has no profile images, so none are archived for it, and `backfill_past_messages` and
+  `sync_letters` return 0 for it.
+- A member folder left under an old name (`messages/<gid> */<mid> <old name>`) is renamed to the
+  member's current name instead of creating a second folder, and so is a room folder left under an
+  old room name (`messages/<gid> <old name>`). When both the old and the new folder exist, neither
+  is touched. After a rename, every `media_file` that starts with the old folder is rewritten to the
+  new one in the affected `messages.json` (the member's, or every member folder's for a room
+  rename), keeping the value's own `\` or `/` separators (`media_file` is relative to
+  `output_dir` with the separator of the OS that wrote it). Other values and fields are untouched.
+  A failure to rewrite is logged (file and error type) and does not fail the sync. If the rename
+  itself fails (`OSError`, e.g. a file locked on Windows), a warning with group id, member id and
+  error type is logged and `sync_member` returns 0: nothing is written, the cursor is untouched and
+  profile images are skipped, so the next sync retries the rename.
 
 #### `update_message_fields(messages_file: Path, message_id: int, fields: dict) -> bool` (async, static) / `update_message_fields_sync(messages_file, message_id, fields) -> bool` (blocking, static)
 Set fields on one message under the file's lock. Use this for every local edit of `messages.json`
@@ -272,6 +390,21 @@ failure is logged and never affects the result or the cursor. Returns `{"downloa
   — match by file, never by full URL (CDN URLs can carry changing query strings). If no entry
   matches, the current image has not been archived yet; use the URL in `current[kind]` (this works for
   public CDN URLs only — a signed private URL, such as the account avatar, needs a fresh API URL).
+
+#### `extra_room_members(session, group: dict, api_members: list[dict], messages: list[dict], name_hints: dict[int, dict] = None) -> list[dict]`
+Members to sync for a room in addition to `api_members` (the `/groups/{id}/members` lineup): one
+member dict per author of `messages` missing from `api_members` (ascending id), then member 0
+(`roster.room_author(group)`) when a message has no `member_id`. Rows that sync skips as empty
+(non-canceled `text` messages with no text and no media) are ignored, so they never create an
+author (no empty folder). Sync each with `sync_member` so their messages are no longer dropped. Each dict has at least `id` and `name`, plus `thumbnail`,
+`phone_image` and `portrait` when known. The name is resolved from, first hit wins:
+1. `name_hints[id]` (a member dict with a `name`), returned as given.
+2. The `member` block of a local `messages/* */<id> */messages.json` whose `name` is a non-empty
+   string other than `str(id)`.
+3. `Client.get_member` (cached per `SyncManager`, including a `None` result for unknown ids).
+4. `{"id": id, "name": str(id)}`; a later sync that learns the name renames the folder.
+- **Raises**: `ApiError` from `Client.get_member` (e.g. `RateLimitedError`) propagates and is not
+  cached, so isolate each room in the caller.
 
 #### `backfill_past_messages(session, group: dict, member: dict) -> int`
 Merge the room's pre-subscription messages (`Client.get_past_messages`) into the member's archive
@@ -308,8 +441,9 @@ call. Fetches up to 50 pages of 200 letters per
 call, chaining each page from the last letter's `created_at` (not `updated_at`, which a later
 favorite would push past letters not yet fetched); `letters.json` is written only when its content
 changes or it is created. Before that write (and only when there is something to write), a room
-folder left under an old room name is renamed (as `sync_member` does), so letters and messages share
-one folder.
+folder left under an old room name and a member folder left under an old member name are renamed,
+with their `media_file` paths rewritten (as `sync_member` does), so letters and messages share one
+folder.
 
 `letters.json` shape, sorted by `created_at`:
 `{"version": 1, "letters": [{"id", "member_id", "text", "created_at", "updated_at", "is_favorite",
@@ -319,8 +453,10 @@ thumbnail's size. Returns the number of letters that were not in `letters.json` 
 missing file).
 - **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. A failed fetch does not raise:
   it logs and returns 0 (a corrupt `letters.json` is already set aside by then, so the next call
-  rebuilds it). `OSError` from file I/O after the fetch can
-  propagate (like `backfill_past_messages`), so callers should wrap the call.
+  rebuilds it). A failed folder rename does not raise either: a warning with group id, member id
+  and error type is logged and 0 returned, nothing is written and the letters cursor is untouched.
+  `OSError` from file I/O after the fetch can propagate (like `backfill_past_messages`), so callers
+  should wrap the call.
 
 #### `archive_account_profile(session) -> dict`
 Archive the account's own nickname and avatar for this service. Writes
@@ -379,6 +515,57 @@ then re-check disk truth and persist any new dimension metadata.
 - **timeline_messages**: A freshly fetched member/group timeline supplying new
   signed URLs keyed by `message_id`.
 - **Returns**: `{"repaired": int, "failed": int, "still_missing": int}`.
+
+### One-time history scan
+
+Earlier versions dropped messages from authors missing from `/groups/{id}/members`, so callers
+re-read each room's whole timeline once. The flag lives in `sync_state.json` as
+`room_<gid>: {"history_scanned_at": "<UTC %Y-%m-%dT%H:%M:%SZ>"}`; it never collides with the
+`<gid>_<mid>` member keys, and deleting `sync_state.json` (a force resync) clears it.
+
+#### `history_scanned(group_id: int) -> bool`
+True when `room_<gid>.history_scanned_at` is set.
+
+#### `mark_history_scanned(group_id: int) -> None`
+Set `history_scanned_at` to the current UTC time and save `sync_state.json`. Call it only after
+`room_archive_complete` returned True for the scan's timeline.
+
+#### `room_archive_complete(group: dict, messages: list[dict]) -> bool` (async)
+True when every message id in `messages` that `sync_member` stores is in `messages.json` of its
+author (`roster.author_id`, so member 0 for messages without `member_id`) under
+`messages/<gid> */<author> */`. Messages that sync skips (a text message with no text and no media
+that is not canceled), entries without an `id` and non-dict entries are not expected. An empty list
+is complete, and a stored `"messages": null` counts as empty. Returns False when an author has no
+stored folder or misses an id (a warning with group id, member id and the number missing is
+logged), or when a `messages.json` is unreadable JSON, not a JSON object, or has a `messages` value
+that is not a list (a warning with group id, member id and the reason — `unreadable`,
+`not_an_object` or `messages_not_a_list` — is logged). It catches what a raised exception would
+not: a write that failed (`sync_member` returned 0) or a message that failed to normalize. Reads
+files in a worker thread.
+
+Recommended caller sequence per room when `history_scanned(gid)` is False:
+1. `Client.get_messages(session, gid, page_delay=0)` for the whole timeline, with
+   `client.timeline_min_interval = 3.0` set for the scan (reset it to `0.0` in a `finally`).
+2. `sync_member(..., prefetched_messages=timeline, ignore_cursor=True)` for each API member and
+   each member from `extra_room_members`.
+3. `room_archive_complete(group, timeline)`.
+4. `mark_history_scanned(gid)` only if step 3 returned True; otherwise the next run scans again.
+
+## Roster helpers
+
+### `pysaka.roster`
+Derives who authored a room's messages. `GET /groups/{id}/members` lists only a room's current
+lineup, so rotating-lineup and official rooms hold messages from authors missing from it. No I/O.
+
+- `ROOM_AUTHOR_ID: int = 0`: member id for messages the API returns without `member_id` (the room
+  itself, shown by the official app with the room name and logo).
+- `author_id(message: dict) -> int`: the message's `member_id` when it is an int (bool excluded),
+  the int value of a decimal-digit string, else `ROOM_AUTHOR_ID`.
+- `extra_author_ids(api_member_ids: Iterable[int], messages: Iterable[dict]) -> list[int]`: the
+  authors of `messages` missing from `api_member_ids`, real ids ascending, then `ROOM_AUTHOR_ID`
+  last if any message has no author.
+- `room_author(group: dict) -> dict`: the member dict standing for the room itself,
+  `{"id": 0, "name": group["name"] or str(group["id"]), "thumbnail": group.get("thumbnail")}`.
 
 ## Credentials
 
@@ -562,6 +749,30 @@ try:
     data = await client.fetch_json(session, "/endpoint")
 except ApiError as e:
     print(f"API error (status {e.status_code}): {e}")
+```
+
+### `RateLimitedError`
+Subclass of `ApiError`, raised when the API answers HTTP 429 Too Many Requests.
+Raised by `fetch_json` and by every `Client` method built on it (see "Errors of the GET methods"
+under `Client`), instead of returning `None`, `[]` or `False`. It is also raised, without a
+request being sent, for a timeline request made while the client's timeline cooldown after an
+earlier 429 is running (see "Timeline pacing"); `retry_after` is then the remaining cooldown.
+
+- **status_code**: `429`.
+- **retry_after**: `Optional[float]` - seconds from the `Retry-After` header, or
+  `None` when the header is absent, not a number, not finite (`nan`, `inf`) or negative.
+  For a request refused during the timeline cooldown it is always set: the remaining seconds.
+
+```python
+import asyncio
+
+from pysaka import RateLimitedError
+
+try:
+    members = await client.get_members(session, group_id)
+except RateLimitedError as e:
+    # Back off; retry_after is None when the server sent no usable header
+    await asyncio.sleep(e.retry_after or 60)
 ```
 
 ### `BlogGoneError`

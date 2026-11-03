@@ -399,3 +399,53 @@ class TestRemoveFavorite:
             mock_delete.return_value = False
             result = await client.remove_favorite(MagicMock(), 123)
             assert result is False
+
+
+async def test_get_member_returns_profile(client, mock_session):
+    client.fetch_json = AsyncMock(return_value={"id": 29, "name": "加藤 史帆", "thumbnail": "https://cdn/t.jpg"})
+    member = await client.get_member(mock_session, 29)
+    assert member["name"] == "加藤 史帆"
+    client.fetch_json.assert_awaited_once_with(mock_session, "/members/29")
+
+
+async def test_get_member_none_on_failure(client, mock_session):
+    client.fetch_json = AsyncMock(return_value=None)
+    assert await client.get_member(mock_session, 29) is None
+    client.fetch_json = AsyncMock(return_value=["not", "a", "dict"])
+    assert await client.get_member(mock_session, 29) is None
+
+
+async def test_get_messages_page_delay(client, mock_session, monkeypatch):
+    pages = [
+        {"messages": [{"id": 2, "member_id": 1, "published_at": "2026-01-02T00:00:00Z"}], "continuation": "c1"},
+        {"messages": [{"id": 1, "member_id": 1, "published_at": "2026-01-01T00:00:00Z"}]},
+    ]
+    client.fetch_json = AsyncMock(side_effect=pages)
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", fake_sleep)
+
+    msgs = await client.get_messages(mock_session, 5, page_delay=1.0)
+
+    assert [m["id"] for m in msgs] == [1, 2]
+    assert slept and all(s == 1.0 for s in slept)
+
+
+async def test_get_messages_default_page_delay_unchanged(client, mock_session, monkeypatch):
+    client.fetch_json = AsyncMock(
+        side_effect=[
+            {"messages": [{"id": 2, "member_id": 1, "published_at": "2026-01-02T00:00:00Z"}], "continuation": "c1"},
+            {"messages": [{"id": 1, "member_id": 1, "published_at": "2026-01-01T00:00:00Z"}]},
+        ]
+    )
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", fake_sleep)
+    await client.get_messages(mock_session, 5)
+    assert slept and all(s == 0.5 for s in slept)
