@@ -58,20 +58,21 @@ Non-goals:
 
 New `pysaka.roster` module (pure helpers) plus `SyncManager` methods.
 
-`SyncManager.room_tasks(session, group, api_members, messages, name_hints) -> list[dict]`
-returns the member dicts to sync for one room:
+`SyncManager.extra_room_members(session, group, api_members, messages, name_hints=None) -> list[dict]`
+returns the member dicts a caller must sync **in addition to** `api_members` for one
+room:
 
-1. `api_members` (unchanged order).
-2. Every distinct `member_id` in `messages` that is not in `api_members`. These are
-   called *extra authors*.
-3. A *room author* (`id` 0) if any message in `messages` has no `member_id`.
+1. Every distinct `member_id` in `messages` that is not in `api_members`, ascending.
+   These are called *extra authors*.
+2. Then a *room author* (`id` 0) if any message in `messages` has no `member_id`.
 
 Resolving an extra author's member dict (name, thumbnail, phone_image), first match
 wins:
 
 1. `name_hints`: id → member dict from every room's API member list already fetched in
    this sync. Sync fetches every room's list anyway.
-2. The member block of an existing local `messages/<gid> */<mid> */messages.json`.
+2. The member block of an existing local `messages/* */<mid> */messages.json` (any
+   room of this service).
 3. `Client.get_member(session, member_id)` → `GET /members/{id}` (new; returns None on
    failure). Called at most once per id per `SyncManager` instance (in-memory cache).
 4. Fallback `{"id": mid, "name": str(mid)}`. A message is never dropped because a name
@@ -91,7 +92,7 @@ Folder renames:
   member renamed), it is renamed first. This uses the same approach as
   `_ensure_group_dir`, with a new `_ensure_member_dir`.
 
-Extra authors use the normal `sync_member` with the prefetched timeline. Their cursor
+Extra authors (and member 0) use the normal `sync_member` with the prefetched timeline. Their cursor
 is None the first time, so they take every prefetched message of theirs. Their own
 `sync_state` cursor, `messages.json` and media then work like any member's.
 
@@ -110,18 +111,29 @@ Why no extra fetch is needed for an extra author:
 - `sync_state["room_<gid>"]["history_scanned_at"]` (UTC ISO). The key never collides
   with `<gid>_<mid>` entries.
 - While it is missing, that room's fetch is a full fetch (`since_ts=None`), and
-  `room_tasks` runs on the full timeline.
+  `extra_room_members` runs on the full timeline.
+- During a scan every task of the room (API members included) runs
+  `sync_member(..., ignore_cursor=True)`. A member's cursor otherwise hides older
+  messages it skipped. For example, room 33 has 3 canceled messages from member 33 older
+  than her cursor, and rooms 53/72/86/87 have the same. The scan would then never be
+  complete. Merging is idempotent, and the cursor is recomputed from the merged file as
+  usual.
 - The flag is set only when all of these hold:
   - the full fetch returned without raising;
   - every task of that room returned without raising;
-  - every task's cursor was written.
+  - `SyncManager.room_archive_complete(group, messages)` is True: every fetched message
+    id is present in its author's `messages.json` (member 0 for messages without
+    `member_id`). This catches a write that failed without raising (`sync_member`
+    returns 0 then) and a message that failed to normalize.
+- `SyncManager.history_scanned(group_id) -> bool` and
+  `SyncManager.mark_history_scanned(group_id)` read and write the flag.
 - A failure leaves the flag unset, and the next sync scans again. Merging is
   idempotent.
 
 Pacing. The scan re-reads whole rooms; 2026-11-03's unpaced probes hit HTTP 429.
 
-- `Client.get_messages(..., page_delay: float = 0.0)` sleeps `page_delay` seconds
-  between page requests.
+- `Client.get_messages(..., page_delay: float = 0.5)` sleeps `page_delay` seconds
+  between page requests. 0.5 s is today's hard-coded pause, so the default is unchanged.
 - Scans use `page_delay=1.0`.
 - In SakaDesk, rooms that need a scan run one at a time behind an `asyncio.Semaphore(1)`.
   Rooms that only need an incremental fetch keep running concurrently as today.
@@ -170,6 +182,7 @@ Change:
   and the stored record has `content`, the stored content is kept.
   `canceled_at` is set to the fresh `updated_at`. It is recorded on first sight only;
   later syncs keep it.
+- `utils.normalize_message` sets `canceled_at` from `updated_at` for a canceled message.
 - A canceled message seen for the first time (nothing stored) is stored as a skeleton:
   - `id`, `timestamp`, `type`, `state`, `canceled_at`, `content: null`;
   - no media.
@@ -183,55 +196,63 @@ Change:
 
 Sync:
 
-- `sync_group` passes the room's fetched timeline and `name_hints` to
-  `manager.room_tasks`. It then syncs the extra tasks after the API tasks, with the same
-  backfill, letters and profile steps. Backfill, letters and profile images are skipped
-  for member 0.
+- `sync_group` passes the room's fetched timeline and `name_hints` (every API member
+  of this sync, by id) to `manager.extra_room_members`. It then syncs the extra members
+  after the API members, with the same backfill and letters steps. pysaka skips
+  backfill, letters and profile images for member 0. Extra members bypass the
+  `initial_limit` first-sync cap (default 0, i.e. off).
+- A failure in `extra_room_members` is logged and the room continues with no extra
+  members. The scan flag then stays unset because `room_archive_complete` is False.
 - Rooms with no `history_scanned_at` are fetched in full behind the scan semaphore with
   `page_delay=1.0`.
-- `metadata["groups"]` entries for extra authors and member 0 get `"listed": false`.
-  The check-new-messages path (`members_by_group`) skips `listed: false` entries. Their
-  2021–2022 cursors would otherwise widen every check back to 2021.
+- Extra members are never added to `metadata["groups"]`. The check-new-messages path
+  (`members_by_group`) reads only that map, so their 2021–2022 cursors never widen a
+  check. The check itself is unchanged.
 
 Progress:
 
 - `progress` gains `extend_total(n)`. `sync_group` calls it with the number of extra
   tasks, so "members" never exceeds its total.
-- While a room is scanned, the detail line reads `sync.scanningHistory`, a new i18n key
-  in en/ja/zh-TW/zh-CN/yue. Suggested zh-TW: 「首次完整掃描聊天室歷史…」.
+- While a room is scanned, `progress` carries `detail_code: "scanning_history"`
+  (new status field, cleared by `start_phase`). The frontend shows `sync.scanningHistory`,
+  a new i18n key in en/ja/zh-TW/zh-CN/yue (zh-TW: 「首次完整掃描聊天室歷史…」), ahead
+  of the detail text.
 - No new components.
 
 New-message accounting:
 
-- Messages written for an extra author on that author's first write
-  (`initial_sync=True`) and every message written during a history scan are excluded
-  from `new_messages` totals and notifications.
-- They are indexed for search the same way backfilled messages are (`full_member_scan`).
+- Counts from every task of a room scanned in this sync, and from an extra member that
+  had no cursor before this sync, are excluded from the `new_messages` total and
+  notifications. `ignore_cursor` makes a scan's counts the whole history. Metadata
+  cursors still update from the real counts.
+- Those members are indexed for search the same way backfilled members are
+  (`full_member_scan`).
 
 Display:
 
 - A room with more than one member folder is already a group chat (`content.py`
   `is_group_chat`), so 日向坂46 and 櫻坂46 become group chats with per-message authors.
-- Member 0 renders with the room name and room thumbnail. Its avatar opens no profile
-  card, pills or context menu.
-- `profile_images_service` returns no entries for member 0.
+- Member 0 renders with the room name and room thumbnail (its `messages.json` member
+  block). In `MessageList`, a message with `member_id === 0` gets no `onAvatarClick`.
+  The context menu is only offered for 1:1 rooms, so member 0 never reaches it.
 
 ## 8. saka-cli
 
-`cli.py` Phase 2 builds tasks from `get_members`. It switches to `manager.room_tasks`
-after the room fetch, with the same scan flag and `page_delay`. No new CLI flags.
+`cli.py` Phase 2 builds tasks from `get_members`. After the room fetch it adds
+`manager.extra_room_members`, uses a full fetch with `page_delay=1.0` while the room is
+not `history_scanned`, and marks it after `room_archive_complete`. No new CLI flags.
 
 ## 9. Testing
 
 pysaka (TDD):
 
-- `room_tasks`:
+- `extra_room_members`:
   - union and order;
   - name resolution order, including an unknown id falling back to `str(mid)` and then
     the folder renamed once resolved;
   - member 0;
   - `get_member` called once per id.
-- `sync_member` with a member-0 filter.
+- `sync_member` with a member-0 filter, and `ignore_cursor=True` merging messages older than the cursor.
 - Scan flag:
   - set only on full success;
   - unset on a raised fetch or a failed task;
@@ -250,10 +271,10 @@ pysaka (TDD):
 SakaDesk:
 
 - `sync_group` adds extra tasks and extends progress.
-- `listed: false` entries are skipped by the check-new path.
+- Extra members are not written to `metadata["groups"]`.
 - Scan rooms run sequentially.
 - Recovered messages are excluded from new counts and included in search.
-- Member 0 gets no profile entries.
+- A member-0 message has no avatar click handler.
 - Force resync rescans.
 
 Windows check on the archive copy `C:\D\saka-verify`:
@@ -266,7 +287,8 @@ Windows check on the archive copy `C:\D\saka-verify`:
 
 ## 10. Release
 
-- pysaka 0.4.6 (minor additive API: `room_tasks`, `get_member`, `RateLimitedError`,
+- pysaka 0.4.6 (minor additive API: `extra_room_members`, `history_scanned`, `mark_history_scanned`,
+  `room_archive_complete`, `get_member`, `sync_member(ignore_cursor=)`, `RateLimitedError`,
   `get_messages(page_delay=)`). The 429 behaviour change goes in the changelog under
   Changed.
 - SakaDesk pins `pysaka==0.4.6`.
