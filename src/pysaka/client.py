@@ -2,6 +2,8 @@ import asyncio
 import contextlib
 import math
 import os
+import re
+import time
 from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
@@ -17,6 +19,9 @@ from .exceptions import ApiError, RateLimitedError, RefreshFailedError, SessionE
 from .utils import get_jwt_remaining_seconds, get_media_extension, media_file_is_present
 
 logger = structlog.get_logger()
+
+# Endpoint path of a group's timeline; the only endpoint ``timeline_min_interval`` paces.
+_TIMELINE_ENDPOINT = re.compile(r"^/groups/\d+/timeline$")
 
 
 def _redact_url(url: str) -> str:
@@ -138,6 +143,7 @@ class Client:
         auth_dir: Optional[Union[str, Path]] = None,
         use_token_storage: bool = False,
         platform: str = "web",
+        timeline_min_interval: float = 0.0,
     ):
         """
         Initialize the client.
@@ -152,9 +158,13 @@ class Client:
             use_token_storage: If True, attempts to load/save credentials using system keyring (or file fallback).
             platform: Request profile — "web" (default, browser-like) or "android"
                 (Flutter app: Dart UA, mobile host, x-talk-app-platform=android).
+            timeline_min_interval: Minimum seconds between the starts of two
+                ``/groups/{id}/timeline`` requests made through this client
+                (default 0.0 = no pacing). See the ``timeline_min_interval`` property.
 
         Raises:
-            ValueError: If an invalid group string is provided.
+            ValueError: If an invalid group string is provided, or
+                ``timeline_min_interval`` is negative or NaN.
         """
         if isinstance(group, str):
             try:
@@ -194,6 +204,15 @@ class Client:
         # loop". Deferring creation to the running loop avoids that.
         self._refresh_lock: Optional[asyncio.Lock] = None
 
+        # Timeline pacing (see the ``timeline_min_interval`` property). The lock is
+        # created lazily for the same reason as ``_refresh_lock``.
+        self._timeline_min_interval = 0.0
+        self._timeline_lock: Optional[asyncio.Lock] = None
+        self._timeline_last_start: Optional[float] = None
+        self._timeline_paced_requests = 0
+        self._timeline_waited = 0.0
+        self.timeline_min_interval = timeline_min_interval
+
         # Platform profile: "web" (default) mimics the browser client;
         # "android" mimics the Flutter/Dart app (different UA, host, headers).
         if platform not in ("web", "android"):
@@ -223,6 +242,62 @@ class Client:
         self.headers = self._build_headers()
         if self.access_token:
             self.headers["Authorization"] = f"Bearer {self.access_token}"
+
+    @property
+    def timeline_min_interval(self) -> float:
+        """Minimum seconds between the starts of two timeline requests (0.0 = off).
+
+        While above 0, every HTTP request to ``/groups/{id}/timeline`` made through
+        this client (``get_messages`` pages, the ``order=asc`` probe, the 401 retry
+        inside ``fetch_json``, ``mark_group_read``) waits so that consecutive request
+        starts are at least this many seconds apart, also under concurrent callers.
+        Other endpoints and CDN downloads are never paced. May be changed at any time;
+        setting a negative or NaN value raises ``ValueError``. Pacing is per client,
+        i.e. per service. Callers that enable it can pass ``page_delay=0`` to
+        ``get_messages`` so the pause is not doubled.
+        """
+        return self._timeline_min_interval
+
+    @timeline_min_interval.setter
+    def timeline_min_interval(self, value: float) -> None:
+        value = float(value)
+        if math.isnan(value) or value < 0:
+            raise ValueError(f"timeline_min_interval must be >= 0, got {value}")
+        old = self._timeline_min_interval
+        if value == old:
+            return
+        if value == 0.0 and self._timeline_paced_requests:
+            logger.info(
+                "Timeline pacing summary",
+                requests=self._timeline_paced_requests,
+                waited_seconds=round(self._timeline_waited, 3),
+            )
+        if old == 0.0:
+            self._timeline_paced_requests = 0
+            self._timeline_waited = 0.0
+        self._timeline_min_interval = value
+        logger.debug("Timeline pacing set", interval=value)
+
+    async def _pace_timeline(self, endpoint: str) -> None:
+        """Wait until a request to ``endpoint`` may start (timeline endpoints only).
+
+        Serialised with one lock per client; the start time is recorded after any
+        wait, so concurrent callers queue up ``timeline_min_interval`` apart.
+        """
+        if self._timeline_min_interval <= 0 or not _TIMELINE_ENDPOINT.match(endpoint):
+            return
+        if self._timeline_lock is None:
+            self._timeline_lock = asyncio.Lock()
+        async with self._timeline_lock:
+            interval = self._timeline_min_interval  # may have changed while queued
+            if interval > 0:
+                if self._timeline_last_start is not None:
+                    wait = self._timeline_last_start + interval - time.monotonic()
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                        self._timeline_waited += wait
+                self._timeline_paced_requests += 1
+            self._timeline_last_start = time.monotonic()
 
     def _build_headers(self) -> dict[str, str]:
         """Build request headers for the active platform profile.
@@ -281,7 +356,9 @@ class Client:
 
         Args:
             session: Active aiohttp ClientSession.
-            endpoint: API endpoint path (e.g. "/groups").
+            endpoint: API endpoint path (e.g. "/groups"). Requests to
+                ``/groups/{id}/timeline``, including the retry after a 401, wait
+                first when ``timeline_min_interval`` is above 0.
             params: Query parameters.
 
         Returns:
@@ -299,6 +376,7 @@ class Client:
         url = f"{self.api_base}{endpoint}"
         logger.debug("API GET request", endpoint=endpoint, params=params)
         try:
+            await self._pace_timeline(endpoint)
             async with session.get(url, headers=self.headers, params=params) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -308,6 +386,7 @@ class Client:
                     logger.warning("API returned 401 Unauthorized", endpoint=endpoint, will_retry=True)
                     if await self.refresh_access_token(session):
                         # Retry the request with new token
+                        await self._pace_timeline(endpoint)
                         async with session.get(url, headers=self.headers, params=params) as resp_retry:
                             if resp_retry.status == 200:
                                 return await resp_retry.json()

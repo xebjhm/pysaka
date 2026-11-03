@@ -148,6 +148,56 @@ Force resync:
 Media for recovered messages goes through the normal media queue and the existing
 pending-media cursor hold.
 
+## 4a. Timeline pacing and the 429 circuit breaker
+
+Evidence (Windows dev-build log, 2026-11-03, plus the live app logs):
+
+- Only `/groups/{id}/timeline` ever returned 429. In the same minutes `/groups/{id}/letters`
+  (56 OK), `/groups/{id}/past_messages` (32 OK), `/members/{id}` (20 OK),
+  `/groups/{id}/members`, `/groups` and `/profile` all succeeded.
+- Timeline requests before each 429:
+
+  | 429 at | last 60 s | last 5 min |
+  |---|---|---|
+  | 12:20:53 | 37 | 172 (155 continuation pages) |
+  | 12:27:13 | 35 | 189 (161 continuation pages) |
+
+- The live app (incremental syncs only, since July) never got a 429. Its busiest window was
+  100 timeline requests in 5 minutes.
+- The cooldown is under about 2.5 minutes; the next sync at 12:23 succeeded.
+- Limits are per service (each service has its own API host; the 429s hit hinatazaka only).
+
+Decisions (user, 2026-11-03):
+
+- Pace only timeline requests, per service: at most one request start every 3.0 s (20/min,
+  100 per 5 min, the live app's proven-safe level).
+- Pace only during syncs that contain a history scan. Normal incremental syncs are unaffected
+  and never touch the setting.
+- Add a 429 circuit breaker per sync as the safety valve: once any call raises
+  `RateLimitedError`, rooms that have not started their timeline fetch are deferred (no cursor
+  moves, no scan mark; the next sync retries them), while rooms already past their fetch finish
+  normally.
+- Both go into 0.4.6, and every decision and failure path logs a structured breadcrumb (ids,
+  counts, elapsed time, error types only).
+
+pysaka API: `Client.timeline_min_interval: float` (default `0.0` = off, also a constructor
+keyword, settable at any time).
+
+- While above 0, every HTTP request to `/groups/{id}/timeline` made through the client waits so
+  that consecutive request starts are at least that many seconds apart. That covers all
+  `get_messages` pages, the `order=asc` probe (`_timeline_first_id`) and the 401 retry inside
+  `fetch_json`. Other endpoints and CDN downloads are never paced.
+- Concurrency-safe: one lazily created `asyncio.Lock` per client plus the `time.monotonic()` of
+  the last start; waiting uses `await asyncio.sleep`.
+- `get_messages(page_delay=)` stays. Callers that enable the interval may pass `page_delay=0`.
+- Logging: debug `Timeline pacing set` (`interval`) on each change, and one info
+  `Timeline pacing summary` (`requests`, `waited_seconds`) when pacing is switched off after
+  pacing at least one request.
+
+SakaDesk and saka-cli (sections 7 and 8) set the interval to 3.0 only while a sync has
+rooms to scan, reset it in a `finally`, pass `page_delay=0` for scans, and implement the
+circuit breaker with a per-sync `rate_limited` flag.
+
 ## 5. HTTP 429
 
 `Client.fetch_json` returns None for 429 today (the "unexpected status" branch). So:

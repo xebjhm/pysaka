@@ -50,7 +50,7 @@ on HTTP 429 instead of returning its failure value (`None`, `[]` or `False`). Th
 without raising: a 4xx other than 429, a 401 the token refresh could not fix, or an unexpected
 error while handling the response.
 
-#### `__init__(group: Union[Group, str] = Group.HINATAZAKA46, access_token: str = None, refresh_token: str = None, cookies: dict = None, app_id: str = None, user_agent: str = None, auth_dir: Union[str, Path] = None, use_token_storage: bool = False, platform: str = "web")`
+#### `__init__(group: Union[Group, str] = Group.HINATAZAKA46, access_token: str = None, refresh_token: str = None, cookies: dict = None, app_id: str = None, user_agent: str = None, auth_dir: Union[str, Path] = None, use_token_storage: bool = False, platform: str = "web", timeline_min_interval: float = 0.0)`
 - **group**: Target group, enum or string (default `Group.HINATAZAKA46`).
 - **access_token** / **refresh_token** / **cookies**: Credentials from
   `BrowserAuth.login`. `cookies` are required for the web-session refresh path.
@@ -63,7 +63,31 @@ error while handling the response.
 - **platform**: Request profile — `"web"` (default, browser-like) or `"android"`
   (Flutter app: Dart UA, per-group mobile host, `x-talk-app-platform=android`).
   Android mode refreshes via `refresh_token` only (never web cookies).
-- **Raises**: `ValueError` if an invalid group string is provided.
+- **timeline_min_interval**: Minimum seconds between the starts of two
+  `/groups/{id}/timeline` requests made through this client (default `0.0` = off).
+  Also available as the settable attribute `Client.timeline_min_interval`; see
+  "Timeline pacing" below.
+- **Raises**: `ValueError` if an invalid group string is provided, or
+  `timeline_min_interval` is negative or NaN.
+
+#### Timeline pacing: `Client.timeline_min_interval: float`
+Only `/groups/{id}/timeline` is rate-limited by the API (HTTP 429), and only when it is hit
+hundreds of times in a few minutes, as during a one-time history scan. While the attribute is
+above `0`, every HTTP request to a group's timeline made through this client waits so that
+consecutive request **starts** are at least that many seconds apart. That covers every
+`get_messages` page, its `order=asc` probe, `mark_group_read`, and the retry after a 401 inside
+`fetch_json`. Other endpoints (`/groups/{id}/letters`, `/members/{id}`, ...) and CDN downloads
+are never paced.
+- The default `0.0` never sleeps. The value can be changed at any time (for example, set `3.0`
+  before a history scan and back to `0.0` in a `finally`); a negative or NaN value raises
+  `ValueError`.
+- Safe under concurrent callers: waits are serialised per client, so tasks that share a client
+  also share the spacing. Each client (one per service) paces independently.
+- `get_messages(page_delay=)` is unchanged and adds to the pacing; pass `page_delay=0` when
+  the interval is enabled so the pause is not doubled.
+- Logging: `Timeline pacing set` (debug, `interval`) whenever the value changes, and one
+  `Timeline pacing summary` (info, `requests`, `waited_seconds`) when pacing is switched
+  back to `0.0` after at least one paced request.
 
 #### `get_groups(session: aiohttp.ClientSession, include_inactive: bool = False) -> List[dict]`
 - **session**: Active aiohttp session.
@@ -496,7 +520,9 @@ not: a write that failed (`sync_member` returned 0) or a message that failed to 
 files in a worker thread.
 
 Recommended caller sequence per room when `history_scanned(gid)` is False:
-1. `Client.get_messages(session, gid, page_delay=1.0)` for the whole timeline.
+1. `Client.get_messages(session, gid, page_delay=1.0)` for the whole timeline. To stay under
+   the timeline rate limit set `client.timeline_min_interval = 3.0` for the scan (reset it to
+   `0.0` afterwards) and pass `page_delay=0`.
 2. `sync_member(..., prefetched_messages=timeline, ignore_cursor=True)` for each API member and
    each member from `extra_room_members`.
 3. `room_archive_complete(group, timeline)`.
