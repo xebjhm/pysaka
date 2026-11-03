@@ -12,7 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   requests configurable (default unchanged).
 - `pysaka.roster` (`ROOM_AUTHOR_ID`, `author_id`, `extra_author_ids`,
   `room_author`) and `SyncManager.sync_member(..., ignore_cursor=True)`, which merges a
-  member's rows older than the cursor and does not call `on_new_messages`.
+  member's rows older than the cursor and does not call `on_new_messages` (not
+  even for posts that arrived since the last sync). Only messages at or after
+  the previous cursor can hold the cursor back: an old message with missing
+  media or a failed normalize no longer pins it to that old date.
+- `SyncManager.prepare_messages(..., cursor_floor=None)`: when set, only
+  messages published at or after it count toward the returned earliest
+  failed / pending-media timestamps.
 - `SyncManager.extra_room_members(session, group, api_members, messages, name_hints=None)`
   returns the authors of a room's timeline missing from `/groups/{id}/members`
   (earlier lineups, members posting in official rooms) plus member 0 for
@@ -31,7 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sync_member` assigns messages without `member_id` to member 0 (the room
   itself) instead of no member, and renames
   `messages/<gid> */<mid> <old name>` to the member's current name instead of
-  creating a second folder.
+  creating a second folder. If a member or room folder rename fails
+  (`OSError`, e.g. a file locked on Windows), `sync_member` and `sync_letters`
+  log a warning and return
+  0 without writing or moving a cursor (before: the error escaped
+  `sync_member`).
 - `Client.get_member(session, member_id)` now returns None when the response
   body is not a JSON object (before: the raw body). It also works for members
   who are no longer in any room's member list (e.g. graduated members who

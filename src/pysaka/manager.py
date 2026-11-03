@@ -472,6 +472,25 @@ class SyncManager:
                     break
         return member_dir
 
+    def _renamed_member_dir(self, group: dict[str, Any], member_id: int, name: str) -> Optional[Path]:
+        """:meth:`_ensure_group_dir` + :meth:`_ensure_member_dir`, or None when a rename failed.
+
+        A failed rename (``OSError``, e.g. a file locked on Windows) is logged as a
+        warning with group id, member id and the error type; the caller must then
+        skip the member without writing anything or moving a cursor, so the next
+        sync retries the rename instead of creating a second folder.
+        """
+        try:
+            return self._ensure_member_dir(self._ensure_group_dir(group), member_id, name)
+        except OSError as e:
+            logger.warning(
+                "Sync skipped: folder rename failed",
+                group_id=group["id"],
+                member_id=member_id,
+                error_type=type(e).__name__,
+            )
+            return None
+
     def _rewrite_media_paths(self, messages_file: Path, old_dir: Path, new_dir: Path) -> None:
         """After renaming ``old_dir`` to ``new_dir``, point ``media_file`` values at the new folder.
 
@@ -586,8 +605,15 @@ class SyncManager:
                 (or a full fetch) instead of only those at/after the cursor. Used by a
                 room's one-time history scan so rows older than the cursor (e.g.
                 canceled ones) are merged. Merging is idempotent; the cursor is
-                recomputed from the merged file as usual. ``on_new_messages`` is not
-                called, because rows recovered from before the cursor are not new.
+                recomputed from the merged file as usual, except that only messages
+                published at or after the previous cursor can hold it back: an older
+                message whose media is still missing, or that failed to normalize, is
+                still queued (or logged) but does not pull the cursor back to its date
+                (``room_archive_complete`` and Verify & Fix cover it). Without a
+                previous cursor every message can hold it back, as in a normal sync.
+                ``on_new_messages`` is not called for any row merged in this call,
+                including genuinely new posts that arrived since the last sync, so a
+                consumer that notifies should not rely on scan runs.
 
         Messages without a ``member_id`` belong to member 0, the room author (see
         :mod:`pysaka.roster`). Member 0 has no profile images, so none are
@@ -595,6 +621,12 @@ class SyncManager:
         left under an old room name) is renamed to the current name instead of
         creating a second folder, and ``media_file`` paths into the old folder are
         rewritten in the affected ``messages.json`` files.
+
+        If a room or member folder left under an old name cannot be renamed
+        (``OSError``, e.g. a file locked on Windows), a warning with group id,
+        member id and error type is logged and 0 is returned: nothing is written,
+        the cursor is untouched and profile images are skipped, so the next sync
+        retries the rename.
 
         Returns:
             Number of messages processed in this run (includes re-fetched
@@ -610,6 +642,10 @@ class SyncManager:
             on_new_messages=on_new_messages,
             ignore_cursor=ignore_cursor,
         )
+        if processed is None:
+            # A folder rename failed: archiving profile images now would create the
+            # new folder next to the old one and split the archive.
+            return 0
         if member["id"] != roster.ROOM_AUTHOR_ID:
             await self._archive_profile_images_safely(session, group, member)
         return processed
@@ -859,7 +895,10 @@ class SyncManager:
                 failed (other unexpected errors after the fetch also propagate),
                 so callers should wrap the call. A failed fetch does not raise: it
                 logs and returns 0 (a corrupt ``letters.json`` is already set aside
-                by then, so the next call rebuilds it).
+                by then, so the next call rebuilds it). A failed folder rename does
+                not raise either: a warning with group id, member id and error type
+                is logged and 0 returned, nothing is written and the letters cursor
+                is untouched.
 
         Returns:
             Number of letters that were not in ``letters.json`` before (all of
@@ -967,8 +1006,10 @@ class SyncManager:
                 return (None if merged == current else merged), new_count
 
             # Rename a renamed room's / member's folder before creating anything.
-            group_dir = self._ensure_group_dir(group)
-            member_dir = self._ensure_member_dir(group_dir, mid, sanitize_name(member["name"]))
+            renamed = self._renamed_member_dir(group, mid, sanitize_name(member["name"]))
+            if renamed is None:
+                return 0
+            member_dir = renamed
             member_dir.mkdir(parents=True, exist_ok=True)
             try:
                 wrote, added = await asyncio.to_thread(self._locked_update, letters_file, mutate)
@@ -1141,13 +1182,14 @@ class SyncManager:
         *,
         on_new_messages: Optional[Callable[[dict[str, Any], list[dict[str, Any]]], Any]] = None,
         ignore_cursor: bool = False,
-    ) -> int:
+    ) -> Optional[int]:
         """
         Message part of :meth:`sync_member` (see there for arguments).
 
         Returns:
             Number of messages processed in this run (re-fetched overlap
-            included).
+            included), or None when a room/member folder rename failed (nothing
+            was written and the cursor is untouched).
         """
         gid = group["id"]
         mid = member["id"]
@@ -1155,9 +1197,10 @@ class SyncManager:
 
         # output_dir is already service-specific (e.g., output/日向坂46/)
         # so we only need to add messages/ and the group directory
-        group_dir = self._ensure_group_dir(group)
-
-        member_dir = self._ensure_member_dir(group_dir, mid, mname)
+        renamed = self._renamed_member_dir(group, mid, mname)
+        if renamed is None:
+            return None
+        member_dir = renamed
         member_dir.mkdir(parents=True, exist_ok=True)
         for t in ["picture", "video", "voice"]:
             (member_dir / t).mkdir(exist_ok=True)
@@ -1280,8 +1323,12 @@ class SyncManager:
                 return 0
 
             # Process & Prepare (on the recovered full set when recovering)
+            # A scan re-reads rows older than the cursor. Their missing media or a
+            # failed normalize must not drag the cursor back to an old date for good
+            # (every later sync would re-read from there): room_archive_complete and
+            # Verify & Fix cover those rows. Rows at/after the old cursor still clamp.
             processed, earliest_failed_ts, earliest_pending_media_ts = self.prepare_messages(
-                messages, member_dir, media_queue
+                messages, member_dir, media_queue, cursor_floor=last_ts if ignore_cursor else None
             )
 
             member_block = {
@@ -1391,7 +1438,12 @@ class SyncManager:
             return 0
 
     def prepare_messages(
-        self, messages: list[dict[str, Any]], member_dir: Path, queue: list[dict[str, Any]]
+        self,
+        messages: list[dict[str, Any]],
+        member_dir: Path,
+        queue: list[dict[str, Any]],
+        *,
+        cursor_floor: Optional[str] = None,
     ) -> tuple[list[dict[str, Any]], Optional[str], Optional[str]]:
         """
         Normalize messages and queue media downloads.
@@ -1400,6 +1452,10 @@ class SyncManager:
             messages: List of raw message dicts.
             member_dir: Directory for member's files.
             queue: Media download waiting queue.
+            cursor_floor: When set, only messages whose ``published_at`` is at or
+                after it count toward ``earliest_failed_ts`` and
+                ``earliest_pending_media_ts`` (older ones are still queued, and
+                logged when they fail). None (default): every message counts.
 
         Returns:
             A tuple ``(processed, earliest_failed_ts, earliest_pending_media_ts)``.
@@ -1456,8 +1512,9 @@ class SyncManager:
                         # Hold the cursor behind this message until its media is on
                         # disk, so an interrupted download is re-fetched next run.
                         pending_ts = msg.get("published_at") or ""
-                        if earliest_pending_media_ts is None or pending_ts < earliest_pending_media_ts:
-                            earliest_pending_media_ts = pending_ts
+                        if cursor_floor is None or pending_ts >= cursor_floor:
+                            if earliest_pending_media_ts is None or pending_ts < earliest_pending_media_ts:
+                                earliest_pending_media_ts = pending_ts
 
                     p_msg["media_file"] = str(filepath.relative_to(self.output_dir))
 
@@ -1480,8 +1537,9 @@ class SyncManager:
                 # Track the oldest failure's timestamp so the caller can hold the
                 # cursor behind it and re-fetch next run instead of losing it.
                 failed_ts = msg.get("published_at") or ""
-                if earliest_failed_ts is None or failed_ts < earliest_failed_ts:
-                    earliest_failed_ts = failed_ts
+                if cursor_floor is None or failed_ts >= cursor_floor:
+                    if earliest_failed_ts is None or failed_ts < earliest_failed_ts:
+                        earliest_failed_ts = failed_ts
                 logger.error("Prepare error", message_id=mid, error=str(e))
         return processed, earliest_failed_ts, earliest_pending_media_ts
 

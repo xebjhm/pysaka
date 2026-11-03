@@ -299,3 +299,122 @@ def test_media_path_rewrite_leaves_unreadable_file_alone(manager):
     (room / "22 22" / "messages.json").write_text("{broken", encoding="utf-8")
     manager._ensure_member_dir(room, 22, "潮 紗理菜")
     assert (room / "22 潮 紗理菜" / "messages.json").read_text(encoding="utf-8") == "{broken"
+
+
+def _rename_fails(monkeypatch):
+    def boom(self, target):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(Path, "rename", boom)
+
+
+@pytest.mark.parametrize("old_folder", ["43 日向坂46/22 22", "43 旧ルーム/22 潮 紗理菜"])
+async def test_sync_member_returns_zero_when_folder_rename_fails(manager, monkeypatch, old_folder):
+    old = manager.output_dir / "messages" / old_folder
+    _write_messages(old, [{"id": 5, "timestamp": "2021-09-16T06:37:53Z", "type": "text"}])
+    manager.sync_state["43_22"] = {"last_sync_ts": "2021-09-16T06:37:53Z", "total_messages": 1}
+    manager.archive_profile_images = AsyncMock()
+    _rename_fails(monkeypatch)
+
+    with structlog.testing.capture_logs() as logs:
+        processed = await manager.sync_member(
+            AsyncMock(),
+            GROUP,
+            {"id": 22, "name": "潮 紗理菜"},
+            [],
+            prefetched_messages=[_m(6, "2021-09-17T00:00:00Z", 22)],
+        )
+
+    assert processed == 0
+    assert manager.sync_state["43_22"] == {"last_sync_ts": "2021-09-16T06:37:53Z", "total_messages": 1}
+    assert [p.relative_to(manager.output_dir / "messages").as_posix() for p in old.parent.parent.glob("*/*")] == [
+        old_folder
+    ]
+    manager.archive_profile_images.assert_not_awaited()
+    warning = [e for e in logs if e["event"] == "Sync skipped: folder rename failed"]
+    assert warning == [
+        {
+            "event": "Sync skipped: folder rename failed",
+            "log_level": "warning",
+            "group_id": 43,
+            "member_id": 22,
+            "error_type": "PermissionError",
+        }
+    ]
+
+
+async def test_sync_letters_returns_zero_when_folder_rename_fails(manager, monkeypatch):
+    old = manager.output_dir / "messages" / "43 日向坂46" / "22 22"
+    _write_messages(old, [])
+    letter = {
+        "id": 1,
+        "member_id": 22,
+        "text": "手紙",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }
+    manager.client.get_letters = AsyncMock(return_value=[letter])
+    _rename_fails(monkeypatch)
+
+    with structlog.testing.capture_logs() as logs:
+        assert await manager.sync_letters(AsyncMock(), GROUP, {"id": 22, "name": "潮 紗理菜"}) == 0
+
+    assert "43_22" not in manager.sync_state
+    assert [p.name for p in old.parent.iterdir()] == ["22 22"]
+    assert any(e["event"] == "Sync skipped: folder rename failed" and e["member_id"] == 22 for e in logs)
+
+
+PIC_OLD = {"id": 15, "type": "picture", "file": "https://cdn/15.jpg", "published_at": "2020-01-01T00:00:00Z"}
+
+
+async def test_ignore_cursor_old_pending_media_does_not_pull_cursor_back(manager):
+    member = {"id": 79, "name": "日向坂46"}
+    await manager.sync_member(AsyncMock(), GROUP, member, [], prefetched_messages=[_m(20, "2026-01-01T00:00:00Z", 79)])
+    timeline = [{**PIC_OLD, "member_id": 79}, _m(20, "2026-01-01T00:00:00Z", 79)]
+    queue: list = []
+
+    await manager.sync_member(AsyncMock(), GROUP, member, queue, prefetched_messages=timeline, ignore_cursor=True)
+
+    assert [item["message_id"] for item in queue] == [15]  # still queued
+    assert manager.get_last_ts(43, 79) == "2026-01-01T00:00:00Z"
+
+
+async def test_ignore_cursor_new_pending_media_still_clamps(manager):
+    member = {"id": 79, "name": "日向坂46"}
+    await manager.sync_member(AsyncMock(), GROUP, member, [], prefetched_messages=[_m(20, "2026-01-01T00:00:00Z", 79)])
+    new_pic = {**PIC_OLD, "id": 25, "published_at": "2026-02-01T00:00:00Z", "member_id": 79}
+    timeline = [
+        {**PIC_OLD, "member_id": 79},
+        _m(20, "2026-01-01T00:00:00Z", 79),
+        new_pic,
+        _m(30, "2026-03-01T00:00:00Z", 79),
+    ]
+
+    await manager.sync_member(AsyncMock(), GROUP, member, [], prefetched_messages=timeline, ignore_cursor=True)
+
+    assert manager.get_last_ts(43, 79) == "2026-02-01T00:00:00Z"
+
+
+async def test_ignore_cursor_old_normalize_failure_does_not_pull_cursor_back(manager):
+    member = {"id": 79, "name": "日向坂46"}
+    await manager.sync_member(AsyncMock(), GROUP, member, [], prefetched_messages=[_m(20, "2026-01-01T00:00:00Z", 79)])
+    broken_old = {"type": "text", "text": "x", "member_id": 79, "published_at": "2020-01-01T00:00:00Z"}  # no id
+    broken_new = {**broken_old, "published_at": "2026-02-01T00:00:00Z"}
+    later = _m(30, "2026-03-01T00:00:00Z", 79)
+
+    await manager.sync_member(
+        AsyncMock(), GROUP, member, [], prefetched_messages=[broken_old, broken_new, later], ignore_cursor=True
+    )
+    assert manager.get_last_ts(43, 79) == "2026-02-01T00:00:00Z"  # the new failure clamps, the old one does not
+
+    await manager.sync_member(
+        AsyncMock(), GROUP, member, [], prefetched_messages=[broken_old, later], ignore_cursor=True
+    )
+    assert manager.get_last_ts(43, 79) == "2026-03-01T00:00:00Z"
+
+
+async def test_ignore_cursor_without_previous_cursor_clamps_as_before(manager):
+    member = {"id": 79, "name": "日向坂46"}
+    timeline = [{**PIC_OLD, "member_id": 79}, _m(20, "2026-01-01T00:00:00Z", 79)]
+    await manager.sync_member(AsyncMock(), GROUP, member, [], prefetched_messages=timeline, ignore_cursor=True)
+    assert manager.get_last_ts(43, 79) == "2020-01-01T00:00:00Z"

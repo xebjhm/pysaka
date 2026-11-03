@@ -253,9 +253,13 @@ Sync one member's messages, queue their media, and archive the member's profile 
 - **ignore_cursor**: (Optional, default `False`) Take all of this member's rows from
   `prefetched_messages` (or a full fetch) instead of only those at/after the cursor. Used by a
   room's one-time history scan so rows older than the cursor (e.g. canceled ones) are merged.
-  Merging is idempotent; the cursor is recomputed from the merged file as usual.
-  `on_new_messages` is not called when `ignore_cursor=True`, because rows recovered from before the
-  cursor are not new.
+  Merging is idempotent; the cursor is recomputed from the merged file as usual, except that only
+  messages published at or after the previous cursor can hold it back: an older message whose media
+  is still missing, or that failed to normalize, is still queued (or logged) but does not pull the
+  cursor back to its date (`room_archive_complete` and Verify & Fix cover it). Without a previous
+  cursor every message can hold it back, as in a normal sync. `on_new_messages` is not called for
+  any row merged when `ignore_cursor=True`, including genuinely new posts that arrived since the last
+  sync, so a consumer that notifies should not rely on scan runs.
 - **Returns**: The number of messages **processed** (re-fetched overlap
   included, so not a count of new messages).
 - A message the member withdrew has `state: "canceled"` (or `"cancelled"`, see
@@ -279,7 +283,10 @@ Sync one member's messages, queue their media, and archive the member's profile 
   new one in the affected `messages.json` (the member's, or every member folder's for a room
   rename), keeping the value's own `\` or `/` separators (`media_file` is relative to
   `output_dir` with the separator of the OS that wrote it). Other values and fields are untouched.
-  A failure to rewrite is logged (file and error type) and does not fail the sync.
+  A failure to rewrite is logged (file and error type) and does not fail the sync. If the rename
+  itself fails (`OSError`, e.g. a file locked on Windows), a warning with group id, member id and
+  error type is logged and `sync_member` returns 0: nothing is written, the cursor is untouched and
+  profile images are skipped, so the next sync retries the rename.
 
 #### `update_message_fields(messages_file: Path, message_id: int, fields: dict) -> bool` (async, static) / `update_message_fields_sync(messages_file, message_id, fields) -> bool` (blocking, static)
 Set fields on one message under the file's lock. Use this for every local edit of `messages.json`
@@ -369,8 +376,10 @@ thumbnail's size. Returns the number of letters that were not in `letters.json` 
 missing file).
 - **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. A failed fetch does not raise:
   it logs and returns 0 (a corrupt `letters.json` is already set aside by then, so the next call
-  rebuilds it). `OSError` from file I/O after the fetch can
-  propagate (like `backfill_past_messages`), so callers should wrap the call.
+  rebuilds it). A failed folder rename does not raise either: a warning with group id, member id
+  and error type is logged and 0 returned, nothing is written and the letters cursor is untouched.
+  `OSError` from file I/O after the fetch can propagate (like `backfill_past_messages`), so callers
+  should wrap the call.
 
 #### `archive_account_profile(session) -> dict`
 Archive the account's own nickname and avatar for this service. Writes
