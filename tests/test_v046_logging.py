@@ -445,6 +445,27 @@ async def test_download_ultimately_failed_logs_type_not_text(client, mock_sessio
     assert "SECRETURL" not in repr(logs)
 
 
+@pytest.mark.parametrize(
+    ("status", "body", "reason"),
+    [(403, b"x", "status 403"), (200, b"", "empty body")],
+)
+async def test_download_ultimately_failed_logs_reason_for_non_exceptions(
+    client, mock_session, tmp_path, status, body, reason
+):
+    """A failure that is not an exception is logged as ``reason``; ``error_type``
+    only ever holds an exception type name."""
+    resp = mock_session.get.return_value.__aenter__.return_value
+    resp.status = status
+    resp.read = AsyncMock(return_value=body)
+    resp.headers = {}
+    with capture_logs() as logs:
+        assert (
+            await client.download_file(mock_session, "https://cdn/p.jpg?sig=S", tmp_path / "p.jpg", retries=1) is False
+        )
+    (err,) = _events(logs, "Download ultimately failed")
+    assert err["reason"] == reason and "error_type" not in err
+
+
 def test_manager_file_errors_log_short_path_and_type(manager, monkeypatch, tmp_path):
     (tmp_path / "sync_state.json").write_text("{broken", encoding="utf-8")
     with capture_logs() as logs:

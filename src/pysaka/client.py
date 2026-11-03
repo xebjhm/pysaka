@@ -1211,27 +1211,28 @@ class Client:
         filepath.parent.mkdir(parents=True, exist_ok=True)
         tmp = filepath.with_name(filepath.name + ".part")
         last_err: Optional[str] = None
+        last_err_is_type = False  # last_err is an exception type name, not a reason
         safe_url = _redact_url(url)
 
         for attempt in range(retries):
             try:
                 async with session.get(url) as resp:
                     if resp.status != 200:
-                        last_err = f"status {resp.status}"
+                        last_err, last_err_is_type = f"status {resp.status}", False
                         logger.warning("Download failed", status=resp.status, url=safe_url)
                     else:
                         data = await resp.read()
                         declared = resp.headers.get("Content-Length")
                         encoding = resp.headers.get("Content-Encoding")
                         if not data:
-                            last_err = "empty body"
+                            last_err, last_err_is_type = "empty body", False
                         elif (
                             encoding is None
                             and declared is not None
                             and declared.isdigit()
                             and int(declared) != len(data)
                         ):
-                            last_err = f"size mismatch got={len(data)} declared={declared}"
+                            last_err, last_err_is_type = f"size mismatch got={len(data)} declared={declared}", False
                         else:
                             async with aiofiles.open(tmp, "wb") as f:
                                 await f.write(data)
@@ -1239,7 +1240,7 @@ class Client:
                             return True
             except Exception as e:  # noqa: BLE001 - transient network errors are retried
                 # str(e) can embed the signed URL, so only the exception type is kept.
-                last_err = type(e).__name__
+                last_err, last_err_is_type = type(e).__name__, True
                 logger.warning("Download error (will retry)", url=safe_url, error_type=last_err, attempt=attempt + 1)
 
             if attempt < retries - 1:
@@ -1247,7 +1248,9 @@ class Client:
 
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
-        logger.error("Download ultimately failed", url=safe_url, error_type=last_err)
+        # error_type only ever holds an exception type; other failures are a reason.
+        detail = {"error_type": last_err} if last_err_is_type else {"reason": last_err}
+        logger.error("Download ultimately failed", url=safe_url, **detail)
         return False
 
     async def download_message_media(
