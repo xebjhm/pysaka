@@ -10,7 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `SyncManager.update_message_fields(messages_file, message_id, fields)` (and the
   blocking `update_message_fields_sync`) update one message under a per-file
-  lock. Use them for any local edit of `messages.json`.
+  lock, so the edit is not lost to a concurrent sync. A later sync that
+  re-fetches the message still replaces its record: fields the API returns
+  (e.g. `is_favorite`) are overwritten, and only `width`, `height`,
+  `media_duration`, `is_muted` and `media_file` are carried over.
 - `SyncManager.sync_member(..., on_new_messages=callback)` reports the messages
   that were not on disk before, with the member's `phone_image`, for
   notifications. Exceptions raised by the callback are logged by type only and

@@ -79,7 +79,14 @@ Main API client supporting all Sakamichi groups.
   mobile app.
 - **Returns**: List of message objects (sorted by ID ascending). A full last
   page without a continuation is accepted as the start of the timeline when the
-  room's first message (an `order=asc` probe) was collected.
+  room's first message (an `order=asc` probe) has the smallest id among the
+  collected messages; merely being collected is not enough.
+- **Raises**: `ApiError` if pagination stops in a way that could hide unfetched
+  messages: a failed page fetch or an empty page carrying a continuation after
+  earlier pages were collected, or, while the cursor is still unreached, a full
+  page with a repeated continuation (always), a full page with a missing
+  continuation (unless the `order=asc` probe confirms the timeline start), or a
+  page that replays already-collected messages.
 
 #### `download_file(session, url: str, filepath: Path, timestamp: str = None) -> bool`
 - **url**: Signed media URL. Failure logs carry only its scheme, host, port and path (never the
@@ -239,7 +246,11 @@ Sync one member's messages, queue their media, and archive the member's profile 
 
 #### `update_message_fields(messages_file: Path, message_id: int, fields: dict) -> bool` (async, static) / `update_message_fields_sync(messages_file, message_id, fields) -> bool` (blocking, static)
 Set fields on one message under the file's lock. Use this for every local edit of `messages.json`
-(e.g. favorites) so a concurrent sync cannot lose either change. The blocking form is for callers
+(e.g. favorites) so a concurrent sync cannot lose either change. The lock does not protect the
+change from later syncs: a sync that re-fetches the message replaces its record with the API's, so a
+field the API returns (e.g. `is_favorite`) is overwritten and any other field you set is dropped,
+except `width`, `height`, `media_duration`, `is_muted` and `media_file` (`_LOCAL_DERIVED_FIELDS`),
+which are carried over when the fresh record lacks them. The blocking form is for callers
 already in a worker thread; the async form runs it in a thread. `message_id` is compared as-is with
 the stored ids, so pass an `int`. Returns False if the file is missing, the id is absent or the write
 failed. Raises `ValueError` if the file is unreadable JSON and `OSError` on read errors.
@@ -319,14 +330,13 @@ history as member profile images, so an app can show the user's avatar beside th
 The same current-image rule as for `archive_profile_images` applies to `account/profile_images/index.json`:
 match the `images[]` entry by `kind` and `file` (via `profile_images.relative_file`), never by full URL.
 Birthday, sex, subdivision (region) and FC accounts are returned by `/profile` too but are
-deliberately **not** stored or logged. A missing profile writes nothing. A missing or non-string
-`name`/`updated_at` keeps the stored value (`""`/`null` on the first write), and only a non-empty
-string `thumbnail` is archived. An unreadable `profile.json` (or avatar `index.json`) is renamed to
-`<name>.corrupt-<UTC timestamp>` (kept for inspection; a warning with the file name is logged) and
-rebuilt. Idempotent: an avatar
-already on disk is skipped, a changed avatar adds a history entry. Returns
-`{"downloaded", "skipped", "failed"}` for the avatar. Not called by `sync_member`; call it once per
-service.
+deliberately **not** stored or logged. A missing profile writes nothing. A missing, non-string or
+empty `name`, and a missing or non-string `updated_at`, keep the stored value (`""`/`null` on the
+first write), and only a non-empty string `thumbnail` is archived. An unreadable `profile.json` (or
+avatar `index.json`) is renamed to `<name>.corrupt-<UTC timestamp>` (kept for inspection; a warning
+with the file name is logged) and rebuilt. Idempotent: an avatar already on disk is skipped, a
+changed avatar adds a history entry. Returns `{"downloaded", "skipped", "failed"}` for the avatar.
+Not called by `sync_member`; call it once per service.
 - **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. Any other error (the fetch,
   or the file and avatar work after it, e.g. `OSError`) returns all-zero counts, and this method's
   own error log carries the exception type only (never the nickname). A failed avatar download is

@@ -734,15 +734,17 @@ class Client:
             ``since_id``), that is the start of the timeline and every fetched
             message is returned. A full last page without a continuation is also
             accepted as the start of the timeline when the room's first message
-            (probed with ``order=asc``) is among the collected messages.
+            (probed with ``order=asc``) has the smallest id among the collected
+            messages; merely being collected is not enough.
 
         Raises:
             ApiError: If pagination stops in a way that could hide unfetched
                 messages — a failed page fetch or an empty page carrying a
                 continuation after earlier pages were collected, or, while the
-                cursor is still unreached, a full page with a missing or repeated
-                continuation (unless the ``order=asc`` probe confirms the timeline
-                start) or a page that replays already-collected messages.
+                cursor is still unreached: a full page with a repeated
+                continuation (always), a full page with a missing continuation
+                (unless the ``order=asc`` probe confirms the timeline start), or
+                a page that replays already-collected messages.
         """
         all_messages: dict[int, dict[str, Any]] = {}
         page = 0

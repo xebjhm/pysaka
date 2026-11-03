@@ -203,8 +203,14 @@ class SyncManager:
 
         Blocking — for callers already running in a worker thread. From async
         code use :meth:`update_message_fields`. Use one of these instead of reading
-        and rewriting the file yourself: a sync running at the same moment would
-        otherwise lose either its new messages or your change.
+        and rewriting the file yourself: the lock keeps a sync running at the same
+        moment from losing your change (or you its new messages). It does not
+        protect the change from later syncs: a sync that re-fetches this message
+        replaces its record with the API's, so a field the API returns (e.g.
+        ``is_favorite``) is overwritten and any other field you set is dropped,
+        except the ones in ``_LOCAL_DERIVED_FIELDS`` (``width``, ``height``,
+        ``media_duration``, ``is_muted``, ``media_file``), which are carried over
+        when the fresh record lacks them.
 
         ``message_id`` is compared as-is with the stored ids, so pass an ``int``
         (a ``str`` never matches).
@@ -792,9 +798,9 @@ class SyncManager:
         only — birthday, sex, subdivision and FC accounts are personal data the
         app does not need and are never stored or logged) and archives the avatar
         under ``account/profile_images/`` with the same index/history as member
-        images. A missing or non-string ``name``/``updated_at`` keeps the stored
-        value (``""``/``None`` on first write); only a non-empty string
-        ``thumbnail`` is archived. An unreadable ``profile.json`` (or avatar
+        images. A missing, non-string or empty ``name``, and a missing or
+        non-string ``updated_at``, keep the stored value (``""``/``None`` on first
+        write); only a non-empty string ``thumbnail`` is archived. An unreadable ``profile.json`` (or avatar
         ``index.json``) is renamed to ``<name>.corrupt-<UTC timestamp>`` (kept
         for inspection, a warning with the file name is logged) and rebuilt. Auth errors (``SessionExpiredError``,
         ``RefreshFailedError``) propagate; any other error, from the fetch or
