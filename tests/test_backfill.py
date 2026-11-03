@@ -273,3 +273,32 @@ async def test_backfill_partial_normalize_failure_merges_valid_and_retries(manag
     assert _ids(path) == [400, 401, 500]
     assert manager.sync_state["79_134"]["past_backfilled_at"] == NOW
     assert manager.sync_state["79_134"]["total_messages"] == 3
+
+
+async def test_backfill_write_failure_returns_zero_without_flag(manager, monkeypatch):
+    path = await _first_sync(manager)
+    manager.client.get_past_messages.return_value = [_m(400, "2026-06-14T04:57:00Z")]
+    monkeypatch.setattr(SyncManager, "_atomic_write_json", staticmethod(lambda target, data: False))
+
+    assert await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER) == 0
+    assert _ids(path) == [500]
+    assert "past_backfilled_at" not in manager.sync_state["79_134"]
+
+
+async def test_backfill_messages_file_vanishing_under_the_lock_is_skipped_quietly(manager, monkeypatch):
+    from structlog.testing import capture_logs
+
+    path = await _first_sync(manager)
+    manager.client.get_past_messages.return_value = [_m(400, "2026-06-14T04:57:00Z")]
+    original = SyncManager._locked_update
+
+    def vanish_then_update(p, mutate, **kwargs):
+        p.unlink()
+        return original(p, mutate, **kwargs)
+
+    monkeypatch.setattr(SyncManager, "_locked_update", staticmethod(vanish_then_update))
+    with capture_logs() as logs:
+        assert await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER) == 0
+    assert not path.exists()  # nothing recreated
+    assert not [e for e in logs if e["log_level"] == "warning"]
+    assert "past_backfilled_at" not in manager.sync_state["79_134"]
