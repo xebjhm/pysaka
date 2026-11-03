@@ -1,6 +1,7 @@
 """Log breadcrumbs for 0.4.6 room roster / scan decisions: events and fields, never message text."""
 
 import json
+import re
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -8,7 +9,7 @@ from structlog.testing import capture_logs
 
 from pysaka import roster
 from pysaka.client import Client, Group
-from pysaka.manager import SyncManager
+from pysaka.manager import SyncManager, _error_origin
 
 GROUP = {"id": 43, "name": "日向坂46", "thumbnail": None}
 SECRET = "秘密の本文🔒SECRET"
@@ -85,22 +86,23 @@ async def test_extra_room_members_second_lookup_is_cached(manager):
 
 
 async def test_unusable_member_id_is_reported(manager):
-    msgs = [_m(1, "abc"), _m(2, 1.5), _m(3, 0), _m(4, "0"), _m(5)]
+    msgs = [_m(1, "abc"), _m(2, 1.5), _m(3, 0), _m(4, "0"), _m(5), _m(6, True), _m(7, False)]
     with capture_logs() as logs:
         out = await manager.extra_room_members(AsyncMock(), GROUP, API, msgs)
     assert [m["id"] for m in out] == [0]
     (warn,) = _events(logs, "Messages with unusable member_id attributed to room author")
-    assert warn["group_id"] == 43 and warn["count"] == 2 and warn["id_types"] == ["float", "str"]
+    assert warn["group_id"] == 43 and warn["count"] == 4 and warn["id_types"] == ["bool", "float", "str"]
     _no_text(logs)
 
 
-async def test_unreadable_local_member_block_logs_error_type(manager):
+async def test_unreadable_local_member_block_logs_error_type(manager, tmp_path):
     _write_local(manager, "7 other", "30 30", "{broken")
     with capture_logs() as logs:
         await manager.extra_room_members(AsyncMock(), GROUP, API, [_m(1, 30)])
     (warn,) = _events(logs, "Local member block unreadable")
     assert warn["member_id"] == 30 and warn["error_type"] == "JSONDecodeError"
-    assert warn["file"].endswith("messages.json")
+    assert warn["file"].endswith("messages.json") and not warn["file"].startswith(("/", "\\"))
+    assert str(tmp_path) not in repr(logs)
     assert _events(logs, "Room member name unknown, using id as name")
 
 
@@ -207,7 +209,10 @@ async def test_ignore_cursor_logs_exclusions_below_the_floor(manager):
     assert dbg["cursor_floor"] == "2026-01-01T00:00:00Z" and dbg["member_dir"].startswith("79 ")
     (scan,) = _events(logs, "Cursor ignored for room scan")
     assert scan["group_id"] == 43 and scan["member_id"] == 79 and scan["count"] == 3
-    assert "SECRETURL" not in repr(_events(logs, "Old rows excluded from cursor clamp") + [scan])
+    scan_logs = _events(logs, "Old rows excluded from cursor clamp") + [scan]
+    assert "SECRETURL" not in repr(scan_logs)
+    _no_text(scan_logs)
+    _no_text(logs)
 
 
 async def _sync_room(manager, member, rows, **kw):
@@ -272,7 +277,7 @@ async def test_rate_limit_warning_says_why_retry_after_was_ignored(client, mock_
     (warn,) = _events(logs, "API rate limited")
     assert warn["retry_after"] is None and warn["retry_after_ignored"] == reason
     assert warn.get("error_type") == error_type
-    assert raw not in repr(warn.get("event"))
+    assert raw not in repr(warn)
 
 
 async def test_rate_limit_warning_has_no_ignored_field_for_valid_header(client, mock_session):
@@ -359,3 +364,111 @@ async def test_download_message_media_error_logs_type_only(client, mock_session,
     assert err["error_type"] == "RuntimeError"
     _no_text(logs)
     assert "SECRETURL" not in repr(logs)
+
+
+async def test_prepare_error_logs_text_free_origin(manager, tmp_path_factory):
+    elsewhere = tmp_path_factory.mktemp("elsewhere")  # not under output_dir: relative_to raises in manager.py
+    row = {"id": 1, "type": "picture", "text": SECRET, "file": "https://cdn/p.jpg?sig=SECRETURL"}
+    with capture_logs() as logs:
+        processed, failed_ts, _ = manager.prepare_messages([row], elsewhere, [])
+    assert processed == [] and failed_ts == ""
+    (err,) = _events(logs, "Prepare error")
+    assert err["error_type"] == "ValueError" and err["message_id"] == 1
+    assert re.fullmatch(r"pathlib\.py:\d+:relative_to", err["origin"])  # innermost frame is stdlib
+    assert re.fullmatch(r"manager\.py:\d+:prepare_messages", err["pysaka_frame"])
+    _no_text(logs)
+    assert (
+        "SECRETURL" not in repr(logs) and str(elsewhere) not in repr(logs) and str(manager.output_dir) not in repr(logs)
+    )
+
+
+async def test_sync_member_error_logs_text_free_origin(manager):
+    await _sync(manager, [_c(1)])  # sets the cursor
+    with capture_logs() as logs:
+        await _sync(manager, [_c(2, published_at=5)])  # int vs str cursor: TypeError inside manager.py
+    (err,) = _events(logs, "Error syncing member")
+    assert err["error_type"] == "TypeError" and err["member_id"] == 138 and err["group_id"] == 86
+    assert re.fullmatch(r"manager\.py:\d+:fetch_for_member", err["origin"])
+    assert re.match(r"manager\.py:\d+:", err["pysaka_frame"])
+    assert "exc_info" not in err and "error" not in err
+    _no_text(logs)
+
+
+def test_error_origin_has_basenames_only_and_cause_type():
+    def inner():
+        try:
+            raise KeyError(SECRET)
+        except KeyError as cause:
+            raise RuntimeError(f"wrapped {SECRET}") from cause
+
+    try:
+        inner()
+    except RuntimeError as e:
+        info = _error_origin(e)
+    assert re.fullmatch(r"test_v046_logging\.py:\d+:inner", info["origin"])
+    assert info["cause_type"] == "KeyError"
+    assert SECRET not in repr(info) and "/" not in repr(info)
+
+    assert _error_origin(ValueError(SECRET)) == {}  # never raised: no traceback, no cause
+
+
+async def test_network_and_timeout_errors_log_redacted_url_and_type_only(client, mock_session):
+    import asyncio
+
+    import aiohttp
+
+    from pysaka import ApiError
+
+    url_secret = "SECRETURL"
+    for exc, label in (
+        (aiohttp.ClientError(f"boom https://x/y?sig={url_secret}"), "Network error"),
+        (asyncio.TimeoutError(), "Timeout"),
+    ):
+        mock_session.get.side_effect = exc
+        with capture_logs() as logs, pytest.raises(ApiError) as raised:
+            await client.fetch_json(mock_session, "/groups?x=1")
+        assert url_secret not in repr(logs) and url_secret not in str(raised.value)
+        (err,) = [e for e in logs if e["log_level"] == "error"]
+        assert err["error_type"] == type(exc).__name__ and "?" not in err["url"]
+        assert label in str(raised.value) and type(exc).__name__ in str(raised.value)
+
+
+async def test_download_ultimately_failed_logs_type_not_text(client, mock_session, tmp_path):
+    mock_session.get.side_effect = RuntimeError("https://cdn/p.jpg?sig=SECRETURL")
+    with capture_logs() as logs:
+        assert (
+            await client.download_file(mock_session, "https://cdn/p.jpg?sig=SECRETURL", tmp_path / "p.jpg", retries=1)
+            is False
+        )
+    (err,) = _events(logs, "Download ultimately failed")
+    assert err["error_type"] == "RuntimeError" and "error" not in err
+    assert "SECRETURL" not in repr(logs)
+
+
+def test_manager_file_errors_log_short_path_and_type(manager, monkeypatch, tmp_path):
+    (tmp_path / "sync_state.json").write_text("{broken", encoding="utf-8")
+    with capture_logs() as logs:
+        SyncManager(manager.client, tmp_path)
+    (err,) = _events(logs, "Failed to load sync state")
+    assert err["file"] == f"{tmp_path.name}/sync_state.json" and err["error_type"] == "JSONDecodeError"
+    assert str(tmp_path) not in repr(logs)
+
+    member_dir = tmp_path / "m"
+    member_dir.mkdir()
+    (member_dir / "messages.json").write_text("{broken", encoding="utf-8")
+    with capture_logs() as logs:
+        assert manager.scan_member_media(member_dir)["error"] == "manifest_unreadable"
+    (warn,) = _events(logs, "saka.scan.manifest_unreadable")
+    assert warn["file"] == "m/messages.json" and warn["error_type"] == "JSONDecodeError"
+    assert str(tmp_path) not in repr(logs)
+
+    def boom(src, dst):
+        raise PermissionError(f"{SECRET} {tmp_path}")
+
+    monkeypatch.setattr("pysaka.manager.os.replace", boom)
+    with capture_logs() as logs:
+        assert SyncManager._atomic_write_json(tmp_path / "out.json", {"a": 1}) is False
+    (err,) = [e for e in logs if e["log_level"] == "error"]
+    assert err["error_type"] == "PermissionError" and err["file"] == f"{tmp_path.name}/out.json"
+    assert str(tmp_path) not in repr(logs)
+    _no_text(logs)

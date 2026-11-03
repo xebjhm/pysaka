@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,36 @@ T = TypeVar("T")
 # consumer (SakaDesk's DataDirLock).
 _FILE_LOCKS: dict[str, threading.Lock] = {}
 _FILE_LOCKS_GUARD = threading.Lock()
+
+
+def _short_path(path: Path) -> str:
+    """``parent/name`` of ``path`` for logging (no absolute path, so no user name)."""
+    return f"{path.parent.name}/{path.name}"
+
+
+def _error_origin(exc: BaseException) -> dict[str, str]:
+    """Text-free origin of ``exc`` for logging; never includes the exception message.
+
+    ``origin`` is the innermost traceback frame as ``<basename>:<lineno>:<function>``,
+    ``pysaka_frame`` the innermost frame whose path has a ``pysaka`` component (same
+    format), ``cause_type`` the type name of ``__cause__``. Keys that do not apply are
+    omitted. The exception text and traceback can quote message content, so neither is used.
+    """
+
+    def label(frame: traceback.FrameSummary) -> str:
+        return f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+
+    out: dict[str, str] = {}
+    frames = traceback.extract_tb(exc.__traceback__)
+    if frames:
+        out["origin"] = label(frames[-1])
+        for frame in reversed(frames):
+            if "pysaka" in Path(frame.filename).parts:
+                out["pysaka_frame"] = label(frame)
+                break
+    if exc.__cause__ is not None:
+        out["cause_type"] = type(exc.__cause__).__name__
+    return out
 
 
 def _is_skipped_empty(msg: dict[str, Any]) -> bool:
@@ -102,7 +133,9 @@ class SyncManager:
                 with open(self.state_file, encoding="utf-8") as f:
                     self.sync_state = json.load(f)
             except Exception as e:
-                logger.error("Failed to load sync state", error=str(e))
+                logger.error(
+                    "Failed to load sync state", file=_short_path(self.state_file), error_type=type(e).__name__
+                )
                 self.sync_state = {}
 
     def save_sync_state(self) -> None:
@@ -144,10 +177,14 @@ class SyncManager:
                     if attempt < retries - 1:
                         time.sleep(0.05 * (attempt + 1))
 
-            logger.error("Failed to write file after retries", file=str(target), error=str(last_err))
+            logger.error(
+                "Failed to write file after retries",
+                file=_short_path(target),
+                error_type=type(last_err).__name__,
+            )
             return False
         except Exception as e:
-            logger.error("Failed to write file", file=str(target), error=str(e))
+            logger.error("Failed to write file", file=_short_path(target), error_type=type(e).__name__)
             return False
         finally:
             try:
@@ -706,7 +743,9 @@ class SyncManager:
         unusable = [
             type(m.get("member_id")).__name__
             for m in messages
-            if m.get("member_id") not in (None, 0, "0") and roster.author_id(m) == roster.ROOM_AUTHOR_ID
+            if m.get("member_id") is not None
+            and roster.author_id(m) == roster.ROOM_AUTHOR_ID
+            and (isinstance(m["member_id"], bool) or m["member_id"] not in (0, "0"))
         ]
         if unusable:
             logger.warning(
@@ -1516,7 +1555,14 @@ class SyncManager:
             raise
         except Exception as e:
             # Only the type: the exception text (or its traceback) may quote message content.
-            logger.error("Error syncing member", member=mname, member_id=mid, group_id=gid, error_type=type(e).__name__)
+            logger.error(
+                "Error syncing member",
+                member=mname,
+                member_id=mid,
+                group_id=gid,
+                error_type=type(e).__name__,
+                **_error_origin(e),
+            )
             return 0
 
     def prepare_messages(
@@ -1629,7 +1675,7 @@ class SyncManager:
                 else:
                     below_floor_failed += 1
                 # Only the type: the exception text may quote the message that failed.
-                logger.error("Prepare error", message_id=mid, error_type=type(e).__name__)
+                logger.error("Prepare error", message_id=mid, error_type=type(e).__name__, **_error_origin(e))
         if below_floor_pending or below_floor_failed:
             logger.debug(
                 "Old rows excluded from cursor clamp",
@@ -1752,12 +1798,14 @@ class SyncManager:
         except Exception as e:  # noqa: BLE001
             # A corrupt/unreadable manifest must be surfaced, not collapsed into a
             # clean-looking empty result that reads as "fully synced".
-            logger.warning("saka.scan.manifest_unreadable", file=str(messages_file), error=str(e))
+            logger.warning(
+                "saka.scan.manifest_unreadable", file=_short_path(messages_file), error_type=type(e).__name__
+            )
             result["error"] = "manifest_unreadable"
             return result
 
         if not isinstance(data, dict):
-            logger.warning("saka.scan.manifest_invalid", file=str(messages_file))
+            logger.warning("saka.scan.manifest_invalid", file=_short_path(messages_file))
             result["error"] = "manifest_invalid"
             return result
 
@@ -1906,9 +1954,11 @@ class SyncManager:
         try:
             wrote, _ = await asyncio.to_thread(self._locked_update, messages_file, mutate)
             if not wrote:
-                logger.error("Failed to write message metadata", file=str(messages_file))
+                logger.error("Failed to write message metadata", file=_short_path(messages_file))
         except Exception as e:
-            logger.error("Failed to update message metadata", file=str(messages_file), error_type=type(e).__name__)
+            logger.error(
+                "Failed to update message metadata", file=_short_path(messages_file), error_type=type(e).__name__
+            )
 
     async def reconcile_member_media(
         self,

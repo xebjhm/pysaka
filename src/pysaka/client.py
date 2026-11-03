@@ -337,8 +337,9 @@ class Client:
             logger.debug(f"Auth error during request to {endpoint}: {e}")
             raise
         except aiohttp.ClientError as e:
-            logger.error(f"Network error fetching {url}: {e}")
-            raise ApiError(f"Network error: {e}") from e
+            # Only the type: aiohttp's text can embed the full (possibly signed) URL.
+            logger.error("Network error fetching", url=_redact_url(url), error_type=type(e).__name__)
+            raise ApiError(f"Network error: {type(e).__name__}") from e
         except asyncio.TimeoutError as e:
             # PY-CORE-02: aiohttp's TOTAL request timeout raises asyncio.TimeoutError,
             # which is NOT an aiohttp.ClientError subclass. Without this branch a hung
@@ -346,8 +347,8 @@ class Client:
             # None — indistinguishable from "no data" — letting callers treat a
             # transient timeout as an empty result. Surface it as an ApiError so the
             # docstring contract (network problems raise) actually holds.
-            logger.error(f"Timeout fetching {url}: {e}")
-            raise ApiError(f"Timeout: {e}") from e
+            logger.error("Timeout fetching", url=_redact_url(url), error_type=type(e).__name__)
+            raise ApiError(f"Timeout: {type(e).__name__}") from e
         except Exception as e:
             # Only the type: the response body being handled may be quoted in the text.
             logger.error("Unexpected error fetching", endpoint=endpoint, error_type=type(e).__name__)
@@ -1034,7 +1035,7 @@ class Client:
 
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
-        logger.error("Download ultimately failed", url=safe_url, error=str(last_err))
+        logger.error("Download ultimately failed", url=safe_url, error_type=last_err)
         return False
 
     async def download_message_media(
@@ -1264,8 +1265,8 @@ class Client:
         except ApiError:
             raise
         except aiohttp.ClientError as e:
-            logger.error(f"Network error posting to {url}: {e}")
-            raise ApiError(f"Network error: {e}") from e
+            logger.error("Network error posting", url=_redact_url(url), error_type=type(e).__name__)
+            raise ApiError(f"Network error: {type(e).__name__}") from e
 
     async def delete_json(self, session: aiohttp.ClientSession, endpoint: str) -> bool:
         """
@@ -1294,7 +1295,7 @@ class Client:
         except (SessionExpiredError, RefreshFailedError):
             raise
         except Exception as e:
-            logger.error(f"Error deleting {url}: {e}")
+            logger.error("Error deleting", url=_redact_url(url), error_type=type(e).__name__)
             return False
 
     async def get_letters(

@@ -33,9 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message the member withdrew. A canceled message now carries `canceled_at`
   (the API's `updated_at`, kept from the first time it was seen; omitted, never
   `null`, while the API row has no `updated_at`).
-- Debug-log breadcrumbs for the room-roster and scan decisions: resolved extra
-  authors (`Extra room members`), scan bookkeeping, canceled messages and
-  skipped member 0 calls. Ids and counts only, never message text.
+- Log breadcrumbs for the room-roster and scan decisions, for diagnosing bug
+  reports from `debug.log`. `info`: `Extra room members`, `Room history scan
+  recorded`, `Stored message turned canceled`. `warning`: unknown extra-author
+  names, `Messages with unusable member_id attributed to room author`, `Local
+  member block unreadable`, `Member lookup returned a non-object body`; the
+  `API rate limited` warning also says why an unusable `Retry-After` was
+  ignored (`retry_after_ignored`, `error_type`). `debug`: per-author name
+  source, `Room archive complete`, cursor exclusions during a scan, canceled
+  skeletons and skipped member 0 calls. Ids, counts and error types only,
+  never message text.
 
 ### Changed
 - `sync_member` assigns messages without `member_id` to member 0 (the room
@@ -62,9 +69,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RateLimitedError` and back off.
 
 ### Fixed
-- The `Prepare error`, `Error syncing member`, `Unexpected error fetching` and
-  media-download error logs now carry `error_type` instead of the exception
-  text, which could quote message content or signed URLs.
+- Error logs no longer carry exception text, which could quote message content,
+  signed URLs or local paths: `Prepare error`, `Error syncing member`,
+  `Failed to update message metadata`, `Unexpected error fetching` and `Message
+  media download error` now log `error_type` plus ids. `Error syncing member`
+  logs a text-free `origin` (`file:line:function`, `pysaka_frame`, `cause_type`)
+  instead of a traceback. Network, timeout and download failures log the
+  redacted URL, and the `ApiError` raised for a network error or timeout reads
+  `Network error: <ExceptionType>` / `Timeout: <ExceptionType>` instead of
+  embedding the exception text.
 - Renaming a room folder (`messages/<gid> <old room name>`) or a member folder
   (`<mid> <old name>`) left every stored `media_file` pointing into the old
   folder, so the app showed broken media and Verify & Fix re-downloaded into
