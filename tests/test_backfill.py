@@ -248,3 +248,28 @@ async def test_count_mismatch_recovery_clears_flag(manager, time_machine):
     assert await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER) == 0  # already merged: idempotent
     assert _ids(path) == [400, 500]
     assert manager.sync_state["79_134"]["past_backfilled_at"] == NOW
+
+
+async def test_backfill_partial_normalize_failure_merges_valid_and_retries(manager, time_machine):
+    """One past message fails to normalize (a non-string media URL): the valid one
+    is merged but the flag stays unset; a later call with a fixed payload adds the
+    missing message and sets the flag."""
+    time_machine.move_to(NOW)
+    path = await _first_sync(manager)
+    manager.client.get_past_messages.return_value = [
+        _m(400, "2026-06-14T04:57:00Z"),
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file=12345),  # breaks prepare_messages
+    ]
+
+    assert await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER) == 1
+    assert _ids(path) == [400, 500]
+    assert "past_backfilled_at" not in manager.sync_state["79_134"]
+
+    manager.client.get_past_messages.return_value = [
+        _m(400, "2026-06-14T04:57:00Z"),
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/p401.jpg"),
+    ]
+    assert await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER) == 1
+    assert _ids(path) == [400, 401, 500]
+    assert manager.sync_state["79_134"]["past_backfilled_at"] == NOW
+    assert manager.sync_state["79_134"]["total_messages"] == 3
