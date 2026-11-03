@@ -729,6 +729,7 @@ class Client:
         max_id: Optional[int] = None,
         progress_callback=None,
         clear_unread: bool = False,
+        page_delay: float = 0.5,
     ) -> list[dict[str, Any]]:
         """
         Fetch all new messages from a group's timeline.
@@ -744,6 +745,8 @@ class Client:
                 this group (the official app sends this on chat-open). Defaults to
                 False so a background sync does NOT zero the user's unread count on
                 the official mobile app.
+            page_delay: Seconds to wait between page requests (default 0.5). Use a
+                larger value for long full-history fetches to stay under the API rate limit.
 
         Returns:
             List of message dicts, sorted by ID ascending. When the timeline ends
@@ -918,7 +921,7 @@ class Client:
                 break
 
             page += 1
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(page_delay)
 
         # Filter: keep only messages newer than the cursor
         if effective_ts:
@@ -1334,16 +1337,26 @@ class Client:
 
     async def get_member(self, session: aiohttp.ClientSession, member_id: int) -> Optional[dict[str, Any]]:
         """
-        Fetch individual member details.
+        Fetch one member's public profile (``GET /members/{id}``).
+
+        Works for members who are no longer in any room's member list (e.g. a
+        graduated member who once posted in an official room).
 
         Args:
             session: Active aiohttp ClientSession.
-            member_id: The ID of the member.
+            member_id: The member's id.
 
         Returns:
-            Member details dict or None if failed.
+            The member dict (``id``, ``name``, ``thumbnail``, ``phone_image``, ...),
+            or None when the request failed with a client error (e.g. 4xx) or the
+            body is not a JSON object.
+
+        Raises:
+            ApiError: On a server error (5xx) or a network error.
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``).
         """
-        return await self.fetch_json(session, f"/members/{member_id}")
+        data = await self.fetch_json(session, f"/members/{member_id}")
+        return data if isinstance(data, dict) else None
 
     async def get_account(self, session: aiohttp.ClientSession) -> Optional[dict[str, Any]]:
         """

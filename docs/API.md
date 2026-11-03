@@ -66,7 +66,7 @@ Main API client supporting all Sakamichi groups.
 - **Returns**: List of member objects.
 - **Raises**: `RateLimitedError` on HTTP 429 (not an empty list).
 
-#### `get_messages(session, group_id: int, since_id: int = None, since_ts: str = None, max_id: int = None, progress_callback = None, clear_unread: bool = False) -> List[dict]`
+#### `get_messages(session, group_id: int, since_id: int = None, since_ts: str = None, max_id: int = None, progress_callback = None, clear_unread: bool = False, page_delay: float = 0.5) -> List[dict]`
 - **group_id**: Target group ID.
 - **since_ts**: (Primary cursor, since 0.3.0) ISO timestamp — fetch messages
   published after this time. Prefer this for incremental sync.
@@ -79,6 +79,8 @@ Main API client supporting all Sakamichi groups.
   this group (the official app's chat-open signal). Defaults to `False` so a
   background sync does **not** zero the user's unread count on the official
   mobile app.
+- **page_delay**: Seconds to wait between page requests (default `0.5`). Use a
+  larger value for long full-history fetches to stay under the API rate limit.
 - **Returns**: List of message objects (sorted by ID ascending). A full last
   page without a continuation is accepted as the start of the timeline when the
   room's first message (an `order=asc` probe) has the smallest id among the
@@ -120,8 +122,13 @@ Main API client supporting all Sakamichi groups.
 - **Returns**: List of products.
 
 #### `get_member(session, member_id: int) -> Optional[dict]`
-- **member_id**: The ID of the member.
-- **Returns**: Member details dict or `None` if failed.
+- **member_id**: The member's id.
+- **Returns**: The member dict (`id`, `name`, `thumbnail`, `phone_image`, ...) from
+  `GET /members/{id}`, or `None` when the request failed with a client error
+  (e.g. 4xx) or the body is not a JSON object. Works for members who are no
+  longer in any room's member list.
+- **Raises**: `ApiError` on a server (5xx) or network error; `RateLimitedError`
+  on HTTP 429.
 
 #### `get_account(session) -> Optional[dict]`
 - **Returns**: Account info dict or `None` if failed.
