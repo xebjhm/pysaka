@@ -76,8 +76,8 @@ error while handling the response.
   `timeline_min_interval` is negative, NaN or infinite.
 
 #### Timeline pacing: `Client.timeline_min_interval: float`
-Only `/groups/{id}/timeline` has been observed to return HTTP 429, and only when it is hit
-hundreds of times in a few minutes, as during a one-time history scan. While the attribute is
+Only `/groups/{id}/timeline` has returned HTTP 429 so far: it was observed to return 429 after
+about 170 timeline requests in 5 minutes, during a one-time history scan. While the attribute is
 above `0`, every HTTP request to a group's timeline made through this client waits so that
 consecutive request **starts** are at least that many seconds apart (spacing at the client,
 not on the wire). That covers every
@@ -399,7 +399,8 @@ failure is logged and never affects the result or the cursor. Returns `{"downloa
 #### `extra_room_members(session, group: dict, api_members: list[dict], messages: list[dict], name_hints: dict[int, dict] = None) -> list[dict]`
 Members to sync for a room in addition to `api_members` (the `/groups/{id}/members` lineup): one
 member dict per author of `messages` missing from `api_members` (ascending id), then member 0
-(`roster.room_author(group)`) when a message has no `member_id`. Rows that sync skips as empty
+(`roster.room_author(group)`) when a message has no usable `member_id` (absent, or not an int /
+decimal string) and 0 is not in `api_members`. Rows that sync skips as empty
 (non-canceled `text` messages with no text and no media) are ignored, so they never create an
 author (no empty folder). Sync each with `sync_member` so their messages are no longer dropped. Each dict has at least `id` and `name`, plus `thumbnail`,
 `phone_image` and `portrait` when known. The name is resolved from, first hit wins:
@@ -408,8 +409,8 @@ author (no empty folder). Sync each with `sync_member` so their messages are no 
    string other than `str(id)`.
 3. `Client.get_member` (cached per `SyncManager`, including a `None` result for unknown ids).
 4. `{"id": id, "name": str(id)}`; a later sync that learns the name renames the folder.
-- **Raises**: `ApiError` from `Client.get_member` (e.g. `RateLimitedError`) propagates and is not
-  cached, so isolate each room in the caller.
+- **Raises**: `ApiError` (including `RateLimitedError`), `SessionExpiredError` or
+  `RefreshFailedError` from `Client.get_member`; none is cached, so isolate each room in the caller.
 
 #### `backfill_past_messages(session, group: dict, member: dict) -> int`
 Merge the room's pre-subscription messages (`Client.get_past_messages`) into the member's archive

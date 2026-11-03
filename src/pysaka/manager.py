@@ -734,9 +734,10 @@ class SyncManager:
         members posting in official rooms are missing from it, and sync would drop
         their messages. This returns one member dict per author of ``messages``
         not in ``api_members`` (ascending id), then member 0 (the room author,
-        ``pysaka.roster.room_author``) when a message has no ``member_id``. Rows sync
-        skips as empty (non-canceled text with no text and no media) are ignored, so
-        they never create an author or an empty folder.
+        ``pysaka.roster.room_author``) when a message has no usable ``member_id``
+        (absent, or not an int / decimal string) and 0 is not in ``api_members``.
+        Rows sync skips as empty (non-canceled text with no text and no media) are
+        ignored, so they never create an author or an empty folder.
 
         A name is resolved from, in order: ``name_hints`` (id -> member dict, e.g.
         every room's member list fetched in this sync); the member block of a local
@@ -746,7 +747,9 @@ class SyncManager:
         that learns the name renames the folder.
 
         Raises:
-            ApiError: From ``Client.get_member`` (including ``RateLimitedError``).
+            ApiError, SessionExpiredError, RefreshFailedError: ``ApiError``
+                (including ``RateLimitedError``), ``SessionExpiredError`` or
+                ``RefreshFailedError`` from ``Client.get_member``; none is cached.
         """
         hints = name_hints or {}
         gid = group["id"]

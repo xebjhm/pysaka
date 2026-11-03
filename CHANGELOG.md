@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the 401 retry in `fetch_json`, also under concurrent callers. Other
   endpoints and CDN downloads are never paced. Default `0.0` keeps today's
   behavior (no pacing); a negative, NaN or infinite value raises `ValueError`. Set it
-  (e.g. `3.0`) for history scans, which can hit HTTP 429 after ~170 timeline
-  requests in 5 minutes, and pass `page_delay=0` to avoid doubling the pause.
+  (e.g. `3.0`) for history scans (the timeline was observed to return 429
+  after about 170 timeline requests in 5 minutes), and pass `page_delay=0` to
+  avoid doubling the pause.
 - Timeline fail-fast after HTTP 429, with or without `timeline_min_interval`:
   once a `/groups/{id}/timeline` request returns 429, the `Client` raises
   `RateLimitedError` immediately, without sending, for every further timeline
@@ -42,8 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed / pending-media timestamps.
 - `SyncManager.extra_room_members(session, group, api_members, messages, name_hints=None)`
   returns the authors of a room's timeline missing from `/groups/{id}/members`
-  (earlier lineups, members posting in official rooms) plus member 0 for
-  messages without `member_id`. Sync them with `sync_member` so their messages
+  (earlier lineups, members posting in official rooms) plus member 0 when a
+  message has no usable `member_id` (absent, or not an int / decimal string)
+  and 0 is not in `api_members`. Sync them with `sync_member` so their messages
   are no longer dropped. Rows that sync skips as empty (non-canceled text with
   no text and no media) do not create an author, so a 1:1 room gets no empty
   member 0 folder.
@@ -64,8 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `API rate limited` warning also says why an unusable `Retry-After` was
   ignored (`retry_after_ignored`, `error_type`). `debug`: per-author name
   source, `Room archive complete`, cursor exclusions during a scan, canceled
-  skeletons and skipped member 0 calls. Ids, counts and error types only,
-  never message text.
+  skeletons and skipped member 0 calls. Logs carry ids, counts, error types
+  and relative `messages/...` folder names; never message text.
 
 ### Changed
 - `sync_member` assigns messages without `member_id` to member 0 (the room
