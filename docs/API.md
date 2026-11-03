@@ -270,8 +270,11 @@ idempotent). A corrupt-file or count-mismatch recovery in `sync_member` clears t
 next call merges the pre-subscription messages again. Never moves the cursor and never fires
 `on_new_messages`. Returns the number of messages added.
 - **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. `OSError` (and other
-  unexpected errors) after the fetch can propagate too, so wrap the call. A failed fetch or an
-  unreadable `messages.json` does not raise: it logs and returns 0.
+  unexpected errors) after the fetch can propagate too, so wrap the call. These do not raise and
+  leave the flag unset: a failed fetch (a warning is logged, returns 0) and, when the member has
+  past messages to merge, a `messages.json` that is unreadable JSON or not a JSON object (left
+  untouched; a warning, with the found type for a non-object, is logged; returns 0) or whose write
+  failed (logged by the write; returns 0).
 
 #### `sync_letters(session, group: dict, member: dict) -> int`
 Archive the account's sent letters to this member into `<member_dir>/letters.json` and each

@@ -178,6 +178,22 @@ async def test_backfill_non_dict_messages_file_is_left_alone(manager):
     assert "past_backfilled_at" not in manager.sync_state["79_134"]
 
 
+async def test_backfill_non_dict_messages_file_logs_its_type(manager):
+    from structlog.testing import capture_logs
+
+    path = await _first_sync(manager)
+    path.write_text('["秘密"]', encoding="utf-8")
+    manager.client.get_past_messages.return_value = [_m(400, "2026-06-14T04:57:00Z")]
+
+    with capture_logs() as logs:
+        assert await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER) == 0
+
+    (entry,) = [e for e in logs if e["log_level"] == "warning"]
+    assert entry["event"] == "Backfill skipped: messages.json is not an object"
+    assert entry["found_type"] == "list"
+    assert "秘密" not in repr(logs)
+
+
 async def test_backfill_writes_media_metadata(manager, monkeypatch):
     path = await _first_sync(manager)
     monkeypatch.setattr("pysaka.manager.get_media_dimensions", lambda p, t: (640, 480))

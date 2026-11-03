@@ -417,16 +417,15 @@ class SyncManager:
     ) -> int:
         """Merge the room's pre-subscription messages into the member's archive.
 
-        Runs once per member: after it completes, ``past_backfilled_at`` is set in
-        the member's sync_state entry and later calls return immediately. Requires
-        a prior successful :meth:`sync_member` (no entry or no ``messages.json`` →
+        Runs once per member: once ``past_backfilled_at`` is set in the member's
+        sync_state entry, later calls return immediately. Requires a prior
+        successful :meth:`sync_member` (no entry or no ``messages.json`` →
         skipped). Downloads its own media, because Verify & Fix takes fresh URLs
         from the timeline, which never contains these messages. The flag is set
-        only when the request succeeded, no past message failed to normalize
-        (otherwise the member would be retried on every sync), and every queued
-        file is on disk; on any failure the next call retries (merging is
-        idempotent). Cursor fields are
-        never touched and ``on_new_messages`` is never fired.
+        only when the request succeeded, no past message failed to normalize and
+        every queued file is on disk; otherwise it stays unset and later calls
+        retry (merging is idempotent). Cursor fields are never touched and
+        ``on_new_messages`` is never fired.
 
         Returns:
             Number of messages that were not in the archive before.
@@ -436,9 +435,13 @@ class SyncManager:
                 ``RefreshFailedError``); the flag is left unset.
             OSError: reading or writing ``messages.json`` or its media failed
                 after the fetch (other unexpected errors after the fetch also
-                propagate), so callers should wrap the call. An unreadable
-                ``messages.json`` or a failed fetch does not raise: it logs and
-                returns 0.
+                propagate), so callers should wrap the call. These do not raise
+                and leave the flag unset: a failed fetch (a warning is logged and
+                0 returned) and, when this member has past messages to merge, a
+                ``messages.json`` that is unreadable JSON or not a JSON object
+                (left untouched; a warning is logged, with the found type for a
+                non-object; 0 returned) or whose write failed (logged by the
+                write; 0 returned).
         """
         gid, mid = group["id"], member["id"]
         key = f"{gid}_{mid}"
@@ -468,9 +471,10 @@ class SyncManager:
         added = 0
         if processed:
 
-            def mutate(current: Optional[Any]) -> tuple[Optional[Any], tuple[int, int]]:
+            def mutate(current: Optional[Any]) -> tuple[Optional[Any], tuple[int, int, Optional[str]]]:
                 if not isinstance(current, dict):
-                    return None, (0, -1)
+                    # None: the file vanished after the existence check above.
+                    return None, (0, -1, None if current is None else type(current).__name__)
                 base = current.get("messages", [])
                 base_ids = {m.get("id") for m in base}
                 new_count = sum(1 for m in processed if m["id"] not in base_ids)
@@ -479,12 +483,20 @@ class SyncManager:
                 current["messages"] = merged
                 current["total_messages"] = len(merged)
                 current["message_type_counts"] = self._type_counts(merged)
-                return current, (new_count, len(merged))
+                return current, (new_count, len(merged), None)
 
             try:
-                wrote, (added, total) = await asyncio.to_thread(self._locked_update, messages_file, mutate)
+                wrote, (added, total, found_type) = await asyncio.to_thread(self._locked_update, messages_file, mutate)
             except ValueError:
                 logger.warning("Backfill skipped: messages.json unreadable", group_id=gid, member_id=mid)
+                return 0
+            if found_type is not None:
+                logger.warning(
+                    "Backfill skipped: messages.json is not an object",
+                    group_id=gid,
+                    member_id=mid,
+                    found_type=found_type,
+                )
                 return 0
             if not wrote or total < 0:
                 return 0
