@@ -28,8 +28,10 @@ class RateLimitedError(ApiError):
     for "no data" (an empty group list, timeline or member list). Retry later.
 
     Attributes:
-        retry_after: Seconds from the ``Retry-After`` header, or None when absent
-            or not a number.
+        retry_after: Seconds from the ``Retry-After`` header; None when the
+            header is absent, not a number, not finite or negative. For a
+            timeline request refused during the 429 cooldown (never sent) it is
+            the remaining cooldown in seconds.
     """
 
     def __init__(self, message: str, retry_after: Optional[float] = None):
