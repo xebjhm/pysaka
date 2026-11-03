@@ -21,6 +21,7 @@ from .media import get_audio_metadata, get_media_dimensions
 from .utils import (
     CANCELED_STATES,
     _normalized_type,
+    _short_path,
     get_media_extension,
     media_file_is_present,
     normalize_message,
@@ -44,11 +45,6 @@ T = TypeVar("T")
 # consumer (SakaDesk's DataDirLock).
 _FILE_LOCKS: dict[str, threading.Lock] = {}
 _FILE_LOCKS_GUARD = threading.Lock()
-
-
-def _short_path(path: Path) -> str:
-    """``parent/name`` of ``path`` for logging (no absolute path, so no user name)."""
-    return f"{path.parent.name}/{path.name}"
 
 
 def _error_origin(exc: BaseException) -> dict[str, str]:

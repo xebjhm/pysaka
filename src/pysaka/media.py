@@ -6,6 +6,8 @@ from pathlib import Path
 
 import structlog
 
+from .utils import _short_path
+
 logger = structlog.get_logger()
 
 
@@ -25,7 +27,7 @@ def get_image_dimensions(filepath: Path) -> tuple[int | None, int | None]:
         with Image.open(filepath) as img:
             return img.width, img.height
     except Exception as e:
-        logger.warning("Failed to get image dimensions", path=str(filepath), error=str(e))
+        logger.warning("Failed to get image dimensions", path=_short_path(filepath), error_type=type(e).__name__)
         return None, None
 
 
@@ -48,7 +50,7 @@ def get_video_dimensions(filepath: Path) -> tuple[int | None, int | None]:
                 return track.width, track.height
         return None, None
     except Exception as e:
-        logger.warning("Failed to get video dimensions", path=str(filepath), error=str(e))
+        logger.warning("Failed to get video dimensions", path=_short_path(filepath), error_type=type(e).__name__)
         return None, None
 
 
@@ -109,6 +111,6 @@ def get_audio_metadata(filepath: Path, media_type: str) -> dict[str, float | boo
             result["is_muted"] = not has_audio
 
     except Exception as e:
-        logger.warning("Failed to get audio metadata", path=str(filepath), error=str(e))
+        logger.warning("Failed to get audio metadata", path=_short_path(filepath), error_type=type(e).__name__)
 
     return result

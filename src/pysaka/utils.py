@@ -158,6 +158,11 @@ def is_jwt_expired(token: str) -> bool:
     return remaining <= 0
 
 
+def _short_path(path: Path) -> str:
+    """``parent/name`` of ``path`` for logging (no absolute path, so no user name)."""
+    return f"{path.parent.name}/{path.name}"
+
+
 CANCELED_STATES = frozenset({"canceled", "cancelled"})
 """Server states of a message the member withdrew (text and media stripped)."""
 

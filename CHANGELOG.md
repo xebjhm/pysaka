@@ -77,7 +77,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of a traceback. Network, timeout and download failures log the
   redacted URL, and the `ApiError` raised for a network error or timeout reads
   `Network error: <ExceptionType>` / `Timeout: <ExceptionType>` instead of
-  embedding the exception text.
+  embedding the exception text. Media probe and file-error logs show
+  `parent/name` instead of the absolute path (no user name).
 - Renaming a room folder (`messages/<gid> <old room name>`) or a member folder
   (`<mid> <old name>`) left every stored `media_file` pointing into the old
   folder, so the app showed broken media and Verify & Fix re-downloaded into
