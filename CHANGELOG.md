@@ -49,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Client.download_file` failure logs no longer include the signed query string of
   the media URL, nor any `user:password@` in it (only scheme, host, port and
   path), nor exception text that may embed it.
+- `Client.get_messages`: when the `order=asc` probe does not confirm the start of
+  the timeline, the `ApiError` text and a `Timeline start probe rejected` warning
+  now include the probed first id and the oldest collected id, so a room that
+  stops syncing can be diagnosed.
 - **A favorite (or any local `messages.json` edit) made while a sync was writing
   the same file could drop the newly synced messages permanently**, because the
   cursor had already advanced past them. `sync_member` and

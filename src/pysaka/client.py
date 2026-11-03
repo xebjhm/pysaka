@@ -40,6 +40,12 @@ def _redact_url(url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
+def _int_or_none(value: Any) -> Optional[int]:
+    """``value`` if it is a true integer (not a bool), else None — for logging
+    server-supplied ids without echoing arbitrary content."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 class Group(Enum):
     HINATAZAKA46 = "hinatazaka46"
     NOGIZAKA46 = "nogizaka46"
@@ -841,6 +847,7 @@ class Client:
                 # unreached and retry next sync.
                 replayed = repeated and len(all_messages) == known_before_page
                 timeline_start = len(messages) < params["count"] and not replayed
+                probe_detail = ""
                 if cursor_unreached and not timeline_start and not replayed and not repeated:
                     # A FULL last page with no continuation is ambiguous: dropped
                     # token, or a history that is an exact multiple of the page
@@ -851,13 +858,26 @@ class Client:
                     # would also accept a server that ignores ``order=asc`` and
                     # answers with the newest message.
                     first_id = await self._timeline_first_id(session, group_id)
-                    timeline_start = first_id is not None and bool(all_messages) and first_id == min(all_messages)
+                    oldest_id = min(all_messages) if all_messages else None
+                    timeline_start = first_id is not None and oldest_id is not None and first_id == oldest_id
+                    if not timeline_start:
+                        probe_first_id, oldest_collected_id = _int_or_none(first_id), _int_or_none(oldest_id)
+                        logger.warning(
+                            "Timeline start probe rejected",
+                            group_id=group_id,
+                            probe_first_id=probe_first_id,
+                            oldest_collected_id=oldest_collected_id,
+                        )
+                        probe_detail = (
+                            f" (order=asc probe: probe_first_id={probe_first_id}, "
+                            f"oldest_collected_id={oldest_collected_id})"
+                        )
                 if cursor_unreached and not timeline_start:
                     raise ApiError(
                         f"Timeline pagination for group {group_id} ended (missing or "
                         f"repeated continuation) on a full or replayed page while the "
                         f"cursor (since_ts={effective_ts}, since_id={since_id}) is "
-                        f"still unreached; refusing to skip a possible gap."
+                        f"still unreached{probe_detail}; refusing to skip a possible gap."
                     )
                 if before_cursor:
                     # Routine, not a gap: e.g. a caller's overlap window subtracted

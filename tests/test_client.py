@@ -787,3 +787,29 @@ async def test_full_last_page_raises_when_probe_ignores_order(monkeypatch):
     client.fetch_json = AsyncMock(side_effect=fetch)
     with pytest.raises(ApiError):
         await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("probe_id", "logged_first_id"), [(400, 400), ("400", None)])
+async def test_probe_rejection_reports_ids(monkeypatch, probe_id, logged_first_id):
+    """A rejected probe names the probed first id and the oldest collected id,
+    so a frozen room can be diagnosed from the log or the error text."""
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
+    client = Client(group=Group.HINATAZAKA46, access_token="t")
+    pages = [{"messages": _desc_page(201, 200, _sec_ts)}]
+
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return {"messages": [{"id": probe_id, "published_at": _sec_ts(400)}]}
+        return pages.pop(0)
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
+    with capture_logs() as logs, pytest.raises(ApiError) as exc:
+        await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
+
+    assert f"probe_first_id={logged_first_id}" in str(exc.value)
+    assert "oldest_collected_id=201" in str(exc.value)
+    (entry,) = [e for e in logs if e["event"] == "Timeline start probe rejected"]
+    assert (entry["probe_first_id"], entry["oldest_collected_id"]) == (logged_first_id, 201)
