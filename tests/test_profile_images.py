@@ -60,6 +60,22 @@ def test_merge_index_current_tracks_api_even_before_download():
     assert idx == {"version": 1, "current": {"phone_image": "u/p.jpg"}, "images": []}
 
 
+def test_merge_index_stores_urls_without_query_or_fragment():
+    signed = "https://cdn/private/users/thumbnails/a.jpg?Expires=1&Signature=s&Key-Pair-Id=k#f"
+    idx = pi.merge_index(None, {"thumbnail": ("thumbnail/a.jpg", signed)}, {"thumbnail": signed}, NOW)
+    clean = "https://cdn/private/users/thumbnails/a.jpg"
+    assert idx["current"] == {"thumbnail": clean}
+    assert idx["images"][0]["url"] == clean
+    assert "Signature" not in json.dumps(idx)
+
+
+def test_merge_index_signature_change_alone_is_not_a_change():
+    def merge(index, url):
+        return pi.merge_index(index, {"thumbnail": ("thumbnail/a.jpg", url)}, {"thumbnail": url}, NOW)
+
+    assert merge(merge(None, "u/a.jpg?sig=1"), "u/a.jpg?sig=2") is None
+
+
 def test_merge_index_nothing_to_record_returns_none():
     assert pi.merge_index(None, {}, {}, NOW) is None
 
@@ -104,7 +120,7 @@ async def test_archive_downloads_then_skips(manager, tmp_path, time_machine):
     assert report == {"downloaded": 3, "skipped": 0, "failed": 0}
     assert (member_dir / "profile_images" / "phone_image" / "134-20260223-125348.jpeg").read_bytes() == b"img"
     idx = _index(member_dir)
-    assert idx["current"]["phone_image"] == MEMBER["phone_image"]
+    assert idx["current"]["phone_image"] == pi.stored_url(MEMBER["phone_image"])
     assert {e["first_seen"] for e in idx["images"]} == {NOW}
 
     report = await manager.archive_profile_images(AsyncMock(), GROUP, MEMBER, member_dir)

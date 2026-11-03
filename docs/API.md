@@ -246,7 +246,8 @@ Download the current list icon (`group.thumbnail`), chat icon (`member.thumbnail
 image (`member.phone_image`) into `member_dir/profile_images/<kind>/<basename>` and record them in
 `profile_images/index.json`:
 `{"version": 1, "current": {kind: url}, "images": [{"kind", "file", "url", "first_seen"}]}`
-(`current` maps each kind to its latest URL; `images` is the history of distinct files). Kinds are
+(`current` maps each kind to its latest URL; `images` is the history of distinct files). URLs are
+stored without their query string and fragment, so CDN signatures never reach the disk. Kinds are
 `thumbnail`, `phone_image` and `group_thumbnail`. Called automatically by `sync_member`, where a
 failure is logged and never affects the result or the cursor. Returns `{"downloaded", "skipped", "failed"}`.
 - An unreadable `index.json` is replaced by a fresh index: its history entries and `first_seen`
@@ -254,7 +255,8 @@ failure is logged and never affects the result or the cursor. Returns `{"downloa
 - The current image of a kind is the `images[]` entry where
   `entry["kind"] == kind and entry["file"] == profile_images.relative_file(kind, index["current"][kind])`
   — match by file, never by full URL (CDN URLs can carry changing query strings). If no entry
-  matches, the current image has not been archived yet; use the URL in `current[kind]`.
+  matches, the current image has not been archived yet; use the URL in `current[kind]` (this works for
+  public CDN URLs only — a signed private URL, such as the account avatar, needs a fresh API URL).
 
 #### `backfill_past_messages(session, group: dict, member: dict) -> int`
 Merge the room's pre-subscription messages (`Client.get_past_messages`) into the member's archive

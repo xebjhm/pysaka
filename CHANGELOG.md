@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notifications.
 - `sync_member` now archives the member's list icon, chat icon and call-screen
   image into `profile_images/` with an `index.json` history
-  (`SyncManager.archive_profile_images`).
+  (`SyncManager.archive_profile_images`). URLs in `index.json` are stored
+  without their query string, so CDN signatures are never written to disk.
 - `SyncManager.backfill_past_messages(session, group, member)` adds the room's
   pre-subscription messages and their media once per member, without moving the
   cursor.

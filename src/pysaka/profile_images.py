@@ -9,7 +9,7 @@ does the downloads and writes ``index.json``.
 """
 
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from .utils import sanitize_name
 
@@ -43,6 +43,15 @@ def relative_file(kind: str, url: str) -> Optional[str]:
     return f"{kind}/{safe}"
 
 
+def stored_url(url: str) -> str:
+    """``url`` without its query string and fragment, as recorded in ``index.json``.
+
+    Private CDN URLs (e.g. the account avatar) are signed in the query string;
+    the signature is a short-lived credential and must not be written to disk.
+    """
+    return urlunparse(urlparse(url)._replace(query="", fragment=""))
+
+
 def merge_index(
     current: Optional[Any],
     archived: dict[str, tuple[str, str]],
@@ -57,6 +66,8 @@ def merge_index(
         archived: kind → (relative file, url) for images present on disk now.
         current_urls: kind → URL from the latest API data (recorded even when the
             download has not succeeded yet, so consumers know what is current).
+            Every URL is stored via :func:`stored_url` (query and fragment
+            dropped), so a signature change alone does not change the index.
         now_iso: UTC timestamp recorded as ``first_seen`` for new entries.
     """
     images = current.get("images") if isinstance(current, dict) else None
@@ -72,9 +83,10 @@ def merge_index(
     known = {(e.get("kind"), e.get("file")) for e in index["images"]}
     for kind, (rel, url) in archived.items():
         if (kind, rel) not in known:
-            index["images"].append({"kind": kind, "file": rel, "url": url, "first_seen": now_iso})
+            index["images"].append({"kind": kind, "file": rel, "url": stored_url(url), "first_seen": now_iso})
             changed = True
-    if index.get("current") != current_urls:
-        index["current"] = dict(current_urls)
+    current_stored = {kind: stored_url(url) for kind, url in current_urls.items()}
+    if index.get("current") != current_stored:
+        index["current"] = current_stored
         changed = True
     return index if changed else None

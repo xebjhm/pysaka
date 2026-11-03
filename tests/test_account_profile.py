@@ -50,7 +50,9 @@ async def test_stores_name_and_avatar_only(manager):
     for secret in ("1990-01-01", "TW-TPE", "male", "secret"):
         assert secret not in blob
     assert (account / "profile_images" / "thumbnail" / "u-20260101-000000.jpeg").read_bytes() == b"me"
-    assert _read(account / "profile_images" / "index.json")["current"] == {"thumbnail": PROFILE["thumbnail"]}
+    index_text = (account / "profile_images" / "index.json").read_text(encoding="utf-8")
+    assert json.loads(index_text)["current"] == {"thumbnail": "https://cdn/users/thumbnails/u-20260101-000000.jpeg"}
+    assert "sig=abc" not in index_text
 
 
 async def test_second_run_skips_and_avatar_change_adds_history(manager):
