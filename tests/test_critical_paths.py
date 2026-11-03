@@ -84,16 +84,20 @@ class TestGetMessagesRetryGuard:
 
     async def test_first_page_none_retries_once_then_breaks(self, client, mock_session):
         """When fetch_json returns None on page 0, refresh is attempted once.
-        After the retry also returns None, the loop must exit (not loop forever)."""
+        After the retry also returns None, the loop must exit (not loop forever).
+        A full fetch (no cursor) then raises instead of returning [], which would
+        read as an empty room."""
+        from pysaka.exceptions import ApiError
+
         # fetch_json always returns None (simulating persistent failure)
         with patch.object(client, "fetch_json", new_callable=AsyncMock, return_value=None) as mock_fetch:
             # refresh_access_token succeeds (returns True), so the retry fires
             with patch.object(
                 client, "refresh_access_token", new_callable=AsyncMock, return_value=True
             ) as mock_refresh:
-                messages = await client.get_messages(mock_session, group_id=1)
+                with pytest.raises(ApiError):
+                    await client.get_messages(mock_session, group_id=1)
 
-        assert messages == []
         # refresh called exactly once (not in a loop)
         mock_refresh.assert_called_once()
         # fetch_json called exactly twice: original + one retry
@@ -105,8 +109,9 @@ class TestGetMessagesRetryGuard:
             with patch.object(
                 client, "refresh_access_token", new_callable=AsyncMock, return_value=False
             ) as mock_refresh:
-                messages = await client.get_messages(mock_session, group_id=1)
+                messages = await client.get_messages(mock_session, group_id=1, since_ts="2024-01-01T00:00:00Z")
 
+        # Incremental fetch: nothing collected, so [] is safe (no cursor can move).
         assert messages == []
         mock_refresh.assert_called_once()
         # Only the original call, no retry since refresh failed

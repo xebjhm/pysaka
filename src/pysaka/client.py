@@ -977,7 +977,9 @@ class Client:
         Raises:
             ApiError: If pagination stops in a way that could hide unfetched
                 messages — a failed page fetch or an empty page carrying a
-                continuation after earlier pages were collected, or, while the
+                continuation after earlier pages were collected; on a full fetch
+                (neither ``since_ts`` nor ``since_id``), a failed first page (with
+                a cursor, a failed first page returns ``[]``); or, while the
                 cursor is still unreached: a full page with a repeated
                 continuation (always), a full page with a missing continuation
                 (unless the ``order=asc`` probe confirms the timeline start), or
@@ -995,6 +997,8 @@ class Client:
         # by finding the since_id message in the stream (old behaviour).
         effective_ts: Optional[str] = since_ts
         need_discover_ts = since_id is not None and since_ts is None
+        # No cursor at all: the caller wants the whole timeline.
+        full_fetch = since_ts is None and since_id is None
         first_page_retried = False
 
         while True:
@@ -1030,6 +1034,14 @@ class Client:
                         f"reaching the cursor after {len(all_messages)} message(s); "
                         "refusing to return a partial page that would skip a gap."
                     )
+                if full_fetch:
+                    # Without a cursor, [] reads as "empty room": a caller checking
+                    # the archive against it (room_archive_complete) would pass
+                    # vacuously and never re-read the room. Fail closed instead.
+                    logger.warning(
+                        "Timeline first page failed", group_id=group_id, reason="no_data", retried=first_page_retried
+                    )
+                    raise ApiError(f"Timeline fetch failed for group {group_id} on the first page")
                 break
 
             messages = data.get("messages", [])

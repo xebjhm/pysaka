@@ -813,3 +813,60 @@ async def test_probe_rejection_reports_ids(monkeypatch, probe_id, logged_first_i
     assert "oldest_collected_id=201" in str(exc.value)
     (entry,) = [e for e in logs if e["event"] == "Timeline start probe rejected"]
     assert (entry["probe_first_id"], entry["oldest_collected_id"]) == (logged_first_id, 201)
+
+
+# --- Full fetch (no cursor): a failed first page is not an empty room ---------
+
+
+@pytest.mark.asyncio
+async def test_full_fetch_first_page_failure_raises(client, mock_session):
+    """A full fetch (no ``since_ts``/``since_id``) whose first page fails must raise:
+    returning ``[]`` looks like an empty room, and ``room_archive_complete(group, [])``
+    is vacuously True, so a caller would mark the room scanned forever."""
+    from structlog.testing import capture_logs
+
+    client.fetch_json = AsyncMock(return_value=None)
+    client.refresh_access_token = AsyncMock(return_value=False)
+
+    with capture_logs() as logs, pytest.raises(ApiError) as exc:
+        await client.get_messages(mock_session, group_id=7)
+
+    assert str(exc.value) == "Timeline fetch failed for group 7 on the first page"
+    (entry,) = [e for e in logs if e["event"] == "Timeline first page failed"]
+    assert entry["log_level"] == "warning"
+    assert entry["group_id"] == 7
+    assert entry["reason"] == "no_data"
+
+
+@pytest.mark.asyncio
+async def test_full_fetch_first_page_failure_raises_after_refresh_retry(client, mock_session):
+    """The one refresh-and-retry of the first page is kept; if the retry fails too,
+    the full fetch raises."""
+    client.fetch_json = AsyncMock(return_value=None)
+    client.refresh_access_token = AsyncMock(return_value=True)
+
+    with pytest.raises(ApiError, match="on the first page"):
+        await client.get_messages(mock_session, group_id=7)
+    assert client.fetch_json.await_count == 2
+    client.refresh_access_token.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cursor", [{"since_ts": "2026-01-01T00:00:00Z"}, {"since_id": 5}])
+async def test_incremental_fetch_first_page_failure_returns_empty(client, mock_session, cursor):
+    """With a cursor, a failed first page keeps today's behaviour: ``[]`` (nothing
+    collected, so the caller's cursor cannot move past anything)."""
+    client.fetch_json = AsyncMock(return_value=None)
+    client.refresh_access_token = AsyncMock(return_value=False)
+
+    assert await client.get_messages(mock_session, group_id=7, **cursor) == []
+
+
+@pytest.mark.asyncio
+async def test_full_fetch_empty_room_returns_empty(client, mock_session):
+    """A genuinely empty room (first page has no messages and no continuation) is
+    not a failure: ``[]``."""
+    client.fetch_json = AsyncMock(return_value={"messages": []})
+
+    assert await client.get_messages(mock_session, group_id=7) == []
+    assert client.fetch_json.await_count == 1

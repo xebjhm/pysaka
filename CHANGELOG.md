@@ -116,6 +116,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `updated_at`, first sight), keeping any content captured before the
   withdrawal. A text message with no text and no media in any state other
   than canceled (not only `published`) is still skipped.
+- `Client.get_messages` without a cursor (neither `since_ts` nor `since_id`)
+  now raises `ApiError` when the first timeline page fails (a 4xx other than
+  429, a 401 that persists after the token refresh, or an unexpected error).
+  Before, it returned `[]`, which looks like an empty room, so
+  `room_archive_complete` passed and a history scan could be recorded as done
+  for a room that was never read. With a cursor, a failed first page still
+  returns `[]`.
 
 ## [0.4.5] - 2026-11-03
 

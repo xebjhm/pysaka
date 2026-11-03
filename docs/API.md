@@ -144,7 +144,9 @@ the seconds left (`None` when not blocked). Logging: `Timeline requests blocked`
   collected messages; merely being collected is not enough.
 - **Raises**: `ApiError` if pagination stops in a way that could hide unfetched
   messages: a failed page fetch or an empty page carrying a continuation after
-  earlier pages were collected, or, while the cursor is still unreached, a full
+  earlier pages were collected; on a full fetch (neither `since_ts` nor
+  `since_id`), a failed first page (with a cursor, a failed first page returns
+  `[]`); or, while the cursor is still unreached, a full
   page with a repeated continuation (always), a full page with a missing
   continuation (unless the `order=asc` probe confirms the timeline start), or a
   page that replays already-collected messages. On HTTP 429 it raises
