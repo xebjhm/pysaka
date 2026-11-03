@@ -158,6 +158,10 @@ def is_jwt_expired(token: str) -> bool:
     return remaining <= 0
 
 
+CANCELED_STATES = frozenset({"canceled", "cancelled"})
+"""Server states of a message the member withdrew (text and media stripped)."""
+
+
 def normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
     """
     Normalizes a raw API message into the standard export format.
@@ -199,4 +203,7 @@ def normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
     state = msg.get("state")
     if state and state != "published":
         normalized["state"] = state
+        if state in CANCELED_STATES:
+            # When the member withdrew it (the server bumps updated_at on cancel).
+            normalized["canceled_at"] = msg.get("updated_at")
     return normalized

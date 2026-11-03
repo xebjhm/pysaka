@@ -17,7 +17,7 @@ from . import profile_images, roster
 from .client import Client
 from .exceptions import RefreshFailedError, SessionExpiredError
 from .media import get_audio_metadata, get_media_dimensions
-from .utils import get_media_extension, media_file_is_present, normalize_message, sanitize_name
+from .utils import CANCELED_STATES, get_media_extension, media_file_is_present, normalize_message, sanitize_name
 
 logger = structlog.get_logger()
 
@@ -25,7 +25,7 @@ logger = structlog.get_logger()
 # media (confirmed via the live timeline probe). ANY OTHER non-"published" state is
 # treated as a potential real gap and surfaced in `unresolved`, so completeness is
 # never overclaimed on an unexpected/transient state (e.g. "processing").
-_MEDIA_STRIPPING_STATES = frozenset({"canceled", "cancelled"})
+_MEDIA_STRIPPING_STATES = CANCELED_STATES
 
 T = TypeVar("T")
 
@@ -1378,8 +1378,15 @@ class SyncManager:
                             p_msg["height"] = height
 
                 # Skip empty text messages (no content and no media)
-                # These are often system/metadata entries from subscription
-                if msg_type == "text" and not p_msg.get("content") and not media_url:
+                # These are often system/metadata entries from subscription.
+                # A canceled one is a withdrawn message, not metadata: keep it so
+                # the withdrawal is recorded (and any captured text is preserved).
+                if (
+                    msg_type == "text"
+                    and not p_msg.get("content")
+                    and not media_url
+                    and msg.get("state") not in CANCELED_STATES
+                ):
                     logger.debug("Skipping empty text message", message_id=msg.get("id"))
                     continue
 
@@ -1417,7 +1424,9 @@ class SyncManager:
 
         A field is only inherited from the stored record when the fresh message
         omits it — a freshly re-derived value (e.g. is_muted recomputed on a
-        re-download) always wins.
+        re-download) always wins. A canceled (withdrawn) message arrives without
+        text: it keeps the ``content`` captured earlier and the first
+        ``canceled_at`` seen.
         """
         merged = {m["id"]: m for m in existing_msgs}
         for pm in processed:
@@ -1426,6 +1435,13 @@ class SyncManager:
                 for key in SyncManager._LOCAL_DERIVED_FIELDS:
                     if key not in pm and key in prev:
                         pm[key] = prev[key]
+                if pm.get("state") in CANCELED_STATES:
+                    # A withdrawn message comes back without text: keep what we
+                    # captured before the withdrawal, and the first cancel time seen.
+                    if pm.get("content") is None and prev.get("content") is not None:
+                        pm["content"] = prev["content"]
+                    if prev.get("canceled_at"):
+                        pm["canceled_at"] = prev["canceled_at"]
             merged[pm["id"]] = pm
         return list(merged.values())
 

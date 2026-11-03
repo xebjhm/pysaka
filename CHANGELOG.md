@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   let callers re-read each room's whole timeline once (flag in `sync_state.json`
   as `room_<gid>`), recovering messages from authors that earlier versions
   dropped.
+- `pysaka.utils.CANCELED_STATES`: the server states (`canceled`, `cancelled`) of a
+  message the member withdrew. A canceled message now carries `canceled_at`
+  (the API's `updated_at`, kept from the first time it was seen).
 
 ### Changed
 - `sync_member` assigns messages without `member_id` to member 0 (the room
@@ -37,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Client.fetch_json`. Before, `get_groups`, `get_members` and `get_messages`
   returned `[]` while rate limited, which callers could not tell apart from
   "nothing there". Callers that already handle `ApiError` need no change.
+
+### Fixed
+- **A message the member withdrew lost its archived text on the next re-fetch**:
+  `sync_member` now keeps the captured `content` when a message turns `canceled`
+  and records `canceled_at` (the server's `updated_at`, first sight). A canceled
+  text message with no text is now stored (`content` null, `state` `canceled`)
+  instead of being skipped as an empty message.
 
 ## [0.4.5] - 2026-11-03
 
