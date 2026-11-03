@@ -23,6 +23,10 @@ logger = structlog.get_logger()
 # Endpoint path of a group's timeline; the only endpoint ``timeline_min_interval`` paces.
 _TIMELINE_ENDPOINT = re.compile(r"^/groups/\d+/timeline$")
 
+# Seconds a client refuses further timeline requests after one returned HTTP 429 without
+# a usable ``Retry-After`` (observed cooldown: under 2.5 minutes).
+TIMELINE_429_COOLDOWN = 150.0
+
 
 def _redact_url(url: str) -> str:
     """Return ``scheme://host[:port]/path`` of ``url`` for logging.
@@ -217,6 +221,9 @@ class Client:
         self._timeline_last_start: Optional[float] = None
         self._timeline_paced_requests = 0
         self._timeline_waited = 0.0
+        # Fail-fast after a timeline 429 (see ``_timeline_blocked_remaining``).
+        self.timeline_blocked_until: Optional[float] = None
+        self._timeline_short_circuited = 0
         self.timeline_min_interval = timeline_min_interval
 
         # Platform profile: "web" (default) mimics the browser client;
@@ -263,6 +270,10 @@ class Client:
         ``get_messages`` so the pause is not doubled. The spacing is between request
         starts at this client, not on the wire: a slow response or a retry does not
         shift it.
+
+        Independently of this setting, a timeline request that returns HTTP 429 blocks
+        all timeline requests of this client for the ``Retry-After`` seconds (or
+        ``TIMELINE_429_COOLDOWN`` when absent or unusable): see ``fetch_json``.
         """
         return self._timeline_min_interval
 
@@ -311,6 +322,49 @@ class Client:
                         self._timeline_waited += wait
                 self._timeline_paced_requests += 1
             self._timeline_last_start = time.monotonic()
+
+    def _timeline_blocked_remaining(self, endpoint: str) -> float:
+        """Seconds left of the timeline 429 cooldown for ``endpoint``, 0.0 if not blocked.
+
+        Only ``/groups/{id}/timeline`` endpoints are ever blocked. The block ends by
+        itself once ``timeline_blocked_until`` (a ``time.monotonic()`` value) has passed.
+        """
+        until = self.timeline_blocked_until
+        if until is None or not _TIMELINE_ENDPOINT.match(endpoint):
+            return 0.0
+        remaining = until - time.monotonic()
+        if remaining <= 0:
+            self.timeline_blocked_until = None
+            if self._timeline_short_circuited:
+                logger.debug("Timeline block expired", short_circuited=self._timeline_short_circuited)
+                self._timeline_short_circuited = 0
+            return 0.0
+        return remaining
+
+    def _raise_if_timeline_blocked(self, endpoint: str) -> None:
+        """Raise ``RateLimitedError`` without sending if the timeline is blocked."""
+        remaining = self._timeline_blocked_remaining(endpoint)
+        if remaining > 0:
+            self._timeline_short_circuited += 1
+            logger.debug(
+                "Timeline request short-circuited",
+                endpoint=endpoint,
+                retry_after=round(remaining, 3),
+                short_circuited=self._timeline_short_circuited,
+            )
+            raise RateLimitedError(f"Timeline requests blocked after HTTP 429 at {endpoint}", remaining)
+
+    def _block_timeline(self, endpoint: str, err: RateLimitedError) -> RateLimitedError:
+        """Start the timeline cooldown after a 429 at ``endpoint``; returns ``err``."""
+        if _TIMELINE_ENDPOINT.match(endpoint):
+            cooldown = err.retry_after if err.retry_after is not None else TIMELINE_429_COOLDOWN
+            if not (math.isfinite(cooldown) and cooldown >= 0):
+                cooldown = TIMELINE_429_COOLDOWN
+            if self._timeline_blocked_remaining(endpoint) <= 0:
+                self._timeline_short_circuited = 0
+                logger.warning("Timeline requests blocked", cooldown=cooldown)
+            self.timeline_blocked_until = time.monotonic() + cooldown
+        return err
 
     def _build_headers(self) -> dict[str, str]:
         """Build request headers for the active platform profile.
@@ -371,7 +425,12 @@ class Client:
             session: Active aiohttp ClientSession.
             endpoint: API endpoint path (e.g. "/groups"). Requests to
                 ``/groups/{id}/timeline``, including the retry after a 401, wait
-                first when ``timeline_min_interval`` is above 0.
+                first when ``timeline_min_interval`` is above 0. After any
+                timeline request returned HTTP 429, timeline requests through this
+                client raise ``RateLimitedError`` without being sent until the
+                cooldown ends (``Retry-After`` seconds when the 429 carried a finite
+                value >= 0, else ``TIMELINE_429_COOLDOWN``); waiting requests check
+                again after their wait. Other endpoints are unaffected.
             params: Query parameters.
 
         Returns:
@@ -381,7 +440,9 @@ class Client:
 
         Raises:
             ApiError: On a server error (5xx) or a network error / timeout.
-            RateLimitedError: On HTTP 429 (also after a token refresh).
+            RateLimitedError: On HTTP 429 (also after a token refresh), and for a
+                timeline request made during the cooldown that follows such a 429
+                (not sent; ``retry_after`` is the remaining cooldown in seconds).
             SessionExpiredError: If the session is invalidated during the request.
             RefreshFailedError: If a 401 triggers a token refresh and all refresh
                 plans fail (surfaced so callers can prompt re-login).
@@ -389,7 +450,9 @@ class Client:
         url = f"{self.api_base}{endpoint}"
         logger.debug("API GET request", endpoint=endpoint, params=params)
         try:
+            self._raise_if_timeline_blocked(endpoint)
             await self._pace_timeline(endpoint)
+            self._raise_if_timeline_blocked(endpoint)  # a 429 may have arrived while waiting
             async with session.get(url, headers=self.headers, params=params) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -400,6 +463,7 @@ class Client:
                     if await self.refresh_access_token(session):
                         # Retry the request with new token
                         await self._pace_timeline(endpoint)
+                        self._raise_if_timeline_blocked(endpoint)
                         async with session.get(url, headers=self.headers, params=params) as resp_retry:
                             if resp_retry.status == 200:
                                 return await resp_retry.json()
@@ -407,12 +471,12 @@ class Client:
                                 logger.warning(f"Unauthorized at {endpoint} even after refresh.")
                                 return None
                             elif resp_retry.status == 429:
-                                raise _rate_limited(endpoint, resp_retry)
+                                raise self._block_timeline(endpoint, _rate_limited(endpoint, resp_retry))
                             elif resp_retry.status >= 500:
                                 raise ApiError(f"Server error {resp_retry.status}", resp_retry.status)
                     return None
                 elif resp.status == 429:
-                    raise _rate_limited(endpoint, resp)
+                    raise self._block_timeline(endpoint, _rate_limited(endpoint, resp))
                 elif resp.status >= 500:
                     logger.error(f"Server error {resp.status} at {endpoint}")
                     raise ApiError(f"Server error {resp.status}", resp.status)

@@ -95,6 +95,20 @@ are never paced.
   `Timeline pacing summary` (info, `requests`, `waited_seconds`) when pacing is switched
   back to `0.0` after at least one paced request.
 
+**Fail-fast after a timeline 429.** Independently of `timeline_min_interval` (also at `0.0`),
+once any `/groups/{id}/timeline` request through a client returns HTTP 429, that client raises
+`RateLimitedError` for every further timeline request **without sending it**, until the cooldown
+has passed. The cooldown is the response's `Retry-After` when it is a finite number >= 0, else
+`TIMELINE_429_COOLDOWN` (`150.0` seconds, `pysaka.client`). It covers requests that were already
+waiting in the pacing gate (checked again after their wait), `get_messages` pages, the
+`order=asc` probe, `mark_group_read` and the 401 retry. The `retry_after` of the raised error is
+the remaining cooldown in seconds. Other endpoints (`/groups/{id}/letters`, `/members/{id}`, ...)
+are unaffected, the block ends by itself, and it is per client (one per service). The monotonic
+deadline is readable as `Client.timeline_blocked_until` (`None` when not blocked). Logging:
+`Timeline requests blocked` (warning, `cooldown`) once when blocking starts, and a debug
+`Timeline request short-circuited` line (`endpoint`, `retry_after`, `short_circuited` count) per
+refused request.
+
 #### `get_groups(session: aiohttp.ClientSession, include_inactive: bool = False) -> List[dict]`
 - **session**: Active aiohttp session.
 - **include_inactive**: If True, returns `expired` and `suspended` subscriptions too.
@@ -237,7 +251,8 @@ higher-level `get_*` methods). Handles token refresh. Returns `None` for a 4xx o
 401 the refresh could not fix, or an unexpected error while handling the response. Raises
 `ApiError` on a server error (5xx) or a network error / timeout, `RateLimitedError` (a subclass of
 `ApiError`) on HTTP 429 instead of returning `None` (`retry_after` is `None` unless the header is a
-finite, non-negative number), and `SessionExpiredError` / `RefreshFailedError` on auth failures.
+finite, non-negative number; a timeline request during the cooldown after a timeline 429 raises it
+without being sent), and `SessionExpiredError` / `RefreshFailedError` on auth failures.
 See the `ApiError` example below.
 
 #### `refresh_access_token(session) -> bool`
@@ -737,11 +752,14 @@ except ApiError as e:
 ### `RateLimitedError`
 Subclass of `ApiError`, raised when the API answers HTTP 429 Too Many Requests.
 Raised by `fetch_json` and by every `Client` method built on it (see "Errors of the GET methods"
-under `Client`), instead of returning `None`, `[]` or `False`.
+under `Client`), instead of returning `None`, `[]` or `False`. It is also raised, without a
+request being sent, for a timeline request made while the client's timeline cooldown after an
+earlier 429 is running (see "Timeline pacing"); `retry_after` is then the remaining cooldown.
 
 - **status_code**: `429`.
 - **retry_after**: `Optional[float]` - seconds from the `Retry-After` header, or
   `None` when the header is absent, not a number, not finite (`nan`, `inf`) or negative.
+  For a request refused during the timeline cooldown it is always set: the remaining seconds.
 
 ```python
 import asyncio
