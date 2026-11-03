@@ -282,17 +282,19 @@ never fires `on_new_messages`. The cursor advances (to the newest `updated_at` a
 fetched for the room) only when the fetch was complete (it ended on a short page; an empty page
 after a full one, hitting the page cap, or a page with no new letter count as incomplete) and every
 image of this member's letters is on disk, so a failed image is re-fetched (with a fresh signed
-URL) on the next call. A member with no letters in the room still advances it after a complete
-fetch. A letter whose `id` is not an integer (a string such as `"12"`, a float, a bool or a missing id) is
+URL) on the next call. When a complete fetch returned letters but none to this member and
+`letters.json` does not exist, an empty `{"version": 1, "letters": []}` is written so the cursor
+persists; an incomplete fetch writes nothing. A letter whose `id` is not an integer (a string such as `"12"`, a float, a bool or a missing id) is
 skipped, and only the id's type name is logged. A non-string `created_at`/`updated_at` counts as missing (stored as `null`).
 The cursor is used only while `letters.json` exists: if the file is missing the cursor is dropped and
 all letters are fetched again; an unreadable file is renamed to `letters.json.corrupt-<UTC timestamp>`
 (kept for inspection), the cursor is dropped, and the letters are rebuilt from a full fetch in the same
 call. Fetches up to 50 pages of 200 letters per
 call, chaining each page from the last letter's `created_at` (not `updated_at`, which a later
-favorite would push past letters not yet fetched); `letters.json` is rewritten only when its content changes.
-A room folder left under an old room name is renamed first (as `sync_member` does), so letters and
-messages share one folder.
+favorite would push past letters not yet fetched); `letters.json` is written only when its content
+changes or it is created. Before that write (and only when there is something to write), a room
+folder left under an old room name is renamed (as `sync_member` does), so letters and messages share
+one folder.
 
 `letters.json` shape, sorted by `created_at`:
 `{"version": 1, "letters": [{"id", "member_id", "text", "created_at", "updated_at", "is_favorite",

@@ -534,8 +534,10 @@ class SyncManager:
         only when the fetch was complete (it ended on a short page; an empty page
         after a full one, the page cap, or a page with no new letter are treated as
         incomplete) and every image of this member's letters is on disk, so a failed
-        image is re-fetched with a fresh signed URL next run. A member with no
-        letters in the room still advances the cursor after a complete fetch.
+        image is re-fetched with a fresh signed URL next run. When a complete
+        fetch returned letters but none to this member and ``letters.json`` does
+        not exist, an empty ``{"version": 1, "letters": []}`` is written so the
+        cursor persists (an incomplete fetch writes nothing).
         Pages of 200 are chained by the last letter's ``created_at`` (not its
         ``updated_at``, which a later favourite would push past unseen letters).
         A letter whose ``id`` is not an integer (a string, float, bool or a missing
@@ -548,8 +550,9 @@ class SyncManager:
         full fetch in the same call.
         Works for expired subscriptions (the server still returns their letters).
         Never touches the message cursor and never fires ``on_new_messages``.
-        ``letters.json`` is rewritten only when its content changes. A room
-        folder left under an old room name is renamed first, so letters and
+        ``letters.json`` is written only when its content changes or it is
+        created. Before that write (and only when there is something to write),
+        a room folder left under an old room name is renamed, so letters and
         messages share one folder.
 
         Raises:
@@ -645,7 +648,10 @@ class SyncManager:
             )
 
         added = 0
-        if records:
+        # A member with no letters of its own still needs a letters.json after a
+        # complete fetch: the cursor is dropped whenever the file is missing, so
+        # without it every call would refetch the whole room.
+        if records or (complete and fetched and not letters_file.exists()):
 
             def mutate(current: Optional[Any]) -> tuple[Optional[Any], int]:
                 existing = current.get("letters", []) if isinstance(current, dict) else []
@@ -663,7 +669,7 @@ class SyncManager:
             self._ensure_group_dir(group)  # rename a renamed room's folder before creating anything
             member_dir.mkdir(parents=True, exist_ok=True)
             try:
-                wrote, added = await asyncio.to_thread(self._locked_update, member_dir / "letters.json", mutate)
+                wrote, added = await asyncio.to_thread(self._locked_update, letters_file, mutate)
             except ValueError:
                 # Unreadable letters.json: leave it for inspection and refetch everything next time.
                 entry = dict(self.sync_state.get(key) or {})

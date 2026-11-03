@@ -357,14 +357,44 @@ async def test_mixed_int_and_string_ids_do_not_double_count(manager):
     assert [row["id"] for row in _stored(manager)["letters"]] == [12]
 
 
-async def test_quiet_member_still_advances_cursor(manager):
-    manager.client.get_letters = FakeLetterApi(
-        [_letter(1, _ts(1), member_id=7), _letter(2, _ts(2), member_id=7)]
-    ).as_mock()
+async def test_quiet_member_keeps_cursor_with_an_empty_letters_json(manager):
+    """A member without letters of its own in a complete fetch gets an empty
+    letters.json, so the cursor survives and the next call does not refetch the
+    whole room."""
+    api = FakeLetterApi([_letter(1, _ts(1), member_id=7), _letter(2, _ts(2), member_id=7)])
+    manager.client.get_letters = api.as_mock()
 
     assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 0
     assert manager.sync_state["90_90"]["letters_updated_at"] == _ts(2)
+    assert _stored(manager) == {"version": 1, "letters": []}
+
+    api.letters.append(_letter(3, _ts(3), member_id=7))
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 0
+    assert api.calls[-1] == _ts(2)  # cursor kept: no full refetch
+    assert manager.sync_state["90_90"]["letters_updated_at"] == _ts(3)
+    assert _stored(manager) == {"version": 1, "letters": []}
+
+
+async def test_quiet_member_incomplete_fetch_writes_nothing(manager):
+    page = [_letter(i, _ts(i), member_id=7) for i in range(1, 201)]
+    manager.client.get_letters = AsyncMock(side_effect=[page, []])  # empty later page: incomplete
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 0
     assert not (manager._member_dir_path(GROUP, MEMBER) / "letters.json").exists()
+    assert "letters_updated_at" not in (manager.sync_state.get("90_90") or {})
+
+
+async def test_quiet_member_does_not_rewrite_existing_letters_json(manager):
+    api = FakeLetterApi([_letter(1, _ts(1))])
+    manager.client.get_letters = api.as_mock()
+    await manager.sync_letters(AsyncMock(), GROUP, MEMBER)
+    path = manager._member_dir_path(GROUP, MEMBER) / "letters.json"
+    before = (path.stat().st_mtime_ns, _stored(manager))
+
+    api.letters.append(_letter(2, _ts(2), member_id=7))  # only another member's letter is new
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 0
+    assert (path.stat().st_mtime_ns, _stored(manager)) == before
+    assert manager.sync_state["90_90"]["letters_updated_at"] == _ts(2)
 
 
 async def test_identical_second_sync_does_not_rewrite_letters_json(manager):

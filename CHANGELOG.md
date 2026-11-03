@@ -27,7 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   letters (text + letter-card image) into `letters.json` and `letters/`, with
   its own `letters_updated_at` cursor; works for expired subscriptions. A
   missing `letters.json` triggers a full refetch, and an unreadable one is kept
-  as `letters.json.corrupt-<UTC timestamp>` and rebuilt in the same call.
+  as `letters.json.corrupt-<UTC timestamp>` and rebuilt in the same call. When
+  a complete fetch returns letters but none to this member, an empty
+  `letters.json` is written so the cursor persists instead of the whole room
+  being refetched on every call.
 - `Client.get_past_messages(..., strict=True)` returns None on a failed request,
   or on a response whose `messages` is missing or not a list, instead of `[]`.
   The default (`strict=False`) is unchanged and typed as `list[dict]`; only
