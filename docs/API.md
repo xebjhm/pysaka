@@ -417,6 +417,35 @@ then re-check disk truth and persist any new dimension metadata.
   signed URLs keyed by `message_id`.
 - **Returns**: `{"repaired": int, "failed": int, "still_missing": int}`.
 
+### One-time history scan
+
+Earlier versions dropped messages from authors missing from `/groups/{id}/members`, so callers
+re-read each room's whole timeline once. The flag lives in `sync_state.json` as
+`room_<gid>: {"history_scanned_at": "<UTC %Y-%m-%dT%H:%M:%SZ>"}`; it never collides with the
+`<gid>_<mid>` member keys, and deleting `sync_state.json` (a force resync) clears it.
+
+#### `history_scanned(group_id: int) -> bool`
+True when `room_<gid>.history_scanned_at` is set.
+
+#### `mark_history_scanned(group_id: int) -> None`
+Set `history_scanned_at` to the current UTC time and save `sync_state.json`. Call it only after
+`room_archive_complete` returned True for the scan's timeline.
+
+#### `room_archive_complete(group: dict, messages: list[dict]) -> bool` (async)
+True when every message id in `messages` is in `messages.json` of its author (`roster.author_id`,
+so member 0 for messages without `member_id`) under `messages/<gid> */<author> */`. An empty list
+is complete. Returns False when an author has no stored folder or misses an id (a warning with
+group id, member id and the number missing is logged), or when a `messages.json` is unreadable
+JSON or not a JSON object. It catches what a raised exception would not: a write that failed
+(`sync_member` returned 0) or a message that failed to normalize. Reads files in a worker thread.
+
+Recommended caller sequence per room when `history_scanned(gid)` is False:
+1. `Client.get_messages(session, gid, page_delay=1.0)` for the whole timeline.
+2. `sync_member(..., prefetched_messages=timeline, ignore_cursor=True)` for each API member and
+   each member from `extra_room_members`.
+3. `room_archive_complete(group, timeline)`.
+4. `mark_history_scanned(gid)` only if step 3 returned True; otherwise the next run scans again.
+
 ## Roster helpers
 
 ### `pysaka.roster`

@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (earlier lineups, members posting in official rooms) plus member 0 for
   messages without `member_id`. Sync them with `sync_member` so their messages
   are no longer dropped.
+- `SyncManager.history_scanned`, `mark_history_scanned` and `room_archive_complete`
+  let callers re-read each room's whole timeline once (flag in `sync_state.json`
+  as `room_<gid>`), recovering messages from authors that earlier versions
+  dropped.
 
 ### Changed
 - `sync_member` assigns messages without `member_id` to member 0 (the room

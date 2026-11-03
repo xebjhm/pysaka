@@ -305,6 +305,63 @@ class SyncManager:
             return state.get("last_message_id")
         return None
 
+    @staticmethod
+    def _room_state_key(group_id: int) -> str:
+        # Never collides with "<gid>_<mid>" member keys.
+        return f"room_{group_id}"
+
+    def history_scanned(self, group_id: int) -> bool:
+        """True once the room's one-time full-history scan has completed.
+
+        Stored as ``sync_state["room_<gid>"]["history_scanned_at"]``; deleting
+        ``sync_state.json`` (a force resync) clears it, so the next sync scans again.
+        """
+        return bool((self.sync_state.get(self._room_state_key(group_id)) or {}).get("history_scanned_at"))
+
+    def mark_history_scanned(self, group_id: int) -> None:
+        """Record that the room's full history is archived (call only after
+        :meth:`room_archive_complete` returned True for the scan's timeline)."""
+        key = self._room_state_key(group_id)
+        entry = dict(self.sync_state.get(key) or {})
+        entry["history_scanned_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.sync_state[key] = entry
+        self.save_sync_state()
+
+    async def room_archive_complete(self, group: dict[str, Any], messages: list[dict[str, Any]]) -> bool:
+        """True when every message id in ``messages`` is in its author's ``messages.json``.
+
+        Authors are taken with :func:`pysaka.roster.author_id` (member 0 for messages
+        without ``member_id``). False on an unreadable file. Catches what a raised
+        exception would not: a write that failed (``sync_member`` returns 0) or a
+        message that failed to normalize.
+        """
+        return await asyncio.to_thread(self._room_archive_complete_sync, group, messages)
+
+    def _room_archive_complete_sync(self, group: dict[str, Any], messages: list[dict[str, Any]]) -> bool:
+        wanted: dict[int, set[int]] = {}
+        for m in messages:
+            wanted.setdefault(roster.author_id(m), set()).add(m["id"])
+        messages_dir = self.output_dir / "messages"
+        group_dirs = list(messages_dir.glob(f"{group['id']} *")) if messages_dir.exists() else []
+        for aid, ids in wanted.items():
+            stored: set[Any] = set()
+            for group_dir in group_dirs:
+                for path in group_dir.glob(f"{aid} */messages.json"):
+                    try:
+                        with open(path, encoding="utf-8") as f:
+                            data = json.load(f)
+                    except (OSError, ValueError):
+                        return False
+                    if not isinstance(data, dict):
+                        return False
+                    stored |= {m.get("id") for m in data.get("messages", []) if isinstance(m, dict)}
+            if not ids <= stored:
+                logger.warning(
+                    "Room archive incomplete", group_id=group["id"], member_id=aid, missing=len(ids - stored)
+                )
+                return False
+        return True
+
     def _member_dir_path(self, group: dict[str, Any], member: dict[str, Any]) -> Path:
         """The on-disk directory of a member's archive (same naming as sync_member)."""
         return (
