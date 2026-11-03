@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-03
+
 ### Added
 - `SyncManager.update_message_fields(messages_file, message_id, fields)` (and the
   blocking `update_message_fields_sync`) update one message under a per-file
@@ -335,7 +337,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Secure credential storage via system keyring
 - Token refresh without storing plaintext credentials
 
-[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/xebjhm/pysaka/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/xebjhm/pysaka/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/xebjhm/pysaka/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/xebjhm/pysaka/compare/v0.4.1...v0.4.2
