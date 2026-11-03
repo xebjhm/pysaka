@@ -3,7 +3,8 @@ import contextlib
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Literal, Optional, Union, overload
+from urllib.parse import urlsplit, urlunsplit
 
 import aiofiles
 import aiohttp
@@ -14,6 +15,20 @@ from .exceptions import ApiError, RefreshFailedError, SessionExpiredError
 from .utils import get_jwt_remaining_seconds, get_media_extension, media_file_is_present
 
 logger = structlog.get_logger()
+
+
+def _redact_url(url: str) -> str:
+    """Return ``scheme://host/path`` of ``url`` for logging.
+
+    Signed media URLs carry their credentials in the query string, so the query
+    and fragment are dropped. A URL that cannot be parsed is replaced by
+    ``"<unparseable url>"`` so that logging never raises.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<unparseable url>"
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
 class Group(Enum):
@@ -660,6 +675,18 @@ class Client:
         result = await self.fetch_json(session, f"/groups/{group_id}/members")
         return result or []
 
+    async def _timeline_first_id(self, session: aiohttp.ClientSession, group_id: int) -> Optional[int]:
+        """Id of the room's very first message (``order=asc``, one item), or None
+        if the probe failed. Used to tell the true start of a timeline apart from
+        a dropped continuation on a full page."""
+        data = await self.fetch_json(
+            session,
+            f"/groups/{group_id}/timeline",
+            {"count": 1, "order": "asc", "clear_unread": "false"},
+        )
+        messages = (data or {}).get("messages") or []
+        return messages[0].get("id") if messages else None
+
     async def get_messages(
         self,
         session: aiohttp.ClientSession,
@@ -690,14 +717,17 @@ class Client:
             on a partial page (no continuation, or one echoing its continuation)
             before reaching the cursor (``since_ts``, or one found via
             ``since_id``), that is the start of the timeline and every fetched
-            message is returned.
+            message is returned. A full last page without a continuation is also
+            accepted as the start of the timeline when the room's first message
+            (probed with ``order=asc``) is among the collected messages.
 
         Raises:
             ApiError: If pagination stops in a way that could hide unfetched
                 messages — a failed page fetch or an empty page carrying a
                 continuation after earlier pages were collected, or, while the
                 cursor is still unreached, a full page with a missing or repeated
-                continuation or a page that replays already-collected messages.
+                continuation (unless the ``order=asc`` probe confirms the timeline
+                start) or a page that replays already-collected messages.
         """
         all_messages: dict[int, dict[str, Any]] = {}
         page = 0
@@ -802,6 +832,17 @@ class Client:
                 # unreached and retry next sync.
                 replayed = repeated and len(all_messages) == known_before_page
                 timeline_start = len(messages) < params["count"] and not replayed
+                if cursor_unreached and not timeline_start and not replayed and not repeated:
+                    # A FULL last page with no continuation is ambiguous: dropped
+                    # token, or a history that is an exact multiple of the page
+                    # size. Ask the server for the room's first message; if we
+                    # already hold it as our OLDEST message, nothing older exists
+                    # (KNOWN_BUGS #1). Ids grow over time, so the room's first
+                    # message must be the smallest id collected; merely holding it
+                    # would also accept a server that ignores ``order=asc`` and
+                    # answers with the newest message.
+                    first_id = await self._timeline_first_id(session, group_id)
+                    timeline_start = first_id is not None and bool(all_messages) and first_id == min(all_messages)
                 if cursor_unreached and not timeline_start:
                     raise ApiError(
                         f"Timeline pagination for group {group_id} ended (missing or "
@@ -878,13 +919,14 @@ class Client:
         filepath.parent.mkdir(parents=True, exist_ok=True)
         tmp = filepath.with_name(filepath.name + ".part")
         last_err: Optional[str] = None
+        safe_url = _redact_url(url)
 
         for attempt in range(retries):
             try:
                 async with session.get(url) as resp:
                     if resp.status != 200:
                         last_err = f"status {resp.status}"
-                        logger.warning("Download failed", status=resp.status, url=url)
+                        logger.warning("Download failed", status=resp.status, url=safe_url)
                     else:
                         data = await resp.read()
                         declared = resp.headers.get("Content-Length")
@@ -904,15 +946,16 @@ class Client:
                             os.replace(tmp, filepath)
                             return True
             except Exception as e:  # noqa: BLE001 - transient network errors are retried
-                last_err = str(e)
-                logger.warning("Download error (will retry)", url=url, error=str(e), attempt=attempt + 1)
+                # str(e) can embed the signed URL, so only the exception type is kept.
+                last_err = type(e).__name__
+                logger.warning("Download error (will retry)", url=safe_url, error_type=last_err, attempt=attempt + 1)
 
             if attempt < retries - 1:
                 await asyncio.sleep(0.5 * (attempt + 1))
 
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
-        logger.error("Download ultimately failed", url=url, error=str(last_err))
+        logger.error("Download ultimately failed", url=safe_url, error=str(last_err))
         return False
 
     async def download_message_media(
@@ -1161,21 +1204,45 @@ class Client:
             return data["letters"]
         return []
 
-    async def get_past_messages(self, session: aiohttp.ClientSession, group_id: int) -> list[dict[str, Any]]:
+    @overload
+    async def get_past_messages(
+        self, session: aiohttp.ClientSession, group_id: int, *, strict: Literal[False] = ...
+    ) -> list[dict[str, Any]]: ...
+
+    @overload
+    async def get_past_messages(
+        self, session: aiohttp.ClientSession, group_id: int, *, strict: Literal[True]
+    ) -> Optional[list[dict[str, Any]]]: ...
+
+    @overload
+    async def get_past_messages(
+        self, session: aiohttp.ClientSession, group_id: int, *, strict: bool
+    ) -> Optional[list[dict[str, Any]]]: ...
+
+    async def get_past_messages(
+        self, session: aiohttp.ClientSession, group_id: int, *, strict: bool = False
+    ) -> Optional[list[dict[str, Any]]]:
         """
         Fetch historical messages (before user's subscription start date).
 
-        Note: This returns messages the user has access to but were sent
-        before their subscription began. Does NOT mark messages as read.
+        Returns the roughly 1–1.5 days of messages immediately before the
+        account's first subscription to the room. The server keeps returning
+        them after the subscription lapses or is renewed. Does NOT mark messages
+        as read.
 
         Args:
             session: Active aiohttp ClientSession.
             group_id: The ID of the group/member.
+            strict: If True, return None when the request failed, so callers can
+                tell a failure apart from a room with no earlier messages.
 
         Returns:
-            List of historical message objects.
+            List of historical message objects (possibly empty); None only when
+            ``strict`` is True and the request failed.
         """
         data = await self.fetch_json(session, f"/groups/{group_id}/past_messages")
+        if data is None and strict:
+            return None
         if data and "messages" in data:
             return data["messages"]
         return []

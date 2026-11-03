@@ -77,7 +77,9 @@ Main API client supporting all Sakamichi groups.
   this group (the official app's chat-open signal). Defaults to `False` so a
   background sync does **not** zero the user's unread count on the official
   mobile app.
-- **Returns**: List of message objects (sorted by ID ascending).
+- **Returns**: List of message objects (sorted by ID ascending). A full last
+  page without a continuation is accepted as the start of the timeline when the
+  room's first message (an `order=asc` probe) was collected.
 
 #### `download_file(session, url: str, filepath: Path, timestamp: str = None) -> bool`
 - **url**: Signed media URL.
@@ -119,9 +121,14 @@ Main API client supporting all Sakamichi groups.
 - **count**: Number of letters to fetch (default 200).
 - **Returns**: List of letter objects.
 
-#### `get_past_messages(session, group_id: int) -> List[dict]`
+#### `get_past_messages(session, group_id: int, *, strict: bool = False) -> List[dict]  # Optional[List[dict]] when strict=True`
+Messages from the ~1–1.5 days before the account's first subscription to the room (still returned
+after the subscription lapses or is renewed). With `strict=True`, returns None when the request failed.
 - **group_id**: Target group ID.
-- **Returns**: List of historical message objects (before subscription start date).
+- **strict**: If True, a failed request returns `None` instead of `[]`, so it can be told apart from a
+  room with no earlier messages. Type checkers see `list[dict]` for `strict=False` and
+  `Optional[list[dict]]` for `strict=True`.
+- **Returns**: List of historical message objects; `None` only when `strict=True` and the request failed.
 
 #### `get_subscription_streak(session, group_id: int) -> Optional[dict]`
 - **group_id**: Target group ID.
@@ -198,8 +205,8 @@ High-level manager for syncing messages and media.
 - **client**: Authenticated `Client` instance.
 - **output_dir**: Base directory for downloaded content (already service-specific).
 
-#### `sync_member(session, group: dict, member: dict, media_queue: list, progress_callback = None, prefetched_messages: list = None) -> int`
-Sync one member's messages and append their media downloads to `media_queue`.
+#### `sync_member(session, group: dict, member: dict, media_queue: list, progress_callback = None, prefetched_messages: list = None, *, on_new_messages = None) -> int`
+Sync one member's messages, queue their media, and archive the member's profile images.
 - **group** / **member**: Group and member object dicts (as returned by
   `get_groups` / `get_members`).
 - **media_queue**: A caller-owned `list` that this method **appends** media
@@ -207,10 +214,112 @@ Sync one member's messages and append their media downloads to `media_queue`.
   separately after syncing all members.
 - **prefetched_messages**: (Optional) A pre-fetched group timeline. When given,
   the per-member API call is skipped and messages are filtered from this list.
-- **Returns**: The number of new messages processed for this member.
+- **on_new_messages**: (Optional) `callback(member_info, new_messages)`, sync or
+  async, called once after a successful write when messages that were not on
+  disk before were added. `member_info` has `group_id`, `group_name`,
+  `member_id`, `member_name`, `member_dir` (`Path`), `phone_image` and
+  `initial_sync` (`bool`). Not called during corrupt-file/count-mismatch recovery
+  or by `backfill_past_messages`. It is awaited inline, so a slow callback delays
+  that member's sync (hand heavy work off, e.g. schedule a task). Its exceptions
+  are logged and swallowed.
+  - `initial_sync` is True when `messages.json` did not exist before this write;
+    `new_messages` is then the member's whole fetched history, not fresh posts, so
+    consumers sending notifications should ignore calls with `initial_sync=True`.
+  - The callback runs before the profile-image step, so a just-changed
+    `phone_image` may not be archived yet; use the `phone_image` URL from
+    `member_info`.
+- **Returns**: The number of messages **processed** (re-fetched overlap
+  included, so not a count of new messages).
 - On a corrupt or count-short `messages.json`, `sync_member` re-fetches the
   member's true full history from the API (bypassing `prefetched_messages`) and
   merges add-only, so recovery never truncates the archive.
+
+#### `update_message_fields(messages_file: Path, message_id: int, fields: dict) -> bool` (async, static) / `update_message_fields_sync(messages_file, message_id, fields) -> bool` (blocking, static)
+Set fields on one message under the file's lock. Use this for every local edit of `messages.json`
+(e.g. favorites) so a concurrent sync cannot lose either change. The blocking form is for callers
+already in a worker thread; the async form runs it in a thread. `message_id` is compared as-is with
+the stored ids, so pass an `int`. Returns False if the file is missing, the id is absent or the write
+failed. Raises `ValueError` if the file is unreadable JSON and `OSError` on read errors.
+
+#### `archive_profile_images(session, group: dict, member: dict, member_dir: Path) -> dict`
+Download the current list icon (`group.thumbnail`), chat icon (`member.thumbnail`) and call-screen
+image (`member.phone_image`) into `member_dir/profile_images/<kind>/<basename>` and record them in
+`profile_images/index.json`:
+`{"version": 1, "current": {kind: url}, "images": [{"kind", "file", "url", "first_seen"}]}`
+(`current` maps each kind to its latest URL; `images` is the history of distinct files). URLs are
+stored without their query string and fragment, so CDN signatures never reach the disk. Kinds are
+`thumbnail`, `phone_image` and `group_thumbnail`. Called automatically by `sync_member`, where a
+failure is logged and never affects the result or the cursor. Returns `{"downloaded", "skipped", "failed"}`.
+- An unreadable `index.json` is replaced by a fresh index: its history entries and `first_seen`
+  values are lost (the image files stay on disk).
+- The current image of a kind is the `images[]` entry where
+  `entry["kind"] == kind and entry["file"] == profile_images.relative_file(kind, index["current"][kind])`
+  — match by file, never by full URL (CDN URLs can carry changing query strings). If no entry
+  matches, the current image has not been archived yet; use the URL in `current[kind]` (this works for
+  public CDN URLs only — a signed private URL, such as the account avatar, needs a fresh API URL).
+
+#### `backfill_past_messages(session, group: dict, member: dict) -> int`
+Merge the room's pre-subscription messages (`Client.get_past_messages`) into the member's archive
+and download their media. Requires a prior successful `sync_member` for the member. Runs once per
+member: `past_backfilled_at` is set in sync_state only when the request succeeded, no message failed
+to normalize and every queued media file is on disk; otherwise the next call retries (merging is
+idempotent). A corrupt-file or count-mismatch recovery in `sync_member` clears the flag, so the
+next call merges the pre-subscription messages again. Never moves the cursor and never fires
+`on_new_messages`. Returns the number of messages added.
+- **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. `OSError` (and other
+  unexpected errors) after the fetch can propagate too, so wrap the call. A failed fetch or an
+  unreadable `messages.json` does not raise: it logs and returns 0.
+
+#### `sync_letters(session, group: dict, member: dict) -> int`
+Archive the account's sent letters to this member into `<member_dir>/letters.json` and each
+letter-card image into `<member_dir>/letters/<id>.<ext>`. `client_token` is never stored. Works for
+expired subscriptions (the server still returns their letters). Uses its own cursor
+`letters_updated_at` in the member's sync_state entry; it never touches the message cursor and
+never fires `on_new_messages`. The cursor advances (to the newest `updated_at` among all letters
+fetched for the room) only when the fetch was complete (it ended on a short page; an empty page
+after a full one, hitting the page cap, or a page with no new letter count as incomplete) and every
+image of this member's letters is on disk, so a failed image is re-fetched (with a fresh signed
+URL) on the next call. A member with no letters in the room still advances it after a complete
+fetch. A letter whose `id` is not an integer (a string such as `"12"`, a float, a bool or a missing id) is
+skipped, and only the id's type name is logged. A non-string `created_at`/`updated_at` counts as missing (stored as `null`).
+The cursor is used only while `letters.json` exists: if the file is missing the cursor is dropped and
+all letters are fetched again; an unreadable file is renamed to `letters.json.corrupt-<UTC timestamp>`
+(kept for inspection), the cursor is dropped, and the letters are rebuilt from a full fetch in the same
+call. Fetches up to 50 pages of 200 letters per
+call, chaining each page from the last letter's `created_at` (not `updated_at`, which a later
+favorite would push past letters not yet fetched); `letters.json` is rewritten only when its content changes.
+A room folder left under an old room name is renamed first (as `sync_member` does), so letters and
+messages share one folder.
+
+`letters.json` shape, sorted by `created_at`:
+`{"version": 1, "letters": [{"id", "member_id", "text", "created_at", "updated_at", "is_favorite",
+"image_file", "width", "height"}]}`. `image_file` is relative to the member dir
+(`letters/<id>.<ext>`) or `None` for a letter without an image; `width`/`height` are the card
+thumbnail's size. Returns the number of letters that were not in `letters.json` before (all of them after a corrupt or
+missing file).
+- **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. A failed fetch does not raise:
+  it logs and returns 0 (a corrupt `letters.json` is already set aside by then, so the next call
+  rebuilds it). `OSError` from file I/O after the fetch can
+  propagate (like `backfill_past_messages`), so callers should wrap the call.
+
+#### `archive_account_profile(session) -> dict`
+Archive the account's own nickname and avatar for this service. Writes
+`<output_dir>/account/profile.json` = `{"version": 1, "name": str, "updated_at": str}` and archives
+the avatar (kind `thumbnail`) into `<output_dir>/account/profile_images/` with the same `index.json`
+history as member profile images, so an app can show the user's avatar beside their letters.
+The same current-image rule as for `archive_profile_images` applies to `account/profile_images/index.json`:
+match the `images[]` entry by `kind` and `file` (via `profile_images.relative_file`), never by full URL.
+Birthday, sex, subdivision (region) and FC accounts are returned by `/profile` too but are
+deliberately **not** stored or logged. A missing profile writes nothing. A missing or non-string
+`name`/`updated_at` keeps the stored value (`""`/`null` on the first write), and only a non-empty
+string `thumbnail` is archived. Idempotent: an avatar
+already on disk is skipped, a changed avatar adds a history entry. Returns
+`{"downloaded", "skipped", "failed"}` for the avatar. Not called by `sync_member`; call it once per
+service.
+- **Raises**: `SessionExpiredError` / `RefreshFailedError` propagate. Any other error (the fetch,
+  or the file and avatar work after it, e.g. `OSError`) returns all-zero counts, and this method's
+  own error log carries the exception type only (never the nickname). A failed avatar download is
+  logged by `Client.download_file` with the URL's scheme, host and path (query string redacted).
 
 #### `process_media_queue(session, queue: list, concurrency: int = 5, progress_callback = None) -> dict[Path, dict[int, dict]]`
 Download every media item in `queue` and extract media metadata.
@@ -225,7 +334,8 @@ Download every media item in `queue` and extract media metadata.
   `update_message_metadata` to persist it.
 
 #### `update_message_metadata(messages_file: Path, metadata: dict[int, dict])`
-Write extracted media metadata back into a member's `messages.json` (atomic write).
+Write extracted media metadata back into a member's `messages.json` (atomic write, under the same
+per-file lock as `update_message_fields` and `sync_member`).
 - **messages_file**: Path to the member's `messages.json` (not the member dir).
 - **metadata**: `{message_id: {width?, height?, media_duration?, is_muted?}}`,
   typically one member's slice of the `process_media_queue` result.

@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `SyncManager.update_message_fields(messages_file, message_id, fields)` (and the
+  blocking `update_message_fields_sync`) update one message under a per-file
+  lock. Use them for any local edit of `messages.json`.
+- `SyncManager.sync_member(..., on_new_messages=callback)` reports the messages
+  that were not on disk before, with the member's `phone_image`, for
+  notifications.
+- `sync_member` now archives the member's list icon, chat icon and call-screen
+  image into `profile_images/` with an `index.json` history
+  (`SyncManager.archive_profile_images`). URLs in `index.json` are stored
+  without their query string, so CDN signatures are never written to disk.
+- `SyncManager.backfill_past_messages(session, group, member)` adds the room's
+  pre-subscription messages and their media once per member, without moving the
+  cursor.
+- `SyncManager.sync_letters(session, group, member)` archives the account's sent
+  letters (text + letter-card image) into `letters.json` and `letters/`, with
+  its own `letters_updated_at` cursor; works for expired subscriptions. A
+  missing `letters.json` triggers a full refetch, and an unreadable one is kept
+  as `letters.json.corrupt-<UTC timestamp>` and rebuilt in the same call.
+- `Client.get_past_messages(..., strict=True)` returns None on a failed request
+  instead of `[]`. The default (`strict=False`) is unchanged and typed as
+  `list[dict]`; only `strict=True` is typed `Optional[list[dict]]`.
+- `member_info` passed to `on_new_messages` has `initial_sync`, True when the
+  member's `messages.json` was created by that sync (the callback then gets the
+  whole fetched history); ignore those calls when sending notifications.
+- `SyncManager.archive_account_profile(session)` stores the account's own
+  nickname and avatar (with avatar history) under `account/`; other profile
+  fields (birthday, sex, region, FC accounts) are not stored.
+
+### Fixed
+- `Client.download_file` failure logs no longer include the signed query string of
+  the media URL (only scheme, host and path), nor exception text that may embed it.
+- **A favorite (or any local `messages.json` edit) made while a sync was writing
+  the same file could drop the newly synced messages permanently**, because the
+  cursor had already advanced past them. `sync_member` and
+  `update_message_metadata` now merge under the same per-file lock as
+  `update_message_fields`.
+- `SyncManager.update_sync_state` keeps keys it does not own in the member's
+  entry (such as `past_backfilled_at`) instead of replacing the whole entry;
+  corrupt-file or count-mismatch recovery clears `past_backfilled_at` so
+  `backfill_past_messages` merges the pre-subscription messages again.
+- `Client.get_messages` no longer raises `ApiError` forever for a room whose
+  whole history is an exact multiple of 200 messages: a full last page without a
+  continuation is accepted when an `order=asc` probe returns the smallest id
+  collected, i.e. the room's first message.
+
 ## [0.4.4] - 2026-11-02
 
 ### Fixed
