@@ -196,9 +196,11 @@ keyword, settable at any time).
   `Timeline pacing summary` (`requests`, `waited_seconds`) when pacing is switched off after
   pacing at least one request.
 - Client-level fail-fast: once a timeline request returns 429, the client raises
-  `RateLimitedError` for every further timeline request without sending it (including requests
-  already waiting in the pacing gate and the 401 retry) for the `Retry-After` seconds, else
-  `TIMELINE_429_COOLDOWN = 150.0`; other endpoints are unaffected, and it is per client.
+  `RateLimitedError` immediately for every further timeline request without sending it (including
+  requests already waiting in the pacing gate and the 401 retry) for the `Retry-After` seconds
+  (capped at `TIMELINE_429_MAX_COOLDOWN = 900.0`), else `TIMELINE_429_COOLDOWN = 150.0`; a later 429
+  never shortens a running cooldown, other endpoints are unaffected, and it is per client
+  (`Client.timeline_blocked_remaining`).
 
 SakaDesk and saka-cli (sections 7 and 8) set the interval to 3.0 only while a sync has
 rooms to scan, reset it in a `finally`, pass `page_delay=0` for scans, and implement the

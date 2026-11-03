@@ -97,17 +97,19 @@ are never paced.
 
 **Fail-fast after a timeline 429.** Independently of `timeline_min_interval` (also at `0.0`),
 once any `/groups/{id}/timeline` request through a client returns HTTP 429, that client raises
-`RateLimitedError` for every further timeline request **without sending it**, until the cooldown
-has passed. The cooldown is the response's `Retry-After` when it is a finite number >= 0, else
-`TIMELINE_429_COOLDOWN` (`150.0` seconds, `pysaka.client`). It covers requests that were already
-waiting in the pacing gate (checked again after their wait), `get_messages` pages, the
-`order=asc` probe, `mark_group_read` and the 401 retry. The `retry_after` of the raised error is
-the remaining cooldown in seconds. Other endpoints (`/groups/{id}/letters`, `/members/{id}`, ...)
-are unaffected, the block ends by itself, and it is per client (one per service). The monotonic
-deadline is readable as `Client.timeline_blocked_until` (`None` when not blocked). Logging:
-`Timeline requests blocked` (warning, `cooldown`) once when blocking starts, and a debug
-`Timeline request short-circuited` line (`endpoint`, `retry_after`, `short_circuited` count) per
-refused request.
+`RateLimitedError` immediately for every further timeline request, **without sending it**, until
+the cooldown has passed. The cooldown is the response's `Retry-After` when it is a finite number
+>= 0, capped at `TIMELINE_429_MAX_COOLDOWN` (`900.0` seconds), else `TIMELINE_429_COOLDOWN`
+(`150.0` seconds); both constants live in `pysaka.client`. A later 429 can extend a running
+cooldown but never shortens it, and a `Retry-After` of `0` blocks nothing. The block covers requests
+already waiting in the pacing gate (they raise at once, and again after a wait if the 429 lands
+while they sleep), `get_messages` pages, the `order=asc` probe, `mark_group_read` and the 401
+retry. The `retry_after` of the raised error is the remaining cooldown in seconds. Other endpoints
+(`/groups/{id}/letters`, `/members/{id}`, ...) are unaffected, the block ends by itself, and it is
+per client (one per service). The read-only property `Client.timeline_blocked_remaining` gives
+the seconds left (`None` when not blocked). Logging: `Timeline requests blocked` (warning,
+`cooldown`) once when blocking starts, and a debug `Timeline request short-circuited` line
+(`endpoint`, `retry_after`, `short_circuited` count) per refused request.
 
 #### `get_groups(session: aiohttp.ClientSession, include_inactive: bool = False) -> List[dict]`
 - **session**: Active aiohttp session.

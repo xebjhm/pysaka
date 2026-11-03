@@ -26,6 +26,9 @@ _TIMELINE_ENDPOINT = re.compile(r"^/groups/\d+/timeline$")
 # Seconds a client refuses further timeline requests after one returned HTTP 429 without
 # a usable ``Retry-After`` (observed cooldown: under 2.5 minutes).
 TIMELINE_429_COOLDOWN = 150.0
+# Upper bound in seconds for a cooldown taken from ``Retry-After``, so an absurd header
+# cannot block the timeline for hours.
+TIMELINE_429_MAX_COOLDOWN = 900.0
 
 
 def _redact_url(url: str) -> str:
@@ -221,8 +224,9 @@ class Client:
         self._timeline_last_start: Optional[float] = None
         self._timeline_paced_requests = 0
         self._timeline_waited = 0.0
-        # Fail-fast after a timeline 429 (see ``_timeline_blocked_remaining``).
-        self.timeline_blocked_until: Optional[float] = None
+        # Fail-fast after a timeline 429 (see ``timeline_blocked_remaining``): a
+        # ``time.monotonic()`` deadline, None when not blocked.
+        self._timeline_blocked_until: Optional[float] = None
         self._timeline_short_circuited = 0
         self.timeline_min_interval = timeline_min_interval
 
@@ -273,7 +277,8 @@ class Client:
 
         Independently of this setting, a timeline request that returns HTTP 429 blocks
         all timeline requests of this client for the ``Retry-After`` seconds (or
-        ``TIMELINE_429_COOLDOWN`` when absent or unusable): see ``fetch_json``.
+        ``TIMELINE_429_COOLDOWN`` when absent or unusable, at most
+        ``TIMELINE_429_MAX_COOLDOWN``): see ``fetch_json`` and ``timeline_blocked_remaining``.
         """
         return self._timeline_min_interval
 
@@ -313,6 +318,9 @@ class Client:
             self._timeline_lock = asyncio.Lock()
             self._timeline_lock_loop = loop
         async with self._timeline_lock:
+            # A 429 may have landed while this request queued: drain without waiting and
+            # without counting it as a paced request.
+            self._raise_if_timeline_blocked(endpoint)
             interval = self._timeline_min_interval  # may have changed while queued
             if interval > 0:
                 if self._timeline_last_start is not None:
@@ -323,18 +331,25 @@ class Client:
                 self._timeline_paced_requests += 1
             self._timeline_last_start = time.monotonic()
 
-    def _timeline_blocked_remaining(self, endpoint: str) -> float:
-        """Seconds left of the timeline 429 cooldown for ``endpoint``, 0.0 if not blocked.
+    @property
+    def timeline_blocked_remaining(self) -> Optional[float]:
+        """Seconds left of the timeline cooldown after an HTTP 429, or None if not blocked.
 
-        Only ``/groups/{id}/timeline`` endpoints are ever blocked. The block ends by
-        itself once ``timeline_blocked_until`` (a ``time.monotonic()`` value) has passed.
+        While it is not None, every ``/groups/{id}/timeline`` request through this client
+        raises ``RateLimitedError`` without being sent (see ``fetch_json``). Read-only;
+        the block ends by itself.
         """
-        until = self.timeline_blocked_until
-        if until is None or not _TIMELINE_ENDPOINT.match(endpoint):
+        remaining = self._timeline_block_left()
+        return remaining if remaining > 0 else None
+
+    def _timeline_block_left(self) -> float:
+        """Seconds left of the timeline block, 0.0 when not blocked (clears an expired one)."""
+        until = self._timeline_blocked_until
+        if until is None:
             return 0.0
         remaining = until - time.monotonic()
         if remaining <= 0:
-            self.timeline_blocked_until = None
+            self._timeline_blocked_until = None
             if self._timeline_short_circuited:
                 logger.debug("Timeline block expired", short_circuited=self._timeline_short_circuited)
                 self._timeline_short_circuited = 0
@@ -342,8 +357,10 @@ class Client:
         return remaining
 
     def _raise_if_timeline_blocked(self, endpoint: str) -> None:
-        """Raise ``RateLimitedError`` without sending if the timeline is blocked."""
-        remaining = self._timeline_blocked_remaining(endpoint)
+        """Raise ``RateLimitedError`` without sending if ``endpoint`` is a blocked timeline."""
+        if not _TIMELINE_ENDPOINT.match(endpoint):
+            return
+        remaining = self._timeline_block_left()
         if remaining > 0:
             self._timeline_short_circuited += 1
             logger.debug(
@@ -355,15 +372,24 @@ class Client:
             raise RateLimitedError(f"Timeline requests blocked after HTTP 429 at {endpoint}", remaining)
 
     def _block_timeline(self, endpoint: str, err: RateLimitedError) -> RateLimitedError:
-        """Start the timeline cooldown after a 429 at ``endpoint``; returns ``err``."""
-        if _TIMELINE_ENDPOINT.match(endpoint):
-            cooldown = err.retry_after if err.retry_after is not None else TIMELINE_429_COOLDOWN
-            if not (math.isfinite(cooldown) and cooldown >= 0):
-                cooldown = TIMELINE_429_COOLDOWN
-            if self._timeline_blocked_remaining(endpoint) <= 0:
-                self._timeline_short_circuited = 0
-                logger.warning("Timeline requests blocked", cooldown=cooldown)
-            self.timeline_blocked_until = time.monotonic() + cooldown
+        """Start (or extend, never shorten) the timeline cooldown after a 429; returns ``err``.
+
+        The cooldown is ``err.retry_after`` (finite, >= 0) capped at
+        ``TIMELINE_429_MAX_COOLDOWN``, else ``TIMELINE_429_COOLDOWN``. A cooldown of 0
+        blocks nothing.
+        """
+        if not _TIMELINE_ENDPOINT.match(endpoint):
+            return err
+        cooldown = err.retry_after if err.retry_after is not None else TIMELINE_429_COOLDOWN
+        if not (math.isfinite(cooldown) and cooldown >= 0):
+            cooldown = TIMELINE_429_COOLDOWN
+        cooldown = min(cooldown, TIMELINE_429_MAX_COOLDOWN)
+        if cooldown <= 0:
+            return err
+        if self._timeline_block_left() <= 0:
+            self._timeline_short_circuited = 0
+            logger.warning("Timeline requests blocked", cooldown=cooldown)
+        self._timeline_blocked_until = max(self._timeline_blocked_until or 0.0, time.monotonic() + cooldown)
         return err
 
     def _build_headers(self) -> dict[str, str]:
@@ -429,8 +455,9 @@ class Client:
                 timeline request returned HTTP 429, timeline requests through this
                 client raise ``RateLimitedError`` without being sent until the
                 cooldown ends (``Retry-After`` seconds when the 429 carried a finite
-                value >= 0, else ``TIMELINE_429_COOLDOWN``); waiting requests check
-                again after their wait. Other endpoints are unaffected.
+                value >= 0, capped at ``TIMELINE_429_MAX_COOLDOWN``, else
+                ``TIMELINE_429_COOLDOWN``; a later 429 never shortens it); requests
+                waiting in the pacing gate raise at once and check again after a wait. Other endpoints are unaffected.
             params: Query parameters.
 
         Returns:

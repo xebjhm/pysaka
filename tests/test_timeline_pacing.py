@@ -381,8 +381,9 @@ async def _trip(client, session):
         await client.fetch_json(session, "/groups/1/timeline")
 
 
-def test_cooldown_constant():
+def test_cooldown_constants():
     assert client_module.TIMELINE_429_COOLDOWN == 150.0
+    assert client_module.TIMELINE_429_MAX_COOLDOWN == 900.0
 
 
 async def test_after_429_timeline_calls_raise_without_sending(paced_client, clock):
@@ -427,8 +428,9 @@ async def test_queued_waiters_raise_after_their_wait(paced_client, clock):
     )
     assert all(isinstance(r, client_module.RateLimitedError) for r in results)
     assert len(session.sent) == 1  # only the first one was ever sent
-    # each waiter still waited its turn in the gate, then noticed the block
-    assert clock.sleeps == [pytest.approx(3.0)] * 3
+    # The waiter holding the gate when the 429 landed raised after its wait; the ones behind
+    # it were drained at once, without sleeping.
+    assert clock.sleeps == [pytest.approx(3.0)]
 
 
 async def test_waiter_blocked_while_waiting_does_not_send(paced_client, clock):
@@ -447,7 +449,7 @@ async def test_waiter_blocked_while_waiting_does_not_send(paced_client, clock):
     await clock._real_sleep(0)
     assert not waiter.done()
 
-    paced_client.timeline_blocked_until = clock.now + 100.0  # a 429 elsewhere lands now
+    paced_client._timeline_blocked_until = clock.now + 100.0  # a 429 elsewhere lands now
     gate.set()
     with pytest.raises(client_module.RateLimitedError):
         await waiter
@@ -458,7 +460,7 @@ async def test_401_retry_path_checks_block(paced_client, clock):
     session = _status_session([401, 200], clock)
 
     async def refresh(_session):
-        paced_client.timeline_blocked_until = clock.now + 100.0  # 429 from a concurrent call
+        paced_client._timeline_blocked_until = clock.now + 100.0  # 429 from a concurrent call
         return True
 
     paced_client.refresh_access_token = refresh
@@ -489,7 +491,7 @@ async def test_non_timeline_429_does_not_block_timeline(paced_client, clock):
     session = _status_session([429], clock)
     with pytest.raises(client_module.RateLimitedError):
         await paced_client.fetch_json(session, "/groups/1/letters")
-    assert paced_client.timeline_blocked_until is None
+    assert paced_client.timeline_blocked_remaining is None
     ok = _ok_session([], clock)
     assert await paced_client.fetch_json(ok, "/groups/1/timeline") == {}
 
@@ -505,7 +507,7 @@ async def test_block_expires_after_cooldown(paced_client, clock):
     ok = _ok_session([], clock)
     assert await paced_client.fetch_json(ok, "/groups/1/timeline") == {}
     assert ok.get.call_count == 1
-    assert paced_client.timeline_blocked_until is None
+    assert paced_client.timeline_blocked_remaining is None
 
 
 async def test_retry_after_header_sets_cooldown(paced_client, clock):
@@ -561,3 +563,61 @@ async def test_block_logging(paced_client, clock):
     assert all(e["log_level"] == "debug" for e in skipped)
     # only the 429 itself goes through the sender-facing warning; no extra warnings per skipped call
     assert len([e for e in logs if e["log_level"] == "warning" and e["event"] != "API rate limited"]) == 1
+
+
+async def test_remaining_property_is_read_only_and_expires(paced_client, clock):
+    assert paced_client.timeline_blocked_remaining is None
+    await _trip(paced_client, _status_session([429], clock, headers={"Retry-After": "30"}))
+    assert paced_client.timeline_blocked_remaining == pytest.approx(30.0)
+    clock.now += 12.0
+    assert paced_client.timeline_blocked_remaining == pytest.approx(18.0)
+    with pytest.raises(AttributeError):
+        paced_client.timeline_blocked_remaining = 0.0
+    clock.now += 18.0
+    assert paced_client.timeline_blocked_remaining is None
+
+
+async def test_later_429_never_shortens_active_block(paced_client, clock):
+    await _trip(paced_client, _status_session([429], clock, headers={"Retry-After": "600"}))
+    # a request that was already in flight comes back with a short Retry-After
+    err = client_module.RateLimitedError("x", 5.0)
+    paced_client._block_timeline("/groups/1/timeline", err)
+    assert paced_client.timeline_blocked_remaining == pytest.approx(600.0)
+    # a longer one does extend it
+    paced_client._block_timeline("/groups/1/timeline", client_module.RateLimitedError("x", 700.0))
+    assert paced_client.timeline_blocked_remaining == pytest.approx(700.0)
+
+
+async def test_short_then_long_extends(paced_client, clock):
+    await _trip(paced_client, _status_session([429], clock, headers={"Retry-After": "5"}))
+    # the longer 429 comes from a request that was already in flight
+    paced_client._block_timeline("/groups/1/timeline", client_module.RateLimitedError("x", 60.0))
+    assert paced_client.timeline_blocked_remaining == pytest.approx(60.0)
+
+
+@pytest.mark.parametrize("raw, expected", [("900", 900.0), ("901", 900.0), ("86400", 900.0), ("899", 899.0)])
+async def test_retry_after_is_capped(paced_client, clock, raw, expected):
+    await _trip(paced_client, _status_session([429], clock, headers={"Retry-After": raw}))
+    assert paced_client.timeline_blocked_remaining == pytest.approx(expected)
+
+
+async def test_zero_cooldown_blocks_nothing_and_logs_nothing(paced_client, clock):
+    with capture_logs() as logs:
+        await _trip(paced_client, _status_session([429], clock, headers={"Retry-After": "0"}))
+    assert paced_client.timeline_blocked_remaining is None
+    assert not [e for e in logs if e["event"] == "Timeline requests blocked"]
+
+
+async def test_drained_waiter_leaves_pacing_state_untouched(paced_client, clock):
+    session = _ok_session([], clock)
+    await paced_client.fetch_json(session, "/groups/1/timeline")
+    last_start = paced_client._timeline_last_start
+    counted = paced_client._timeline_paced_requests
+    paced_client._timeline_blocked_until = clock.now + 100.0
+
+    with pytest.raises(client_module.RateLimitedError):
+        await paced_client._pace_timeline("/groups/1/timeline")
+
+    assert clock.sleeps == []
+    assert paced_client._timeline_last_start == last_start
+    assert paced_client._timeline_paced_requests == counted

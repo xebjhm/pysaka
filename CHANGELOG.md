@@ -17,16 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior (no pacing); a negative, NaN or infinite value raises `ValueError`. Set it
   (e.g. `3.0`) for history scans, which can hit HTTP 429 after ~170 timeline
   requests in 5 minutes, and pass `page_delay=0` to avoid doubling the pause.
-  After any timeline request returns HTTP 429, the client also stops sending
-  timeline requests (with or without pacing): each further `get_messages`,
-  `mark_group_read` or `fetch_json("/groups/{id}/timeline")` call, including
-  requests already queued in the pacing gate and the 401 retry, raises
-  `RateLimitedError` immediately, with `retry_after` set to the remaining
-  cooldown. The cooldown is the response's `Retry-After` (finite, >= 0) or
-  `pysaka.client.TIMELINE_429_COOLDOWN` (150 s); it ends by itself, is per
-  client, and other endpoints are unaffected. `Client.timeline_blocked_until`
-  exposes the (monotonic) deadline. Before, queued requests kept going out
-  and each got another 429, so a caller's circuit breaker could not stop them.
+- Timeline fail-fast after HTTP 429, with or without `timeline_min_interval`:
+  once a `/groups/{id}/timeline` request returns 429, the `Client` raises
+  `RateLimitedError` immediately, without sending, for every further timeline
+  request (`get_messages` pages, `mark_group_read`, `fetch_json`, the 401 retry,
+  and requests already waiting in the pacing gate), with `retry_after` set to the
+  remaining cooldown. The cooldown is the response's `Retry-After` (finite, >= 0,
+  at most `pysaka.client.TIMELINE_429_MAX_COOLDOWN` = 900 s) or else
+  `pysaka.client.TIMELINE_429_COOLDOWN` (150 s); a later 429 never shortens it.
+  It ends by itself, is per client, and other endpoints are unaffected. The new
+  read-only `Client.timeline_blocked_remaining` returns the seconds left (`None`
+  when not blocked). Before, queued requests kept going out and each got another
+  429, so a caller's circuit breaker could not stop them.
 - `Client.get_messages(..., page_delay=0.5)` makes the pause between page
   requests configurable (default unchanged).
 - `pysaka.roster` (`ROOM_AUTHOR_ID`, `author_id`, `extra_author_ids`,
