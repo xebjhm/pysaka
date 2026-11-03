@@ -10,8 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `Client.get_messages(..., page_delay=0.5)` makes the pause between page
   requests configurable (default unchanged).
+- `pysaka.roster` (`ROOM_AUTHOR_ID`, `author_id`, `extra_author_ids`,
+  `room_author`) and `SyncManager.sync_member(..., ignore_cursor=True)`.
 
 ### Changed
+- `sync_member` assigns messages without `member_id` to member 0 (the room
+  itself) instead of no member, and renames
+  `messages/<gid> */<mid> <old name>` to the member's current name instead of
+  creating a second folder.
 - `Client.get_member(session, member_id)` now returns None when the response
   body is not a JSON object (before: the raw body). It also works for members
   who are no longer in any room's member list (e.g. graduated members who

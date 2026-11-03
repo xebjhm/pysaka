@@ -227,7 +227,7 @@ High-level manager for syncing messages and media.
 - **client**: Authenticated `Client` instance.
 - **output_dir**: Base directory for downloaded content (already service-specific).
 
-#### `sync_member(session, group: dict, member: dict, media_queue: list, progress_callback = None, prefetched_messages: list = None, *, on_new_messages = None) -> int`
+#### `sync_member(session, group: dict, member: dict, media_queue: list, progress_callback = None, prefetched_messages: list = None, *, on_new_messages = None, ignore_cursor: bool = False) -> int`
 Sync one member's messages, queue their media, and archive the member's profile images.
 - **group** / **member**: Group and member object dicts (as returned by
   `get_groups` / `get_members`).
@@ -250,11 +250,21 @@ Sync one member's messages, queue their media, and archive the member's profile 
   - The callback runs before the profile-image step, so a just-changed
     `phone_image` may not be archived yet; use the `phone_image` URL from
     `member_info`.
+- **ignore_cursor**: (Optional, default `False`) Take all of this member's rows from
+  `prefetched_messages` (or a full fetch) instead of only those at/after the cursor. Used by a
+  room's one-time history scan so rows older than the cursor (e.g. canceled ones) are merged.
+  Merging is idempotent; the cursor is recomputed from the merged file as usual.
 - **Returns**: The number of messages **processed** (re-fetched overlap
   included, so not a count of new messages).
 - On a corrupt or count-short `messages.json`, `sync_member` re-fetches the
   member's true full history from the API (bypassing `prefetched_messages`) and
   merges add-only, so recovery never truncates the archive.
+- Messages without a `member_id` belong to member 0, the room author (`pysaka.roster`). Member 0
+  has no profile images, so none are archived for it, and `backfill_past_messages` and
+  `sync_letters` return 0 for it.
+- A member folder left under an old name (`messages/<gid> */<mid> <old name>`) is renamed to the
+  member's current name instead of creating a second folder. When both the old and the new folder
+  exist, neither is touched.
 
 #### `update_message_fields(messages_file: Path, message_id: int, fields: dict) -> bool` (async, static) / `update_message_fields_sync(messages_file, message_id, fields) -> bool` (blocking, static)
 Set fields on one message under the file's lock. Use this for every local edit of `messages.json`
@@ -391,6 +401,22 @@ then re-check disk truth and persist any new dimension metadata.
 - **timeline_messages**: A freshly fetched member/group timeline supplying new
   signed URLs keyed by `message_id`.
 - **Returns**: `{"repaired": int, "failed": int, "still_missing": int}`.
+
+## Roster helpers
+
+### `pysaka.roster`
+Derives who authored a room's messages. `GET /groups/{id}/members` lists only a room's current
+lineup, so rotating-lineup and official rooms hold messages from authors missing from it. No I/O.
+
+- `ROOM_AUTHOR_ID: int = 0`: member id for messages the API returns without `member_id` (the room
+  itself, shown by the official app with the room name and logo).
+- `author_id(message: dict) -> int`: the message's `member_id` when it is an int (bool excluded),
+  the int value of a numeric string, else `ROOM_AUTHOR_ID`.
+- `extra_author_ids(api_member_ids: Iterable[int], messages: Iterable[dict]) -> list[int]`: the
+  authors of `messages` missing from `api_member_ids`, real ids ascending, then `ROOM_AUTHOR_ID`
+  last if any message has no author.
+- `room_author(group: dict) -> dict`: the member dict standing for the room itself,
+  `{"id": 0, "name": group["name"] or str(group["id"]), "thumbnail": group.get("thumbnail")}`.
 
 ## Credentials
 

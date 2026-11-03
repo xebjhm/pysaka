@@ -13,7 +13,7 @@ import aiofiles
 import aiohttp
 import structlog
 
-from . import profile_images
+from . import profile_images, roster
 from .client import Client
 from .exceptions import RefreshFailedError, SessionExpiredError
 from .media import get_audio_metadata, get_media_dimensions
@@ -331,6 +331,28 @@ class SyncManager:
                     break
         return group_dir
 
+    def _ensure_member_dir(self, group_dir: Path, member_id: int, name: str) -> Path:
+        """Return ``group_dir/<mid> <name>``, renaming a member folder left under an old name.
+
+        A member who changed their display name, or an author first archived under
+        a fallback name (their id), keeps one folder instead of a duplicate. Only
+        renames when the target does not exist yet; never creates the directory.
+        """
+        member_dir = group_dir / f"{member_id} {name}"
+        if not member_dir.exists() and group_dir.exists():
+            prefix = f"{member_id} "
+            for existing in group_dir.iterdir():
+                if existing.is_dir() and existing.name.startswith(prefix):
+                    logger.info(
+                        "Member renamed, renaming directory",
+                        member_id=member_id,
+                        old=existing.name,
+                        new=member_dir.name,
+                    )
+                    existing.rename(member_dir)
+                    break
+        return member_dir
+
     @staticmethod
     def _type_counts(messages: list[dict[str, Any]]) -> dict[str, int]:
         counts = {"text": 0, "video": 0, "picture": 0, "voice": 0}
@@ -372,6 +394,7 @@ class SyncManager:
         prefetched_messages: Optional[list[dict[str, Any]]] = None,
         *,
         on_new_messages: Optional[Callable[[dict[str, Any], list[dict[str, Any]]], Any]] = None,
+        ignore_cursor: bool = False,
     ) -> int:
         """
         Syncs messages for a member, prepares the media queue, and archives the
@@ -401,6 +424,16 @@ class SyncManager:
                 The callback runs before the profile-image step, so a just-changed
                 ``phone_image`` may not be archived yet; use the ``phone_image``
                 URL from ``member_info``.
+            ignore_cursor: Take all of this member's rows from ``prefetched_messages``
+                (or a full fetch) instead of only those at/after the cursor. Used by a
+                room's one-time history scan so rows older than the cursor (e.g.
+                canceled ones) are merged. Merging is idempotent; the cursor is
+                recomputed from the merged file as usual.
+
+        Messages without a ``member_id`` belong to member 0, the room author (see
+        :mod:`pysaka.roster`). Member 0 has no profile images, so none are
+        archived for it. A member folder left under an old name is renamed to the
+        member's current name instead of creating a second folder.
 
         Returns:
             Number of messages processed in this run (includes re-fetched
@@ -414,8 +447,10 @@ class SyncManager:
             progress_callback,
             prefetched_messages,
             on_new_messages=on_new_messages,
+            ignore_cursor=ignore_cursor,
         )
-        await self._archive_profile_images_safely(session, group, member)
+        if member["id"] != roster.ROOM_AUTHOR_ID:
+            await self._archive_profile_images_safely(session, group, member)
         return processed
 
     async def backfill_past_messages(
@@ -432,6 +467,9 @@ class SyncManager:
         every queued file is on disk; otherwise it stays unset and later calls
         retry (merging is idempotent). Cursor fields are never touched and
         ``on_new_messages`` is never fired.
+
+        Returns 0 for member 0 (the room author), which has no own timeline or
+        letters.
 
         Returns:
             Number of messages that were not in the archive before.
@@ -450,6 +488,8 @@ class SyncManager:
                 write; 0 returned).
         """
         gid, mid = group["id"], member["id"]
+        if mid == roster.ROOM_AUTHOR_ID:
+            return 0
         key = f"{gid}_{mid}"
         entry = self.sync_state.get(key)
         if not entry or entry.get("past_backfilled_at"):
@@ -574,6 +614,8 @@ class SyncManager:
         JSON it is renamed to ``letters.json.corrupt-<UTC timestamp>`` (kept for
         inspection), the cursor is dropped, and the letters are rebuilt from a
         full fetch in the same call.
+        Returns 0 for member 0 (the room author), which has no own timeline or
+        letters.
         Works for expired subscriptions (the server still returns their letters).
         Never touches the message cursor and never fires ``on_new_messages``.
         ``letters.json`` is written only when its content changes or it is
@@ -594,6 +636,8 @@ class SyncManager:
             them after a corrupt or missing file).
         """
         gid, mid = group["id"], member["id"]
+        if mid == roster.ROOM_AUTHOR_ID:
+            return 0
         key = f"{gid}_{mid}"
         member_dir = self._member_dir_path(group, member)
         letters_file = member_dir / "letters.json"
@@ -864,6 +908,7 @@ class SyncManager:
         prefetched_messages: Optional[list[dict[str, Any]]] = None,
         *,
         on_new_messages: Optional[Callable[[dict[str, Any], list[dict[str, Any]]], Any]] = None,
+        ignore_cursor: bool = False,
     ) -> int:
         """
         Message part of :meth:`sync_member` (see there for arguments).
@@ -880,7 +925,7 @@ class SyncManager:
         # so we only need to add messages/ and the group directory
         group_dir = self._ensure_group_dir(group)
 
-        member_dir = group_dir / f"{mid} {mname}"
+        member_dir = self._ensure_member_dir(group_dir, mid, mname)
         member_dir.mkdir(parents=True, exist_ok=True)
         for t in ["picture", "video", "voice"]:
             (member_dir / t).mkdir(exist_ok=True)
@@ -909,7 +954,7 @@ class SyncManager:
                 filtered = [
                     x
                     for x in prefetched_messages
-                    if x.get("member_id") == mid and (since_ts is None or (x.get("published_at") or "") >= since_ts)
+                    if roster.author_id(x) == mid and (since_ts is None or (x.get("published_at") or "") >= since_ts)
                 ]
                 logger.info("Filtered prefetched messages for member", count=len(filtered), member=mname)
                 return filtered
@@ -920,12 +965,12 @@ class SyncManager:
             logger.info("Fetched messages", count=len(fetched), group_id=gid)
 
             # Filter for member
-            fetched = [x for x in fetched if x.get("member_id") == mid]
+            fetched = [x for x in fetched if roster.author_id(x) == mid]
             logger.info("Filtered messages for member", count=len(fetched), member=mname)
             return fetched
 
         try:
-            messages = await fetch_for_member(last_ts)
+            messages = await fetch_for_member(None if ignore_cursor else last_ts)
 
             # Load existing (may be corrupt / truncated — see recovery below)
             existing_msgs: list[dict[str, Any]] = []
