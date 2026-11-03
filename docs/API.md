@@ -261,9 +261,10 @@ Sync one member's messages, queue their media, and archive the member's profile 
 - A message the member withdrew has `state: "canceled"` (or `"cancelled"`, see
   `pysaka.utils.CANCELED_STATES`) and `canceled_at`, the API's `updated_at`, kept from the first
   time it was seen. The API returns it without text or media, so `content` captured before the
-  withdrawal is kept (and `media_file`, see `update_message_fields`). A canceled text message
-  never seen before is stored with `content` null instead of being skipped. Published messages have
-  neither `state` nor `canceled_at`.
+  withdrawal is kept, also when the fresh `content` is an empty string (and `media_file`, see
+  `update_message_fields`). A canceled text message never seen before is stored with `content` null
+  instead of being skipped; a published message with no text and no media is still skipped.
+  Published messages have neither `state` nor `canceled_at`.
 - On a corrupt or count-short `messages.json`, `sync_member` re-fetches the
   member's true full history from the API (bypassing `prefetched_messages`) and
   merges add-only, so recovery never truncates the archive.

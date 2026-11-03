@@ -81,3 +81,25 @@ async def test_media_file_still_inherited_on_cancel(manager):
     await _sync(manager, [_raw(1, type="picture", file="https://cdn/p.jpg")])
     stored = await _sync(manager, [_raw(1, state="canceled", type="picture")], ignore_cursor=True)
     assert stored[1].get("media_file")
+
+
+async def test_empty_text_on_cancel_keeps_captured_content(manager):
+    await _sync(manager, [_raw(1)])
+    stored = await _sync(manager, [_raw(1, state="canceled", text="")], ignore_cursor=True)
+    assert stored[1]["content"] == "おはよう☀️"
+    assert stored[1]["state"] == "canceled"
+
+
+async def test_published_empty_text_message_still_skipped(manager):
+    stored = await _sync(manager, [_raw(1, text=""), _raw(2)])
+    assert 1 not in stored and 2 in stored
+
+
+async def test_cancelled_spelling_treated_like_canceled(manager):
+    await _sync(manager, [_raw(1)])
+    stored = await _sync(manager, [_raw(1, state="cancelled", updated="2026-07-03T11:16:36Z")], ignore_cursor=True)
+    assert stored[1]["content"] == "おはよう☀️"
+    assert stored[1]["state"] == "cancelled"
+    assert stored[1]["canceled_at"] == "2026-07-03T11:16:36Z"
+    skeleton = await _sync(manager, [_raw(3, state="cancelled")])
+    assert skeleton[3]["content"] is None and skeleton[3]["state"] == "cancelled"

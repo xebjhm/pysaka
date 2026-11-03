@@ -42,11 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "nothing there". Callers that already handle `ApiError` need no change.
 
 ### Fixed
-- **A message the member withdrew lost its archived text on the next re-fetch**:
-  `sync_member` now keeps the captured `content` when a message turns `canceled`
-  and records `canceled_at` (the server's `updated_at`, first sight). A canceled
-  text message with no text is now stored (`content` null, `state` `canceled`)
-  instead of being skipped as an empty message.
+- **Withdrawn messages are now archived instead of dropped**: a canceled text
+  message was skipped before (the withdrawal was never recorded) and a canceled
+  photo/video lost its archived caption on the next re-fetch. `sync_member` now
+  stores canceled messages with `state` and `canceled_at` (the server's
+  `updated_at`, first sight), keeping any content captured before the
+  withdrawal. A published message with no text and no media is still skipped.
 
 ## [0.4.5] - 2026-11-03
 

@@ -1438,7 +1438,7 @@ class SyncManager:
                 if pm.get("state") in CANCELED_STATES:
                     # A withdrawn message comes back without text: keep what we
                     # captured before the withdrawal, and the first cancel time seen.
-                    if pm.get("content") is None and prev.get("content") is not None:
+                    if not pm.get("content") and prev.get("content"):
                         pm["content"] = prev["content"]
                     if prev.get("canceled_at"):
                         pm["canceled_at"] = prev["canceled_at"]
