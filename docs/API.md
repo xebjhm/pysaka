@@ -68,19 +68,20 @@ error while handling the response.
   Also available as the settable attribute `Client.timeline_min_interval`; see
   "Timeline pacing" below.
 - **Raises**: `ValueError` if an invalid group string is provided, or
-  `timeline_min_interval` is negative or NaN.
+  `timeline_min_interval` is negative, NaN or infinite.
 
 #### Timeline pacing: `Client.timeline_min_interval: float`
-Only `/groups/{id}/timeline` is rate-limited by the API (HTTP 429), and only when it is hit
+Only `/groups/{id}/timeline` has been observed to return HTTP 429, and only when it is hit
 hundreds of times in a few minutes, as during a one-time history scan. While the attribute is
 above `0`, every HTTP request to a group's timeline made through this client waits so that
-consecutive request **starts** are at least that many seconds apart. That covers every
+consecutive request **starts** are at least that many seconds apart (spacing at the client,
+not on the wire). That covers every
 `get_messages` page, its `order=asc` probe, `mark_group_read`, and the retry after a 401 inside
 `fetch_json`. Other endpoints (`/groups/{id}/letters`, `/members/{id}`, ...) and CDN downloads
 are never paced.
 - The default `0.0` never sleeps. The value can be changed at any time (for example, set `3.0`
-  before a history scan and back to `0.0` in a `finally`); a negative or NaN value raises
-  `ValueError`.
+  before a history scan and back to `0.0` in a `finally`); a negative, NaN or infinite value
+  raises `ValueError`.
 - Safe under concurrent callers: waits are serialised per client, so tasks that share a client
   also share the spacing. Each client (one per service) paces independently.
 - `get_messages(page_delay=)` is unchanged and adds to the pacing; pass `page_delay=0` when
@@ -113,8 +114,9 @@ are never paced.
   this group (the official app's chat-open signal). Defaults to `False` so a
   background sync does **not** zero the user's unread count on the official
   mobile app.
-- **page_delay**: Seconds to wait between page requests (default `0.5`). Use a
-  larger value for long full-history fetches to stay under the API rate limit.
+- **page_delay**: Seconds to wait between page requests (default `0.5`). To stay under the
+  API rate limit during long full-history fetches, set `Client.timeline_min_interval` instead
+  (and pass `page_delay=0` so the pause is not doubled).
 - **Returns**: List of message objects (sorted by ID ascending). A full last
   page without a continuation is accepted as the start of the timeline when the
   room's first message (an `order=asc` probe) has the smallest id among the
@@ -520,9 +522,8 @@ not: a write that failed (`sync_member` returned 0) or a message that failed to 
 files in a worker thread.
 
 Recommended caller sequence per room when `history_scanned(gid)` is False:
-1. `Client.get_messages(session, gid, page_delay=1.0)` for the whole timeline. To stay under
-   the timeline rate limit set `client.timeline_min_interval = 3.0` for the scan (reset it to
-   `0.0` afterwards) and pass `page_delay=0`.
+1. `Client.get_messages(session, gid, page_delay=0)` for the whole timeline, with
+   `client.timeline_min_interval = 3.0` set for the scan (reset it to `0.0` in a `finally`).
 2. `sync_member(..., prefetched_messages=timeline, ignore_cursor=True)` for each API member and
    each member from `extra_room_members`.
 3. `room_archive_complete(group, timeline)`.

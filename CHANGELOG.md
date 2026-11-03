@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   covering every `get_messages` page, its `order=asc` probe, `mark_group_read`
   and the 401 retry in `fetch_json`, also under concurrent callers. Other
   endpoints and CDN downloads are never paced. Default `0.0` keeps today's
-  behavior (no pacing); a negative or NaN value raises `ValueError`. Set it
+  behavior (no pacing); a negative, NaN or infinite value raises `ValueError`. Set it
   (e.g. `3.0`) for history scans, which can hit HTTP 429 after ~170 timeline
   requests in 5 minutes, and pass `page_delay=0` to avoid doubling the pause.
 - `Client.get_messages(..., page_delay=0.5)` makes the pause between page

@@ -70,7 +70,7 @@ def test_constructor_keyword_and_setter():
     assert c.timeline_min_interval == 0.0
 
 
-@pytest.mark.parametrize("bad", [-1.0, float("nan")])
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf"), float("-inf")])
 def test_invalid_interval_rejected(bad):
     with pytest.raises(ValueError):
         Client(group=Group.HINATAZAKA46, timeline_min_interval=bad)
@@ -266,3 +266,78 @@ async def test_logs_interval_change_and_period_summary(paced_client, clock):
     assert summary[0]["waited_seconds"] == pytest.approx(3.0)
     # nothing but ids/counts/intervals: no URLs or tokens
     assert set(summary[0]) <= {"event", "log_level", "requests", "waited_seconds"}
+
+
+async def test_non_timeline_call_not_delayed_while_timeline_waiter_sleeps(paced_client, clock):
+    """A queued timeline waiter holds only the timeline lock, never other requests."""
+    starts: list[tuple[str, float]] = []
+    session = _ok_session(starts, clock)
+    await paced_client.fetch_json(session, "/groups/1/timeline")
+
+    gate = asyncio.Event()
+    real_sleep = clock._real_sleep
+
+    async def blocked_sleep(delay: float) -> None:
+        clock.sleeps.append(delay)
+        await gate.wait()
+        clock.now += delay
+
+    client_module.asyncio.sleep = blocked_sleep  # restored by the clock fixture's monkeypatch
+    waiter = asyncio.create_task(paced_client.fetch_json(session, "/groups/1/timeline"))
+    await real_sleep(0)
+    await real_sleep(0)
+    assert clock.sleeps == [pytest.approx(3.0)]  # waiter is parked in its wait
+
+    t0 = clock.now
+    await paced_client.fetch_json(session, "/groups/1/letters")
+    await paced_client.fetch_json(session, "/members/1")
+    assert clock.now == t0  # not delayed
+    assert not waiter.done()
+
+    gate.set()
+    await waiter
+
+
+def test_timeline_lock_survives_event_loop_change():
+    """Reusing one client across asyncio.run() calls must not lose pages."""
+    c = Client(group=Group.HINATAZAKA46, access_token="t", timeline_min_interval=0.01)
+
+    async def one_round() -> list[object]:
+        session = MagicMock()
+
+        def get(url, **kwargs):
+            resp = AsyncMock()
+            resp.status = 200
+            resp.json = AsyncMock(return_value={"ok": True})
+            cm = MagicMock()
+            cm.__aenter__ = AsyncMock(return_value=resp)
+            cm.__aexit__ = AsyncMock(return_value=None)
+            return cm
+
+        session.get.side_effect = get
+        return await asyncio.gather(*(c.fetch_json(session, "/groups/1/timeline") for _ in range(3)))
+
+    for _ in range(2):
+        assert asyncio.run(one_round()) == [{"ok": True}] * 3
+
+
+def test_refresh_lock_survives_event_loop_change():
+    c = Client(group=Group.HINATAZAKA46, access_token="t")
+
+    async def one_round() -> int:
+        inside = 0
+        peak = 0
+
+        async def critical() -> None:
+            nonlocal inside, peak
+            async with c._get_refresh_lock():
+                inside += 1
+                peak = max(peak, inside)
+                await asyncio.sleep(0.01)
+                inside -= 1
+
+        await asyncio.gather(*(critical() for _ in range(3)))
+        return peak
+
+    assert asyncio.run(one_round()) == 1
+    assert asyncio.run(one_round()) == 1

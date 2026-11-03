@@ -164,7 +164,7 @@ class Client:
 
         Raises:
             ValueError: If an invalid group string is provided, or
-                ``timeline_min_interval`` is negative or NaN.
+                ``timeline_min_interval`` is negative, NaN or infinite.
         """
         if isinstance(group, str):
             try:
@@ -203,11 +203,13 @@ class Client:
         # then awaited under asyncio.run() would raise "bound to a different event
         # loop". Deferring creation to the running loop avoids that.
         self._refresh_lock: Optional[asyncio.Lock] = None
+        self._refresh_lock_loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Timeline pacing (see the ``timeline_min_interval`` property). The lock is
         # created lazily for the same reason as ``_refresh_lock``.
         self._timeline_min_interval = 0.0
         self._timeline_lock: Optional[asyncio.Lock] = None
+        self._timeline_lock_loop: Optional[asyncio.AbstractEventLoop] = None
         self._timeline_last_start: Optional[float] = None
         self._timeline_paced_requests = 0
         self._timeline_waited = 0.0
@@ -252,17 +254,19 @@ class Client:
         inside ``fetch_json``, ``mark_group_read``) waits so that consecutive request
         starts are at least this many seconds apart, also under concurrent callers.
         Other endpoints and CDN downloads are never paced. May be changed at any time;
-        setting a negative or NaN value raises ``ValueError``. Pacing is per client,
+        setting a negative, NaN or infinite value raises ``ValueError``. Pacing is per client,
         i.e. per service. Callers that enable it can pass ``page_delay=0`` to
-        ``get_messages`` so the pause is not doubled.
+        ``get_messages`` so the pause is not doubled. The spacing is between request
+        starts at this client, not on the wire: a slow response or a retry does not
+        shift it.
         """
         return self._timeline_min_interval
 
     @timeline_min_interval.setter
     def timeline_min_interval(self, value: float) -> None:
         value = float(value)
-        if math.isnan(value) or value < 0:
-            raise ValueError(f"timeline_min_interval must be >= 0, got {value}")
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"timeline_min_interval must be a finite number >= 0, got {value}")
         old = self._timeline_min_interval
         if value == old:
             return
@@ -286,8 +290,13 @@ class Client:
         """
         if self._timeline_min_interval <= 0 or not _TIMELINE_ENDPOINT.match(endpoint):
             return
-        if self._timeline_lock is None:
+        loop = asyncio.get_running_loop()
+        if self._timeline_lock is None or self._timeline_lock_loop is not loop:
+            # First use, or the client moved to another event loop (e.g. a second
+            # ``asyncio.run``): a lock with waiters is bound to its loop. The last
+            # start time is kept, so the spacing carries over.
             self._timeline_lock = asyncio.Lock()
+            self._timeline_lock_loop = loop
         async with self._timeline_lock:
             interval = self._timeline_min_interval  # may have changed while queued
             if interval > 0:
@@ -439,10 +448,15 @@ class Client:
         PY-CORE-05: the lock is created on first use (inside a running coroutine)
         rather than in ``__init__`` so that on Python 3.9 it binds to the event
         loop that actually awaits it, not whichever loop happened to exist at
-        construction time.
+        construction time. It is rebuilt when the running loop is not the one it
+        was created on (a client reused across ``asyncio.run`` calls), because a
+        lock that has waiters is bound to its loop and raises ``RuntimeError`` on
+        another.
         """
-        if self._refresh_lock is None:
+        loop = asyncio.get_running_loop()
+        if self._refresh_lock is None or self._refresh_lock_loop is not loop:
             self._refresh_lock = asyncio.Lock()
+            self._refresh_lock_loop = loop
         return self._refresh_lock
 
     async def refresh_access_token(self, session: aiohttp.ClientSession) -> bool:
@@ -850,8 +864,10 @@ class Client:
                 this group (the official app sends this on chat-open). Defaults to
                 False so a background sync does NOT zero the user's unread count on
                 the official mobile app.
-            page_delay: Seconds to wait between page requests (default 0.5). Use a
-                larger value for long full-history fetches to stay under the API rate limit.
+            page_delay: Seconds to wait between page requests (default 0.5). To stay
+                under the API rate limit during long full-history fetches, set
+                ``timeline_min_interval`` on the client instead (and pass
+                ``page_delay=0`` so the pause is not doubled).
 
         Returns:
             List of message dicts, sorted by ID ascending. When the timeline ends

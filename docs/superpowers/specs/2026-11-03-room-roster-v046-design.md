@@ -135,7 +135,8 @@ Pacing. The scan re-reads whole rooms; 2026-11-03's unpaced probes hit HTTP 429.
 
 - `Client.get_messages(..., page_delay: float = 0.5)` sleeps `page_delay` seconds
   between page requests. 0.5 s is today's hard-coded pause, so the default is unchanged.
-- Scans use `page_delay=1.0`.
+- Scans pace requests with `Client.timeline_min_interval = 3.0` (section 4a) and pass
+  `page_delay=0`, so the pause is not doubled.
 - In SakaDesk, rooms that need a scan run one at a time behind an `asyncio.Semaphore(1)`.
   Rooms that only need an incremental fetch keep running concurrently as today.
 
@@ -255,7 +256,7 @@ Sync:
 - A failure in `extra_room_members` is logged and the room continues with no extra
   members. The scan flag then stays unset because `room_archive_complete` is False.
 - Rooms with no `history_scanned_at` are fetched in full behind the scan semaphore with
-  `page_delay=1.0`.
+  `page_delay=0` while `timeline_min_interval = 3.0` is set (section 4a).
 - Extra members are never added to `metadata["groups"]`. The check-new-messages path
   (`members_by_group`) reads only that map, so their 2021–2022 cursors never widen a
   check. The check itself is unchanged.
@@ -290,8 +291,9 @@ Display:
 ## 8. saka-cli
 
 `cli.py` Phase 2 builds tasks from `get_members`. After the room fetch it adds
-`manager.extra_room_members`, uses a full fetch with `page_delay=1.0` while the room is
-not `history_scanned`, and marks it after `room_archive_complete`. No new CLI flags.
+`manager.extra_room_members`, uses a full fetch with `page_delay=0` (under `timeline_min_interval = 3.0`) while
+the room is not `history_scanned`, and marks it after `room_archive_complete`. No new CLI
+flags.
 
 ## 9. Testing
 
@@ -308,7 +310,7 @@ pysaka (TDD):
   - set only on full success;
   - unset on a raised fetch or a failed task;
   - absent after `sync_state.json` is deleted.
-- `page_delay` spacing (time-machine or a patched sleep).
+- `page_delay` spacing and `timeline_min_interval` pacing (time-machine or a patched sleep).
 - 429 → `RateLimitedError`, including the retry-after-401 path. `get_groups`,
   `get_members` and `get_messages` propagate it.
 - Canceled:
