@@ -29,7 +29,7 @@ Taken from the Windows dev-build log on 2026-11-03 (`C:\D\saka-verify\appdata\lo
 - `Client.timeline_min_interval: float`, default `0.0` (off). It is settable at any time, and the constructor also accepts the keyword.
 - When the interval is above 0, every HTTP request to `/groups/{id}/timeline` made through this client waits so that consecutive request **starts** are at least that many seconds apart. That covers all `get_messages` pages, the `order=asc` probe (`_timeline_first_id`) and the 401 retry inside `fetch_json` for those endpoints.
 - Other endpoints and CDN downloads are never paced.
-- Concurrency-safe: one `asyncio.Lock` per client plus `time.monotonic()` of the last start. Use `await asyncio.sleep`, never `time.sleep`.
+- Concurrency-safe: one `asyncio.Lock` per client and event loop plus `time.monotonic()` of the last start. Use `await asyncio.sleep`, never `time.sleep`.
 - `get_messages(page_delay=)` stays. Callers that enable the interval may pass `page_delay=0`, so the pause isn't doubled.
 - Log: debug `Timeline pacing set` (`interval`) whenever the value changes; debug per paced wait is unnecessary. Optionally, one info line at the end of a paced period with the total requests paced and the wait time. Keep the logging minimal.
 - Tests:

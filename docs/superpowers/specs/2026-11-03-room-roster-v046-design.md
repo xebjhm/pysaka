@@ -188,7 +188,8 @@ keyword, settable at any time).
   that consecutive request starts are at least that many seconds apart. That covers all
   `get_messages` pages, the `order=asc` probe (`_timeline_first_id`) and the 401 retry inside
   `fetch_json`. Other endpoints and CDN downloads are never paced.
-- Concurrency-safe: one lazily created `asyncio.Lock` per client plus the `time.monotonic()` of
+- Concurrency-safe: one lazily created `asyncio.Lock` per client and event loop (rebuilt when the running loop
+  changes; a client is not meant to be used from several loops at the same time) plus the `time.monotonic()` of
   the last start; waiting uses `await asyncio.sleep`.
 - `get_messages(page_delay=)` stays. Callers that enable the interval may pass `page_delay=0`.
 - Logging: debug `Timeline pacing set` (`interval`) on each change, and one info

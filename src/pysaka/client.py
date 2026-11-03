@@ -124,6 +124,10 @@ class Client:
     Provides methods to authenticate, explore groups/members, and fetch messages.
     Handles token refresh automatically via cookies or refresh_token.
 
+    A ``Client`` may be reused one after another across event loops (for example successive
+    ``asyncio.run`` calls): its internal locks are rebuilt for each loop. It must not be used from
+    several event loops running at the same time (for example in different threads).
+
     Attributes:
         group (Group): The target Sakamichi group.
         access_token (str): Current OAuth2 access token.

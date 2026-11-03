@@ -40,6 +40,11 @@ interaction). Reuses the browser session stored in `auth_dir`.
 ### `Client`
 Main API client supporting all Sakamichi groups.
 
+**Event loops.** A `Client` may be reused one after another across event loops (for example
+successive `asyncio.run` calls): its internal locks (token refresh, timeline pacing) are rebuilt
+for each loop. It must not be used from several event loops running at the same time (for
+example in different threads).
+
 **Errors of the GET methods.** Every method built on `fetch_json` (`get_groups`, `get_members`,
 `get_messages`, `get_profile`, `get_news`, `get_tags`, `get_fc_contents`, `get_organizations`,
 `get_products`, `get_member`, `get_account`, `get_letters`, `get_past_messages`,
