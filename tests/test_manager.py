@@ -688,6 +688,60 @@ async def test_sync_member_recovers_on_corrupt_file(sync_manager):
 
 
 @pytest.mark.asyncio
+async def test_sync_member_corrupt_file_logs_once(sync_manager):
+    """The pre-read already reports a corrupt messages.json; the locked write
+    that then discards it must not log the same event a second time."""
+    from structlog.testing import capture_logs
+
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True, exist_ok=True)
+    (member_dir / "messages.json").write_text("{ broken", encoding="utf-8")
+    sync_manager.client.get_messages.return_value = [
+        {"id": 1, "type": "text", "text": "A", "member_id": 10, "published_at": "2023-01-01T00:00:00Z"}
+    ]
+
+    with capture_logs() as logs:
+        await sync_manager.sync_member(AsyncMock(), {"id": 1, "name": "Grp"}, {"id": 10, "name": "Mem"}, [])
+
+    assert [e["event"] for e in logs if e["log_level"] == "warning"] == ["corrupt_messages_file"]
+
+
+@pytest.mark.asyncio
+async def test_sync_member_logs_file_corrupted_after_pre_read(sync_manager, monkeypatch):
+    """messages.json readable when sync_member first reads it but unreadable once
+    the write lock is taken: the merge falls back to the pre-read copy (unchanged
+    semantics) and the discard is logged, not silent."""
+    from structlog.testing import capture_logs
+
+    group, member = {"id": 1, "name": "Grp"}, {"id": 10, "name": "Mem"}
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True, exist_ok=True)
+    json_path = member_dir / "messages.json"
+    old = {"id": 1, "type": "text", "text": "A", "member_id": 10, "timestamp": "2023-01-01T00:00:00Z"}
+    json_path.write_text(json.dumps({"messages": [old]}), encoding="utf-8")
+    sync_manager.client.get_messages.return_value = [
+        {"id": 2, "type": "text", "text": "B", "member_id": 10, "published_at": "2023-01-02T00:00:00Z"}
+    ]
+    original = sync_manager.prepare_messages
+
+    def corrupt_then_prepare(*args, **kwargs):
+        json_path.write_text("{ broken 日本語", encoding="utf-8")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(sync_manager, "prepare_messages", corrupt_then_prepare)
+
+    with capture_logs() as logs:
+        await sync_manager.sync_member(AsyncMock(), group, member, [])
+
+    with open(json_path, encoding="utf-8") as f:
+        assert [m["id"] for m in json.load(f)["messages"]] == [1, 2]
+    (entry,) = [e for e in logs if e["log_level"] == "warning"]
+    assert entry["event"] == "messages.json unreadable at write time; merging the earlier read"
+    assert entry["member_id"] == 10
+    assert "日本語" not in repr(logs)
+
+
+@pytest.mark.asyncio
 async def test_sync_member_recovers_full_history_on_prefetched_branch(sync_manager):
     """PY-MGR-01: recovery must fetch TRUE full history from the API even when a
     prefetched (incremental-window) timeline was supplied. The prefetched slice

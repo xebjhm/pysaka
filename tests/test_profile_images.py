@@ -192,3 +192,19 @@ async def test_archive_clears_current_when_urls_disappear(manager, tmp_path):
     idx = _index(member_dir)
     assert idx["current"] == {}
     assert len(idx["images"]) == 3  # history is never dropped
+
+
+async def test_archive_quarantines_unreadable_index(manager, tmp_path, time_machine):
+    time_machine.move_to("2026-11-03T12:34:56Z", tick=False)
+    member_dir = tmp_path / "m"
+    root = member_dir / "profile_images"
+    root.mkdir(parents=True)
+    (root / "index.json").write_text("{broken", encoding="utf-8")
+
+    with capture_logs() as logs:
+        await manager.archive_profile_images(AsyncMock(), GROUP, MEMBER, member_dir)
+
+    assert (root / "index.json.corrupt-20261103T123456Z").read_text(encoding="utf-8") == "{broken"
+    assert len(_index(member_dir)["images"]) == 3  # rebuilt from this run
+    (entry,) = [e for e in logs if e.get("file") == "index.json"]
+    assert entry["log_level"] == "warning"

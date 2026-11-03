@@ -158,3 +158,19 @@ async def test_logs_never_contain_nickname_or_avatar_url(manager):
     assert PROFILE["thumbnail"] not in blob
     assert "abc" not in blob
     assert any(e.get("error_type") == "RuntimeError" for e in logs)
+
+
+async def test_unreadable_profile_json_is_kept_aside_and_rebuilt(manager, time_machine):
+    time_machine.move_to("2026-11-03T12:34:56Z", tick=False)
+    account = manager.output_dir / "account"
+    account.mkdir(parents=True)
+    (account / "profile.json").write_text("{broken ハオ", encoding="utf-8")
+
+    with capture_logs() as logs:
+        await manager.archive_account_profile(AsyncMock())
+
+    assert (account / "profile.json.corrupt-20261103T123456Z").read_text(encoding="utf-8") == "{broken ハオ"
+    assert _read(account / "profile.json")["name"] == "ハオ🐱"
+    (entry,) = [e for e in logs if e.get("file") == "profile.json"]
+    assert entry["log_level"] == "warning"
+    assert "ハオ" not in repr(logs)  # neither the nickname nor the corrupt content is logged

@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from pysaka.manager import SyncManager
 
@@ -57,7 +58,7 @@ def test_locked_update_missing_file_passes_none(tmp_path):
     assert seen == [None] and ok is True and p.exists()
 
 
-def test_locked_update_corrupt_raises_unless_corrupt_ok(tmp_path):
+def test_locked_update_corrupt_raises_unless_discard(tmp_path):
     p = tmp_path / "messages.json"
     p.write_text("{not json", encoding="utf-8")
 
@@ -65,8 +66,36 @@ def test_locked_update_corrupt_raises_unless_corrupt_ok(tmp_path):
         SyncManager._locked_update(p, lambda cur: (None, None))
 
     seen = []
-    SyncManager._locked_update(p, lambda cur: (seen.append(cur), (None, None))[1], corrupt_ok=True)
+    with capture_logs() as logs:
+        SyncManager._locked_update(p, lambda cur: (seen.append(cur), (None, None))[1], on_corrupt="discard")
     assert seen == [None]
+    assert p.read_text(encoding="utf-8") == "{not json"  # discard does not move the file
+    assert logs == []  # the caller (sync_member) logs the corrupt file itself
+
+
+def test_locked_update_quarantine_moves_unreadable_file_aside(tmp_path, time_machine):
+    time_machine.move_to("2026-11-03T12:34:56Z", tick=False)
+    p = tmp_path / "index.json"
+    p.write_text("{not json 日本語", encoding="utf-8")
+    seen = []
+
+    def mutate(current):
+        seen.append(current)
+        return {"version": 1}, "rebuilt"
+
+    with capture_logs() as logs:
+        ok, result = SyncManager._locked_update(p, mutate, on_corrupt="quarantine")
+
+    assert (ok, result) == (True, "rebuilt")
+    assert seen == [None]
+    kept = tmp_path / "index.json.corrupt-20261103T123456Z"
+    assert kept.read_text(encoding="utf-8") == "{not json 日本語"
+    assert _read(p) == {"version": 1}
+    (entry,) = [e for e in logs if e["log_level"] == "warning"]
+    assert entry["file"] == "index.json"  # file name only, never the full path
+    assert entry["kept_as"] == kept.name
+    assert entry["error_type"] == "JSONDecodeError"
+    assert str(tmp_path) not in repr(logs)
 
 
 def test_locked_update_reports_write_failure(tmp_path, monkeypatch):

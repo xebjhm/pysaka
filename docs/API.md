@@ -252,8 +252,9 @@ image (`member.phone_image`) into `member_dir/profile_images/<kind>/<basename>` 
 stored without their query string and fragment, so CDN signatures never reach the disk. Kinds are
 `thumbnail`, `phone_image` and `group_thumbnail`. Called automatically by `sync_member`, where a
 failure is logged and never affects the result or the cursor. Returns `{"downloaded", "skipped", "failed"}`.
-- An unreadable `index.json` is replaced by a fresh index: its history entries and `first_seen`
-  values are lost (the image files stay on disk).
+- An unreadable `index.json` is renamed to `index.json.corrupt-<UTC timestamp>` (kept for
+  inspection; a warning with the file name is logged) and a fresh index is built: the old history
+  entries and `first_seen` values are not carried over (the image files stay on disk).
 - The current image of a kind is the `images[]` entry where
   `entry["kind"] == kind and entry["file"] == profile_images.relative_file(kind, index["current"][kind])`
   — match by file, never by full URL (CDN URLs can carry changing query strings). If no entry
@@ -314,7 +315,9 @@ match the `images[]` entry by `kind` and `file` (via `profile_images.relative_fi
 Birthday, sex, subdivision (region) and FC accounts are returned by `/profile` too but are
 deliberately **not** stored or logged. A missing profile writes nothing. A missing or non-string
 `name`/`updated_at` keeps the stored value (`""`/`null` on the first write), and only a non-empty
-string `thumbnail` is archived. Idempotent: an avatar
+string `thumbnail` is archived. An unreadable `profile.json` (or avatar `index.json`) is renamed to
+`<name>.corrupt-<UTC timestamp>` (kept for inspection; a warning with the file name is logged) and
+rebuilt. Idempotent: an avatar
 already on disk is skipped, a changed avatar adds a history entry. Returns
 `{"downloaded", "skipped", "failed"}` for the avatar. Not called by `sync_member`; call it once per
 service.

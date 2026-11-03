@@ -7,7 +7,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, Literal, Optional, TypeVar
 
 import aiofiles
 import aiohttp
@@ -131,11 +131,22 @@ class SyncManager:
                 pass
 
     @staticmethod
+    def _move_corrupt_aside(path: Path) -> Path:
+        """Rename ``path`` to ``<name>.corrupt-<UTC timestamp>`` and return the new path.
+
+        Caller must hold the file's lock. Raises ``OSError`` if the rename fails.
+        """
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        aside = path.with_name(f"{path.name}.corrupt-{stamp}")
+        path.replace(aside)
+        return aside
+
+    @staticmethod
     def _locked_update(
         path: Path,
         mutate: Callable[[Optional[Any]], tuple[Optional[Any], T]],
         *,
-        corrupt_ok: bool = False,
+        on_corrupt: Literal["raise", "discard", "quarantine"] = "raise",
     ) -> tuple[bool, T]:
         """Read-modify-write a JSON file under its process-wide lock.
 
@@ -143,17 +154,25 @@ class SyncManager:
         The lock is not re-entrant, so ``mutate`` must not call ``_locked_update``
         (or ``update_message_fields*``) on the same path — it would deadlock.
         ``mutate`` receives the parsed file (``None`` if the file is missing, or if
-        it is unreadable and ``corrupt_ok`` is True) and returns ``(data, result)``.
-        ``data is None`` means "nothing to write". Every writer of a given file must
-        go through this method, otherwise a concurrent read-modify-write can
-        overwrite the other's changes.
+        it is unreadable and ``on_corrupt`` is not ``"raise"``) and returns
+        ``(data, result)``. ``data is None`` means "nothing to write". Every writer
+        of a given file must go through this method, otherwise a concurrent
+        read-modify-write can overwrite the other's changes.
+
+        ``on_corrupt`` decides what happens to a file that is not valid JSON:
+        ``"raise"`` raises ``ValueError``; ``"discard"`` passes ``None`` to
+        ``mutate`` and logs nothing (for callers that report the corrupt file
+        themselves); ``"quarantine"`` renames it to
+        ``<name>.corrupt-<UTC timestamp>`` (kept for inspection), logs a warning
+        with the file name and error type, and passes ``None`` to ``mutate``.
 
         Returns:
             ``(write_ok, result)``. ``write_ok`` is False only when a write was
             attempted and ``_atomic_write_json`` failed.
 
         Raises:
-            ValueError: the file is unreadable JSON and ``corrupt_ok`` is False.
+            ValueError: the file is unreadable JSON and ``on_corrupt`` is ``"raise"``.
+            OSError: reading the file, or renaming it aside, failed.
         """
         with _lock_for(path):
             current: Optional[Any] = None
@@ -161,9 +180,17 @@ class SyncManager:
                 try:
                     with open(path, encoding="utf-8") as f:
                         current = json.load(f)
-                except ValueError:
-                    if not corrupt_ok:
+                except ValueError as e:
+                    if on_corrupt == "raise":
                         raise
+                    if on_corrupt == "quarantine":
+                        aside = SyncManager._move_corrupt_aside(path)
+                        logger.warning(
+                            "Unreadable JSON file kept aside; rebuilding",
+                            file=path.name,
+                            kept_as=aside.name,
+                            error_type=type(e).__name__,
+                        )
                     current = None
             data, result = mutate(current)
             if data is None:
@@ -493,8 +520,7 @@ class SyncManager:
                 with open(path, encoding="utf-8") as f:
                     json.load(f)
             except ValueError:
-                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                path.replace(path.with_name(f"{path.name}.corrupt-{stamp}"))
+                SyncManager._move_corrupt_aside(path)
                 return True
             return False
 
@@ -675,7 +701,10 @@ class SyncManager:
         ``<member_dir>/profile_images/index.json``.
 
         Idempotent: an image already on disk (non-empty) is skipped. A failed
-        download is not indexed and is retried on the next call.
+        download is not indexed and is retried on the next call. An unreadable
+        ``index.json`` is renamed to ``index.json.corrupt-<UTC timestamp>`` (kept
+        for inspection, a warning is logged) and a fresh index is built; the old
+        history is not carried over (the image files stay on disk).
 
         Returns:
             ``{"downloaded": n, "skipped": n, "failed": n}``.
@@ -713,7 +742,9 @@ class SyncManager:
 
         if urls or (root / profile_images.INDEX_NAME).exists():
             root.mkdir(parents=True, exist_ok=True)
-            await asyncio.to_thread(self._locked_update, root / profile_images.INDEX_NAME, mutate, corrupt_ok=True)
+            await asyncio.to_thread(
+                self._locked_update, root / profile_images.INDEX_NAME, mutate, on_corrupt="quarantine"
+            )
         return report
 
     async def _archive_profile_images_safely(
@@ -737,7 +768,9 @@ class SyncManager:
         under ``account/profile_images/`` with the same index/history as member
         images. A missing or non-string ``name``/``updated_at`` keeps the stored
         value (``""``/``None`` on first write); only a non-empty string
-        ``thumbnail`` is archived. Auth errors (``SessionExpiredError``,
+        ``thumbnail`` is archived. An unreadable ``profile.json`` (or avatar
+        ``index.json``) is renamed to ``<name>.corrupt-<UTC timestamp>`` (kept
+        for inspection, a warning with the file name is logged) and rebuilt. Auth errors (``SessionExpiredError``,
         ``RefreshFailedError``) propagate; any other error, from the fetch or
         from the file/avatar work after it, yields all-zero counts and this
         method's own error log carries the exception type only (never the
@@ -781,7 +814,7 @@ class SyncManager:
         try:
             account_dir = self.output_dir / "account"
             account_dir.mkdir(parents=True, exist_ok=True)
-            await asyncio.to_thread(self._locked_update, account_dir / "profile.json", mutate, corrupt_ok=True)
+            await asyncio.to_thread(self._locked_update, account_dir / "profile.json", mutate, on_corrupt="quarantine")
             return await self._archive_image_set(session, account_dir / profile_images.DIR_NAME, urls)
         except (SessionExpiredError, RefreshFailedError):
             raise
@@ -959,6 +992,14 @@ class SyncManager:
                 # read before the API call. Another writer (e.g. a favorite toggle)
                 # may have rewritten it since; merging the stale copy would drop
                 # that change, and the other writer's stale copy would drop ours.
+                if not isinstance(current, dict) and not corrupt and existing_file.exists():
+                    # Readable at the pre-read, unreadable now (a corrupt pre-read was
+                    # already logged above). Falls back to the pre-read copy.
+                    logger.warning(
+                        "messages.json unreadable at write time; merging the earlier read",
+                        member_id=mid,
+                        group_id=gid,
+                    )
                 base = current.get("messages", []) if isinstance(current, dict) else existing_msgs
                 base_ids = {m.get("id") for m in base}
                 new_msgs = [m for m in processed if m["id"] not in base_ids]
@@ -979,7 +1020,7 @@ class SyncManager:
                 return export_data, (merged, new_msgs, initial)
 
             wrote, (merged, new_msgs, initial_sync) = await asyncio.to_thread(
-                self._locked_update, existing_file, mutate, corrupt_ok=True
+                self._locked_update, existing_file, mutate, on_corrupt="discard"
             )
             if not wrote:
                 # The messages never hit disk — do NOT advance the cursor, or the next

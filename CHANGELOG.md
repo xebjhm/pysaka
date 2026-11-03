@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sync_member` now archives the member's list icon, chat icon and call-screen
   image into `profile_images/` with an `index.json` history
   (`SyncManager.archive_profile_images`). URLs in `index.json` are stored
-  without their query string, so CDN signatures are never written to disk.
+  without their query string, so CDN signatures are never written to disk. An
+  unreadable `index.json` is kept as `index.json.corrupt-<UTC timestamp>` and
+  rebuilt, with a warning logged.
 - `SyncManager.backfill_past_messages(session, group, member)` adds the room's
   pre-subscription messages and their media once per member, without moving the
   cursor.
@@ -35,7 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole fetched history); ignore those calls when sending notifications.
 - `SyncManager.archive_account_profile(session)` stores the account's own
   nickname and avatar (with avatar history) under `account/`; other profile
-  fields (birthday, sex, region, FC accounts) are not stored.
+  fields (birthday, sex, region, FC accounts) are not stored. An unreadable
+  `account/profile.json` is kept as `profile.json.corrupt-<UTC timestamp>` and
+  rebuilt.
 
 ### Fixed
 - `Client.download_file` failure logs no longer include the signed query string of
