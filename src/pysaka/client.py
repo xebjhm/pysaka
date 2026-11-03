@@ -967,23 +967,25 @@ class Client:
         Returns:
             List of message dicts, sorted by ID ascending. When the timeline ends
             on a partial page (no continuation, or one echoing its continuation)
-            before reaching the cursor (``since_ts``, or one found via
-            ``since_id``), that is the start of the timeline and every fetched
-            message is returned. A full last page without a continuation is also
-            accepted as the start of the timeline when the room's first message
-            (probed with ``order=asc``) has the smallest id among the collected
+            during a full fetch (neither ``since_ts`` nor ``since_id``) or before
+            reaching the cursor (``since_ts``, or one found via ``since_id``),
+            that is the start of the timeline and every fetched message is
+            returned. A full last page without a continuation is also accepted
+            as the start of the timeline when the room's first message (probed
+            with ``order=asc``) has the smallest id among the collected
             messages; merely being collected is not enough.
 
         Raises:
             ApiError: If pagination stops in a way that could hide unfetched
                 messages — a failed page fetch or an empty page carrying a
                 continuation after earlier pages were collected; on a full fetch
-                (neither ``since_ts`` nor ``since_id``), a failed first page (with
-                a cursor, a failed first page returns ``[]``); or, while the
-                cursor is still unreached: a full page with a repeated
-                continuation (always), a full page with a missing continuation
-                (unless the ``order=asc`` probe confirms the timeline start), or
-                a page that replays already-collected messages.
+                (neither ``since_ts`` nor ``since_id``), a failed first page or an
+                empty first page carrying a continuation (with a cursor, both
+                return ``[]``); or, on a full fetch or while the cursor is still
+                unreached: a full page with a repeated continuation (always), a
+                full page with a missing continuation (unless the ``order=asc``
+                probe confirms the timeline start), or a page that replays
+                already-collected messages.
             RateLimitedError: On HTTP 429 for any page (a subclass of
                 ``ApiError``), instead of returning ``[]`` or a partial list.
         """
@@ -1052,7 +1054,9 @@ class Client:
                 # returning the partial newest set would advance the cursor past the
                 # un-fetched gap. Fail closed, mirroring the None-page guard above.
                 # An empty page with no continuation is a legitimate end-of-timeline.
-                if all_messages and data.get("continuation"):
+                # On a full fetch even an empty FIRST page with a continuation
+                # fails closed: [] would read as an empty room.
+                if (all_messages or full_fetch) and data.get("continuation"):
                     raise ApiError(
                         f"Timeline pagination for group {group_id} returned an empty "
                         f"page with a continuation after {len(all_messages)} "
@@ -1086,8 +1090,10 @@ class Client:
             oldest_timestamp = messages[-1].get("published_at", "")
             before_cursor = bool(effective_ts and oldest_timestamp and oldest_timestamp > effective_ts)
             # Cursor not reached yet: a timestamp cursor still older than this page,
-            # or a legacy since_id whose message has not been seen yet.
-            cursor_unreached = before_cursor or need_discover_ts
+            # or a legacy since_id whose message has not been seen yet. A full fetch
+            # has no cursor and must reach the start of the timeline, so it obeys
+            # the same end-of-timeline rules as an unreached cursor.
+            cursor_unreached = before_cursor or need_discover_ts or full_fetch
             repeated = bool(current_continuation) and current_continuation == params.get("continuation")
             if not current_continuation or repeated:
                 # The server offers no further page. That is the genuine START of the
@@ -1126,11 +1132,15 @@ class Client:
                             f"oldest_collected_id={oldest_collected_id})"
                         )
                 if cursor_unreached and not timeline_start:
+                    where = (
+                        "before the start of the timeline (full fetch)"
+                        if full_fetch
+                        else f"while the cursor (since_ts={effective_ts}, since_id={since_id}) is still unreached"
+                    )
                     raise ApiError(
                         f"Timeline pagination for group {group_id} ended (missing or "
-                        f"repeated continuation) on a full or replayed page while the "
-                        f"cursor (since_ts={effective_ts}, since_id={since_id}) is "
-                        f"still unreached{probe_detail}; refusing to skip a possible gap."
+                        f"repeated continuation) on a full or replayed page {where}"
+                        f"{probe_detail}; refusing to skip a possible gap."
                     )
                 if before_cursor:
                     # Routine, not a gap: e.g. a caller's overlap window subtracted

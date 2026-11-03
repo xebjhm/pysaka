@@ -123,6 +123,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `room_archive_complete` passed and a history scan could be recorded as done
   for a room that was never read. With a cursor, a failed first page still
   returns `[]`.
+- `Client.get_messages` without a cursor now applies the same end-of-timeline
+  checks as with a cursor, and raises `ApiError` instead of returning a
+  truncated history when a full page repeats its continuation, a page replays
+  already-collected messages, an empty first page carries a continuation, or a
+  full last page has no continuation and the `order=asc` probe does not return
+  the smallest collected id. Before, these ended pagination and returned the
+  pages collected so far (a repeated continuation only logged `Timeline
+  pagination stuck without a cursor`). A partial last page, with or without an
+  echoed continuation, still ends the timeline normally.
 
 ## [0.4.5] - 2026-11-03
 

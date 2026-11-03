@@ -323,15 +323,39 @@ async def test_get_messages_raises_on_full_page_without_continuation_before_curs
 
 
 @pytest.mark.asyncio
-async def test_get_messages_full_page_without_continuation_no_cursor_is_clean_end(client, mock_session):
-    """With no cursor (full fetch) there is no gap to protect: a full last page with
-    no continuation simply ends pagination, without any ``order=asc`` probe request."""
-    client.fetch_json = AsyncMock(return_value={"messages": _page(1000, 200, 10), "continuation": None})
+async def test_get_messages_full_page_without_continuation_no_cursor_accepted_by_probe(client, mock_session):
+    """Full fetch (no cursor): a full last page with no continuation is the timeline
+    start only when the ``order=asc`` probe returns the smallest collected id."""
+
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return {"messages": [{"id": 801}]}
+        return {"messages": _page(1000, 200, 10), "continuation": None}
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
 
     msgs = await client.get_messages(mock_session, group_id=1)
     assert len(msgs) == 200
-    assert client.fetch_json.await_count == 1
-    assert all(call.args[2].get("order") != "asc" for call in client.fetch_json.await_args_list)
+    assert [call.args[2].get("order") for call in client.fetch_json.await_args_list] == ["desc", "asc"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("probe", [{"messages": [{"id": 1000}]}, {"messages": [{"id": 1}]}, None])
+async def test_get_messages_full_page_without_continuation_no_cursor_raises_unless_probed(client, mock_session, probe):
+    """Full fetch (no cursor): a full last page with no continuation may be a dropped
+    token. Returning it would hand the caller a truncated history (and a scan would be
+    recorded as complete), so raise unless the probe confirms the start: the probe
+    answering with the newest id, an uncollected older id, or failing all raise."""
+
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return probe
+        return {"messages": _page(1000, 200, 10), "continuation": None}
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
+
+    with pytest.raises(ApiError, match="full fetch"):
+        await client.get_messages(mock_session, group_id=1)
 
 
 @pytest.mark.asyncio
@@ -392,12 +416,10 @@ async def test_get_messages_raises_when_server_replays_partial_page_before_curso
 
 
 @pytest.mark.asyncio
-async def test_get_messages_duplicate_continuation_without_cursor_is_clean_end(client, mock_session):
-    """A repeated continuation on a full page with NO cursor (full fetch) has no gap
-    to protect: stop paginating (avoiding an infinite loop), return what was
-    collected, and warn that pagination looked stuck."""
-    from structlog.testing import capture_logs
-
+async def test_get_messages_duplicate_continuation_without_cursor_raises(client, mock_session):
+    """Full fetch (no cursor): a FULL page repeating its continuation means more pages
+    exist but the server will not advance. Returning the collected pages would be a
+    truncated history, so raise (and stop: no infinite loop, no probe)."""
     client.fetch_json = AsyncMock(
         side_effect=[
             {"messages": _page(1000, 200, 10), "continuation": "tok1"},
@@ -405,11 +427,62 @@ async def test_get_messages_duplicate_continuation_without_cursor_is_clean_end(c
         ]
     )
 
-    with capture_logs() as logs:
-        msgs = await client.get_messages(mock_session, group_id=1)
-    assert len(msgs) == 400
+    with pytest.raises(ApiError, match="full fetch"):
+        await client.get_messages(mock_session, group_id=1, page_delay=0)
     assert client.fetch_json.await_count == 2
-    assert any(e["event"].startswith("Timeline pagination stuck") and e["log_level"] == "warning" for e in logs)
+
+
+@pytest.mark.asyncio
+async def test_get_messages_duplicate_continuation_on_partial_page_without_cursor_is_timeline_start(
+    client, mock_session
+):
+    """Full fetch (no cursor): a partial page of new messages echoing its continuation
+    is the server marking the last page, so pagination ends normally."""
+    client.fetch_json = AsyncMock(
+        side_effect=[
+            {"messages": _page(1000, 200, 10), "continuation": "tok1"},
+            {"messages": _page(800, 50, 9), "continuation": "tok1"},
+        ]
+    )
+
+    msgs = await client.get_messages(mock_session, group_id=1, page_delay=0)
+    assert len(msgs) == 250
+    assert client.fetch_json.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [200, 150])
+async def test_get_messages_replayed_page_without_cursor_raises(client, mock_session, size):
+    """Full fetch (no cursor): a page that only replays collected messages with the
+    same token is the server ignoring the token, full page or not; raise."""
+    first = _page(1000, size, 10)
+    client.fetch_json = AsyncMock(
+        side_effect=[
+            {"messages": first, "continuation": "tok1"},
+            {"messages": list(first), "continuation": "tok1"},
+        ]
+    )
+
+    with pytest.raises(ApiError, match="full fetch"):
+        await client.get_messages(mock_session, group_id=1, page_delay=0)
+
+
+@pytest.mark.asyncio
+async def test_get_messages_empty_first_page_with_continuation_without_cursor_raises(client, mock_session):
+    """Full fetch (no cursor): an empty first page that still carries a continuation
+    claims more data exists. ``[]`` would read as an empty room, so raise."""
+    client.fetch_json = AsyncMock(return_value={"messages": [], "continuation": "more"})
+
+    with pytest.raises(ApiError):
+        await client.get_messages(mock_session, group_id=1)
+
+
+@pytest.mark.asyncio
+async def test_get_messages_empty_first_page_with_continuation_with_cursor_returns_empty(client, mock_session):
+    """With a cursor the empty-first-page case is unchanged: ``[]``."""
+    client.fetch_json = AsyncMock(return_value={"messages": [], "continuation": "more"})
+
+    assert await client.get_messages(mock_session, group_id=1, since_ts="2026-01-01T00:00:00Z") == []
 
 
 @pytest.mark.asyncio
@@ -870,3 +943,44 @@ async def test_full_fetch_empty_room_returns_empty(client, mock_session):
 
     assert await client.get_messages(mock_session, group_id=7) == []
     assert client.fetch_json.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cursor_gap_error_text_unchanged(client, mock_session):
+    """The full-fetch rules must leave the cursor case untouched, error text included."""
+    client.fetch_json = AsyncMock(
+        side_effect=[
+            {"messages": _page(1000, 200, 10), "continuation": "tok1"},
+            {"messages": _page(800, 200, 9), "continuation": "tok1"},
+        ]
+    )
+
+    with pytest.raises(ApiError) as exc:
+        await client.get_messages(mock_session, group_id=1, since_ts="2026-01-01T00:00:00Z", page_delay=0)
+    assert str(exc.value) == (
+        "Timeline pagination for group 1 ended (missing or repeated continuation) on a full "
+        "or replayed page while the cursor (since_ts=2026-01-01T00:00:00Z, since_id=None) is "
+        "still unreached; refusing to skip a possible gap."
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_since_id_found_without_timestamp_stuck_page_warns(client, mock_session):
+    """Legacy ``since_id`` found on a row without ``published_at``: no timestamp
+    cursor remains, but everything newer than ``since_id`` is already collected, so a
+    stuck full page ends with the warning (unchanged by the full-fetch rules)."""
+    from structlog.testing import capture_logs
+
+    first = _page(1000, 200, 10)
+    first[-1] = {"id": 801}  # the since_id row, no published_at
+    client.fetch_json = AsyncMock(
+        side_effect=[
+            {"messages": first, "continuation": "tok1"},
+            {"messages": _page(800, 200, 9), "continuation": "tok1"},
+        ]
+    )
+
+    with capture_logs() as logs:
+        msgs = await client.get_messages(mock_session, group_id=1, since_id=801, page_delay=0)
+    assert [m["id"] for m in msgs] == list(range(802, 1001))
+    assert any(e["event"].startswith("Timeline pagination stuck") for e in logs)

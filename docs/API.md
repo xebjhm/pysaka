@@ -138,19 +138,22 @@ the seconds left (`None` when not blocked). Logging: `Timeline requests blocked`
 - **page_delay**: Seconds to wait between page requests (default `0.5`). To stay under the
   API rate limit during long full-history fetches, set `Client.timeline_min_interval` instead
   (and pass `page_delay=0` so the pause is not doubled).
-- **Returns**: List of message objects (sorted by ID ascending). A full last
-  page without a continuation is accepted as the start of the timeline when the
-  room's first message (an `order=asc` probe) has the smallest id among the
-  collected messages; merely being collected is not enough.
+- **Returns**: List of message objects (sorted by ID ascending). A partial last
+  page (no continuation, or one echoing its continuation) is the start of the
+  timeline, on a full fetch (neither `since_ts` nor `since_id`) as before the
+  cursor. A full last page without a continuation is accepted as the start of
+  the timeline when the room's first message (an `order=asc` probe) has the
+  smallest id among the collected messages; merely being collected is not
+  enough.
 - **Raises**: `ApiError` if pagination stops in a way that could hide unfetched
   messages: a failed page fetch or an empty page carrying a continuation after
-  earlier pages were collected; on a full fetch (neither `since_ts` nor
-  `since_id`), a failed first page (with a cursor, a failed first page returns
-  `[]`); or, while the cursor is still unreached, a full
-  page with a repeated continuation (always), a full page with a missing
-  continuation (unless the `order=asc` probe confirms the timeline start), or a
-  page that replays already-collected messages. On HTTP 429 it raises
-  `RateLimitedError` instead of returning an empty list.
+  earlier pages were collected; on a full fetch, a failed first page or an empty
+  first page carrying a continuation (with a cursor, both return `[]`); or, on a
+  full fetch or while the cursor is still unreached, a full page with a repeated
+  continuation (always), a full page with a missing continuation (unless the
+  `order=asc` probe confirms the timeline start), or a page that replays
+  already-collected messages. On HTTP 429 it raises `RateLimitedError` instead
+  of returning an empty list.
 
 #### `download_file(session, url: str, filepath: Path, timestamp: str = None) -> bool`
 - **url**: Signed media URL. Failure logs carry only its scheme, host, port and path (never the
