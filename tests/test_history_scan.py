@@ -123,6 +123,8 @@ async def test_early_false_paths_log_reason(manager, body, reason):
     with structlog.testing.capture_logs() as logs:
         assert await manager.room_archive_complete(GROUP, [_m(1, 22)]) is False
     warnings = [e for e in logs if e["event"] == "Room archive unreadable"]
-    assert warnings == [
-        {"event": "Room archive unreadable", "log_level": "warning", "group_id": 43, "member_id": 22, "reason": reason}
-    ]
+    expected = {"event": "Room archive unreadable", "log_level": "warning", "group_id": 43, "member_id": 22}
+    expected["reason"] = reason
+    if reason == "unreadable":
+        expected["error_type"] = "JSONDecodeError"
+    assert warnings == [expected]

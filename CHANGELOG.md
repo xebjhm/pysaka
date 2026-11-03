@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message the member withdrew. A canceled message now carries `canceled_at`
   (the API's `updated_at`, kept from the first time it was seen; omitted, never
   `null`, while the API row has no `updated_at`).
+- Debug-log breadcrumbs for the room-roster and scan decisions: resolved extra
+  authors (`Extra room members`), scan bookkeeping, canceled messages and
+  skipped member 0 calls. Ids and counts only, never message text.
 
 ### Changed
 - `sync_member` assigns messages without `member_id` to member 0 (the room

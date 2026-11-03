@@ -56,13 +56,16 @@ def _rate_limited(endpoint: str, resp: Any) -> RateLimitedError:
     """
     headers = getattr(resp, "headers", None)
     raw = headers.get("Retry-After") if isinstance(headers, Mapping) else None
+    ignored: dict[str, str] = {}  # why a present Retry-After header was not used
     try:
         retry_after: Optional[float] = float(raw) if raw is not None else None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
         retry_after = None
+        ignored = {"retry_after_ignored": "unparsable", "error_type": type(e).__name__}
     if retry_after is not None and not (math.isfinite(retry_after) and retry_after >= 0):
         retry_after = None
-    logger.warning("API rate limited", endpoint=endpoint, retry_after=retry_after)
+        ignored = {"retry_after_ignored": "not_finite_or_negative"}
+    logger.warning("API rate limited", endpoint=endpoint, retry_after=retry_after, **ignored)
     return RateLimitedError(f"Rate limited at {endpoint}", retry_after)
 
 
@@ -1445,6 +1448,10 @@ class Client:
             RefreshFailedError: If a 401 triggers a token refresh and it fails.
         """
         data = await self.fetch_json(session, f"/members/{member_id}")
+        if data is not None and not isinstance(data, dict):
+            logger.warning(
+                "Member lookup returned a non-object body", member_id=member_id, found_type=type(data).__name__
+            )
         return data if isinstance(data, dict) else None
 
     async def get_account(self, session: aiohttp.ClientSession) -> Optional[dict[str, Any]]:

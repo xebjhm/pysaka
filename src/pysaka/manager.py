@@ -349,6 +349,7 @@ class SyncManager:
         entry["history_scanned_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.sync_state[key] = entry
         self.save_sync_state()
+        logger.info("Room history scan recorded", group_id=group_id, history_scanned_at=entry["history_scanned_at"])
 
     async def room_archive_complete(self, group: dict[str, Any], messages: list[dict[str, Any]]) -> bool:
         """True when every message id in ``messages`` that sync stores is in its author's ``messages.json``.
@@ -368,8 +369,10 @@ class SyncManager:
     def _room_archive_complete_sync(self, group: dict[str, Any], messages: list[dict[str, Any]]) -> bool:
         gid = group["id"]
         wanted: dict[int, set[int]] = {}
+        skipped = 0
         for m in messages:
             if not isinstance(m, dict) or m.get("id") is None or _is_skipped_empty(m):
+                skipped += 1
                 continue
             wanted.setdefault(roster.author_id(m), set()).add(m["id"])
         messages_dir = self.output_dir / "messages"
@@ -379,23 +382,38 @@ class SyncManager:
             for group_dir in group_dirs:
                 for path in group_dir.glob(f"{aid} */messages.json"):
                     reason: Optional[str] = None
+                    error_type: Optional[str] = None
                     try:
                         with open(path, encoding="utf-8") as f:
                             data = json.load(f)
-                    except (OSError, ValueError):
+                    except (OSError, ValueError) as e:
                         reason = "unreadable"
+                        error_type = type(e).__name__
                     else:
                         if not isinstance(data, dict):
                             reason = "not_an_object"
                         elif not isinstance(data.get("messages") or [], list):
                             reason = "messages_not_a_list"
                     if reason is not None:
-                        logger.warning("Room archive unreadable", group_id=gid, member_id=aid, reason=reason)
+                        logger.warning(
+                            "Room archive unreadable",
+                            group_id=gid,
+                            member_id=aid,
+                            reason=reason,
+                            **({"error_type": error_type} if error_type else {}),
+                        )
                         return False
                     stored |= {m.get("id") for m in data.get("messages") or [] if isinstance(m, dict)}
             if not ids <= stored:
                 logger.warning("Room archive incomplete", group_id=gid, member_id=aid, missing=len(ids - stored))
                 return False
+        logger.debug(
+            "Room archive complete",
+            group_id=gid,
+            checked=sum(len(ids) for ids in wanted.values()),
+            authors=len(wanted),
+            skipped=skipped,
+        )
         return True
 
     def _member_dir_path(self, group: dict[str, Any], member: dict[str, Any]) -> Path:
@@ -459,12 +477,13 @@ class SyncManager:
                     )
                     try:
                         existing.rename(member_dir)
-                    except OSError:
+                    except OSError as e:
                         logger.warning(
                             "Member folder rename failed",
                             member_id=member_id,
                             old=existing.name,
                             new=member_dir.name,
+                            error_type=type(e).__name__,
                         )
                         raise
                     if (member_dir / "messages.json").is_file():
@@ -648,6 +667,8 @@ class SyncManager:
             return 0
         if member["id"] != roster.ROOM_AUTHOR_ID:
             await self._archive_profile_images_safely(session, group, member)
+        else:
+            logger.debug("Profile images skipped: room author", group_id=group["id"], member_id=member["id"])
         return processed
 
     _MEMBER_PROFILE_KEYS = ("thumbnail", "phone_image", "portrait")
@@ -679,29 +700,71 @@ class SyncManager:
             ApiError: From ``Client.get_member`` (including ``RateLimitedError``).
         """
         hints = name_hints or {}
+        gid = group["id"]
+        # author_id maps a member_id it cannot read to the room author; say so, or a
+        # malformed id would silently merge a member's messages into member 0.
+        unusable = [
+            type(m.get("member_id")).__name__
+            for m in messages
+            if m.get("member_id") not in (None, 0, "0") and roster.author_id(m) == roster.ROOM_AUTHOR_ID
+        ]
+        if unusable:
+            logger.warning(
+                "Messages with unusable member_id attributed to room author",
+                group_id=gid,
+                count=len(unusable),
+                id_types=sorted(set(unusable)),
+            )
+        extra_ids = roster.extra_author_ids((m["id"] for m in api_members), messages)
         result: list[dict[str, Any]] = []
-        for aid in roster.extra_author_ids((m["id"] for m in api_members), messages):
+        for aid in extra_ids:
             if aid == roster.ROOM_AUTHOR_ID:
                 result.append(roster.room_author(group))
+                logger.debug("Room member resolved", group_id=gid, member_id=aid, source="room")
             else:
-                result.append(await self._resolve_member(session, aid, hints))
+                result.append(await self._resolve_member(session, aid, hints, group_id=gid))
+        if extra_ids:
+            logger.info("Extra room members", group_id=gid, member_ids=extra_ids, count=len(extra_ids))
         return result
 
     async def _resolve_member(
-        self, session: aiohttp.ClientSession, member_id: int, hints: dict[int, dict[str, Any]]
+        self,
+        session: aiohttp.ClientSession,
+        member_id: int,
+        hints: dict[int, dict[str, Any]],
+        *,
+        group_id: Optional[int] = None,
     ) -> dict[str, Any]:
+        """Resolve one extra author's member dict; logs the source (hint/local/api/fallback)."""
         hinted = hints.get(member_id)
         if hinted and hinted.get("name"):
+            logger.debug("Room member resolved", group_id=group_id, member_id=member_id, source="hint")
             return dict(hinted)
         local = await asyncio.to_thread(self._local_member_block, member_id)
         if local:
+            logger.debug("Room member resolved", group_id=group_id, member_id=member_id, source="local")
             return local
-        if member_id not in self._member_cache:
+        cached_lookup = member_id in self._member_cache
+        if not cached_lookup:
             fetched = await self.client.get_member(session, member_id)
             self._member_cache[member_id] = fetched if fetched and fetched.get("name") else None
         cached = self._member_cache[member_id]
         if cached:
+            logger.debug(
+                "Room member resolved",
+                group_id=group_id,
+                member_id=member_id,
+                source="api",
+                cached=cached_lookup,
+            )
             return {"id": member_id, "name": cached["name"], **{k: cached.get(k) for k in self._MEMBER_PROFILE_KEYS}}
+        logger.warning(
+            "Room member name unknown, using id as name",
+            group_id=group_id,
+            member_id=member_id,
+            source="fallback",
+            cached=cached_lookup,
+        )
         return {"id": member_id, "name": str(member_id)}
 
     def _local_member_block(self, member_id: int) -> Optional[dict[str, Any]]:
@@ -716,7 +779,13 @@ class SyncManager:
             try:
                 with open(path, encoding="utf-8") as f:
                     block = json.load(f).get("member")
-            except (OSError, ValueError, AttributeError):
+            except (OSError, ValueError, AttributeError) as e:
+                logger.warning(
+                    "Local member block unreadable",
+                    member_id=member_id,
+                    file=str(path.relative_to(self.output_dir)),
+                    error_type=type(e).__name__,
+                )
                 continue
             name = block.get("name") if isinstance(block, dict) else None
             if isinstance(name, str) and name and name != str(member_id):
@@ -759,6 +828,7 @@ class SyncManager:
         """
         gid, mid = group["id"], member["id"]
         if mid == roster.ROOM_AUTHOR_ID:
+            logger.debug("Backfill skipped: room author", group_id=gid, member_id=mid)
             return 0
         key = f"{gid}_{mid}"
         entry = self.sync_state.get(key)
@@ -794,7 +864,7 @@ class SyncManager:
                 base = current.get("messages", [])
                 base_ids = {m.get("id") for m in base}
                 new_count = sum(1 for m in processed if m["id"] not in base_ids)
-                merged = self._merge_messages(base, processed)
+                merged = self._merge_messages(base, processed, group_id=gid, member_id=mid)
                 merged.sort(key=lambda x: x.get("timestamp") or "")
                 current["messages"] = merged
                 current["total_messages"] = len(merged)
@@ -912,6 +982,7 @@ class SyncManager:
         """
         gid, mid = group["id"], member["id"]
         if mid == roster.ROOM_AUTHOR_ID:
+            logger.debug("Letters skipped: room author", group_id=gid, member_id=mid)
             return 0
         key = f"{gid}_{mid}"
         member_dir = self._member_dir_path(group, member)
@@ -1252,6 +1323,10 @@ class SyncManager:
 
         try:
             messages = await fetch_for_member(None if ignore_cursor else last_ts)
+            if ignore_cursor:
+                logger.debug(
+                    "Cursor ignored for room scan", group_id=gid, member_id=mid, last_ts=last_ts, count=len(messages)
+                )
 
             # Load existing (may be corrupt / truncated — see recovery below)
             existing_msgs: list[dict[str, Any]] = []
@@ -1367,7 +1442,7 @@ class SyncManager:
                 new_msgs = [m for m in processed if m["id"] not in base_ids]
                 # Dedupe (Upsert: prefer fresh API data, but preserve locally-derived
                 # media metadata the API never returns — see _merge_messages).
-                merged = self._merge_messages(base, processed)
+                merged = self._merge_messages(base, processed, group_id=gid, member_id=mid)
                 merged.sort(key=lambda x: x.get("timestamp") or "")
                 export_data = {
                     "exported_at": datetime.now(timezone.utc).isoformat() + "Z",
@@ -1478,6 +1553,8 @@ class SyncManager:
         processed = []
         earliest_failed_ts: Optional[str] = None
         earliest_pending_media_ts: Optional[str] = None
+        below_floor_pending = 0
+        below_floor_failed = 0
         for msg in messages:
             try:
                 # Normalize core fields
@@ -1521,6 +1598,8 @@ class SyncManager:
                         if cursor_floor is None or pending_ts >= cursor_floor:
                             if earliest_pending_media_ts is None or pending_ts < earliest_pending_media_ts:
                                 earliest_pending_media_ts = pending_ts
+                        else:
+                            below_floor_pending += 1
 
                     p_msg["media_file"] = str(filepath.relative_to(self.output_dir))
 
@@ -1546,7 +1625,17 @@ class SyncManager:
                 if cursor_floor is None or failed_ts >= cursor_floor:
                     if earliest_failed_ts is None or failed_ts < earliest_failed_ts:
                         earliest_failed_ts = failed_ts
+                else:
+                    below_floor_failed += 1
                 logger.error("Prepare error", message_id=mid, error=str(e))
+        if below_floor_pending or below_floor_failed:
+            logger.debug(
+                "Old rows excluded from cursor clamp",
+                member_dir=member_dir.name,
+                cursor_floor=cursor_floor,
+                pending_media=below_floor_pending,
+                failed=below_floor_failed,
+            )
         return processed, earliest_failed_ts, earliest_pending_media_ts
 
     # Media metadata derived locally from the downloaded file — the message API
@@ -1566,7 +1655,13 @@ class SyncManager:
     _LOCAL_DERIVED_FIELDS = ("width", "height", "media_duration", "is_muted", "media_file")
 
     @staticmethod
-    def _merge_messages(existing_msgs: list[dict[str, Any]], processed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _merge_messages(
+        existing_msgs: list[dict[str, Any]],
+        processed: list[dict[str, Any]],
+        *,
+        group_id: Optional[int] = None,
+        member_id: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
         """Upsert ``processed`` over ``existing_msgs`` (prefer fresh API data),
         carrying forward locally-derived media metadata the API cannot supply.
 
@@ -1577,6 +1672,10 @@ class SyncManager:
         ``canceled_at`` seen. A fresh row without ``canceled_at`` (the API sent no
         ``updated_at``) inherits the stored one; when none is stored yet (or a
         stored ``None`` from an earlier write), the fresh value is recorded.
+
+        ``group_id`` / ``member_id`` only label the log lines: ``info`` when a stored
+        message turns canceled (ids, ``canceled_at`` and whether its content was
+        kept, never the text), ``debug`` when a canceled message is first stored.
         """
         merged = {m["id"]: m for m in existing_msgs}
         for pm in processed:
@@ -1592,6 +1691,23 @@ class SyncManager:
                         pm["content"] = prev["content"]
                     if prev.get("canceled_at"):
                         pm["canceled_at"] = prev["canceled_at"]
+                    if prev.get("state") not in CANCELED_STATES:
+                        logger.info(
+                            "Stored message turned canceled",
+                            group_id=group_id,
+                            member_id=member_id,
+                            message_id=pm["id"],
+                            canceled_at=pm.get("canceled_at"),
+                            content_kept=bool(pm.get("content")),
+                        )
+            elif pm.get("state") in CANCELED_STATES:
+                logger.debug(
+                    "Canceled message stored without earlier copy",
+                    group_id=group_id,
+                    member_id=member_id,
+                    message_id=pm["id"],
+                    canceled_at=pm.get("canceled_at"),
+                )
             merged[pm["id"]] = pm
         return list(merged.values())
 
