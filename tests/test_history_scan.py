@@ -4,6 +4,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import structlog.testing
 
 from pysaka import roster
 from pysaka.client import Client, Group
@@ -73,3 +74,55 @@ async def test_incomplete_on_non_object_file(manager):
     d.mkdir(parents=True)
     (d / "messages.json").write_text("[]", encoding="utf-8")
     assert await manager.room_archive_complete(GROUP, [_m(1, 22)]) is False
+
+
+async def test_complete_when_an_empty_text_message_was_skipped(manager):
+    # sync stores neither text nor media for id 2 (skipped), so it must not be expected.
+    timeline = [
+        _m(1, 22),
+        {"id": 2, "type": "text", "text": "", "member_id": 22, "published_at": "2022-04-01T03:00:20Z"},
+    ]
+    member = {"id": 22, "name": "a"}
+    await manager.sync_member(AsyncMock(), GROUP, member, [], prefetched_messages=timeline, ignore_cursor=True)
+    assert await manager.room_archive_complete(GROUP, timeline) is True
+
+
+async def test_incomplete_when_an_empty_canceled_message_is_missing(manager):
+    # A canceled empty message is stored by sync, so it is still expected.
+    canceled = {"id": 2, "type": "text", "text": "", "member_id": 22, "state": "canceled", "published_at": "t"}
+    d = manager.output_dir / "messages" / "43 日向坂46" / "22 a"
+    d.mkdir(parents=True)
+    (d / "messages.json").write_text(json.dumps({"messages": [{"id": 1}]}), encoding="utf-8")
+    assert await manager.room_archive_complete(GROUP, [_m(1, 22), canceled]) is False
+
+
+async def test_messages_without_id_are_ignored(manager):
+    timeline = [_m(1, 22), {"type": "text", "text": "x", "member_id": 22}, "not a dict"]
+    await manager.sync_member(AsyncMock(), GROUP, {"id": 22, "name": "a"}, [], prefetched_messages=[_m(1, 22)])
+    assert await manager.room_archive_complete(GROUP, timeline) is True
+
+
+async def test_null_messages_list_counts_as_empty(manager):
+    d = manager.output_dir / "messages" / "43 日向坂46" / "22 a"
+    d.mkdir(parents=True)
+    (d / "messages.json").write_text('{"messages": null}', encoding="utf-8")
+    assert await manager.room_archive_complete(GROUP, []) is True
+    with structlog.testing.capture_logs() as logs:
+        assert await manager.room_archive_complete(GROUP, [_m(1, 22)]) is False
+    assert [e["member_id"] for e in logs if e["event"] == "Room archive incomplete"] == [22]
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [('{"messages": {"1": 1}}', "messages_not_a_list"), ("[]", "not_an_object"), ("{broken", "unreadable")],
+)
+async def test_early_false_paths_log_reason(manager, body, reason):
+    d = manager.output_dir / "messages" / "43 日向坂46" / "22 a"
+    d.mkdir(parents=True)
+    (d / "messages.json").write_text(body, encoding="utf-8")
+    with structlog.testing.capture_logs() as logs:
+        assert await manager.room_archive_complete(GROUP, [_m(1, 22)]) is False
+    warnings = [e for e in logs if e["event"] == "Room archive unreadable"]
+    assert warnings == [
+        {"event": "Room archive unreadable", "log_level": "warning", "group_id": 43, "member_id": 22, "reason": reason}
+    ]

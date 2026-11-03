@@ -263,7 +263,8 @@ Sync one member's messages, queue their media, and archive the member's profile 
   time it was seen. The API returns it without text or media, so `content` captured before the
   withdrawal is kept, also when the fresh `content` is an empty string (and `media_file`, see
   `update_message_fields`). A canceled text message never seen before is stored with `content` null
-  instead of being skipped; a published message with no text and no media is still skipped.
+  instead of being skipped; a text message with no text and no media in any state other than
+  canceled (not only `published`) is still skipped.
   Published messages have neither `state` nor `canceled_at`.
 - On a corrupt or count-short `messages.json`, `sync_member` re-fetches the
   member's true full history from the API (bypassing `prefetched_messages`) and
@@ -439,12 +440,17 @@ Set `history_scanned_at` to the current UTC time and save `sync_state.json`. Cal
 `room_archive_complete` returned True for the scan's timeline.
 
 #### `room_archive_complete(group: dict, messages: list[dict]) -> bool` (async)
-True when every message id in `messages` is in `messages.json` of its author (`roster.author_id`,
-so member 0 for messages without `member_id`) under `messages/<gid> */<author> */`. An empty list
-is complete. Returns False when an author has no stored folder or misses an id (a warning with
-group id, member id and the number missing is logged), or when a `messages.json` is unreadable
-JSON or not a JSON object. It catches what a raised exception would not: a write that failed
-(`sync_member` returned 0) or a message that failed to normalize. Reads files in a worker thread.
+True when every message id in `messages` that `sync_member` stores is in `messages.json` of its
+author (`roster.author_id`, so member 0 for messages without `member_id`) under
+`messages/<gid> */<author> */`. Messages that sync skips (a text message with no text and no media
+that is not canceled), entries without an `id` and non-dict entries are not expected. An empty list
+is complete, and a stored `"messages": null` counts as empty. Returns False when an author has no
+stored folder or misses an id (a warning with group id, member id and the number missing is
+logged), or when a `messages.json` is unreadable JSON, not a JSON object, or has a `messages` value
+that is not a list (a warning with group id, member id and the reason — `unreadable`,
+`not_an_object` or `messages_not_a_list` — is logged). It catches what a raised exception would
+not: a write that failed (`sync_member` returned 0) or a message that failed to normalize. Reads
+files in a worker thread.
 
 Recommended caller sequence per room when `history_scanned(gid)` is False:
 1. `Client.get_messages(session, gid, page_delay=1.0)` for the whole timeline.

@@ -122,8 +122,9 @@ Why no extra fetch is needed for an extra author:
   - the full fetch returned without raising;
   - every task of that room returned without raising;
   - `SyncManager.room_archive_complete(group, messages)` is True: every fetched message
-    id is present in its author's `messages.json` (member 0 for messages without
-    `member_id`). This catches a write that failed without raising (`sync_member`
+    id that sync stores is present in its author's `messages.json` (member 0 for messages
+    without `member_id`). Messages sync skips (text with no text and no media, not
+    canceled) and entries without an id are not expected. This catches a write that failed without raising (`sync_member`
     returns 0 then) and a message that failed to normalize.
 - `SyncManager.history_scanned(group_id) -> bool` and
   `SyncManager.mark_history_scanned(group_id)` read and write the flag.

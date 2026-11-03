@@ -17,7 +17,14 @@ from . import profile_images, roster
 from .client import Client
 from .exceptions import RefreshFailedError, SessionExpiredError
 from .media import get_audio_metadata, get_media_dimensions
-from .utils import CANCELED_STATES, get_media_extension, media_file_is_present, normalize_message, sanitize_name
+from .utils import (
+    CANCELED_STATES,
+    _normalized_type,
+    get_media_extension,
+    media_file_is_present,
+    normalize_message,
+    sanitize_name,
+)
 
 logger = structlog.get_logger()
 
@@ -36,6 +43,22 @@ T = TypeVar("T")
 # consumer (SakaDesk's DataDirLock).
 _FILE_LOCKS: dict[str, threading.Lock] = {}
 _FILE_LOCKS_GUARD = threading.Lock()
+
+
+def _is_skipped_empty(msg: dict[str, Any]) -> bool:
+    """True for a raw API message that ``prepare_messages`` skips instead of storing.
+
+    A text message with no text and no media (``file``/``thumbnail``) whose state is
+    not canceled: these are often system/metadata entries from the subscription. A
+    canceled one is a withdrawn message, not metadata, and is kept so the withdrawal
+    is recorded.
+    """
+    return (
+        _normalized_type(msg.get("type")) == "text"
+        and not msg.get("text")
+        and not (msg.get("file") or msg.get("thumbnail"))
+        and msg.get("state") not in CANCELED_STATES
+    )
 
 
 def _lock_for(path: Path) -> threading.Lock:
@@ -328,37 +351,50 @@ class SyncManager:
         self.save_sync_state()
 
     async def room_archive_complete(self, group: dict[str, Any], messages: list[dict[str, Any]]) -> bool:
-        """True when every message id in ``messages`` is in its author's ``messages.json``.
+        """True when every message id in ``messages`` that sync stores is in its author's ``messages.json``.
 
         Authors are taken with :func:`pysaka.roster.author_id` (member 0 for messages
-        without ``member_id``). False on an unreadable file. Catches what a raised
-        exception would not: a write that failed (``sync_member`` returns 0) or a
-        message that failed to normalize.
+        without ``member_id``). Messages that sync skips (a text message with no text
+        and no media whose state is not canceled), entries without an ``id`` and
+        non-dict entries are not expected. A stored ``"messages": null`` counts as
+        empty. False when an author's ids are missing, or when a ``messages.json`` is
+        unreadable, not a JSON object, or has a ``messages`` value that is not a list
+        (a warning with group id, member id and the reason is logged). Catches what a
+        raised exception would not: a write that failed (``sync_member`` returns 0)
+        or a message that failed to normalize.
         """
         return await asyncio.to_thread(self._room_archive_complete_sync, group, messages)
 
     def _room_archive_complete_sync(self, group: dict[str, Any], messages: list[dict[str, Any]]) -> bool:
+        gid = group["id"]
         wanted: dict[int, set[int]] = {}
         for m in messages:
+            if not isinstance(m, dict) or m.get("id") is None or _is_skipped_empty(m):
+                continue
             wanted.setdefault(roster.author_id(m), set()).add(m["id"])
         messages_dir = self.output_dir / "messages"
-        group_dirs = list(messages_dir.glob(f"{group['id']} *")) if messages_dir.exists() else []
+        group_dirs = list(messages_dir.glob(f"{gid} *")) if messages_dir.exists() else []
         for aid, ids in wanted.items():
             stored: set[Any] = set()
             for group_dir in group_dirs:
                 for path in group_dir.glob(f"{aid} */messages.json"):
+                    reason: Optional[str] = None
                     try:
                         with open(path, encoding="utf-8") as f:
                             data = json.load(f)
                     except (OSError, ValueError):
+                        reason = "unreadable"
+                    else:
+                        if not isinstance(data, dict):
+                            reason = "not_an_object"
+                        elif not isinstance(data.get("messages") or [], list):
+                            reason = "messages_not_a_list"
+                    if reason is not None:
+                        logger.warning("Room archive unreadable", group_id=gid, member_id=aid, reason=reason)
                         return False
-                    if not isinstance(data, dict):
-                        return False
-                    stored |= {m.get("id") for m in data.get("messages", []) if isinstance(m, dict)}
+                    stored |= {m.get("id") for m in data.get("messages") or [] if isinstance(m, dict)}
             if not ids <= stored:
-                logger.warning(
-                    "Room archive incomplete", group_id=group["id"], member_id=aid, missing=len(ids - stored)
-                )
+                logger.warning("Room archive incomplete", group_id=gid, member_id=aid, missing=len(ids - stored))
                 return False
         return True
 
@@ -1377,16 +1413,9 @@ class SyncManager:
                             p_msg["width"] = width
                             p_msg["height"] = height
 
-                # Skip empty text messages (no content and no media)
-                # These are often system/metadata entries from subscription.
-                # A canceled one is a withdrawn message, not metadata: keep it so
-                # the withdrawal is recorded (and any captured text is preserved).
-                if (
-                    msg_type == "text"
-                    and not p_msg.get("content")
-                    and not media_url
-                    and msg.get("state") not in CANCELED_STATES
-                ):
+                # Skip empty text messages (see _is_skipped_empty; room_archive_complete
+                # uses the same rule, so a skipped message is never expected on disk).
+                if _is_skipped_empty(msg):
                     logger.debug("Skipping empty text message", message_id=msg.get("id"))
                     continue
 

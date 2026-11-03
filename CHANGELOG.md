@@ -21,7 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SyncManager.history_scanned`, `mark_history_scanned` and `room_archive_complete`
   let callers re-read each room's whole timeline once (flag in `sync_state.json`
   as `room_<gid>`), recovering messages from authors that earlier versions
-  dropped.
+  dropped. `room_archive_complete` does not expect the messages sync skips
+  (empty text messages that are not canceled).
 - `pysaka.utils.CANCELED_STATES`: the server states (`canceled`, `cancelled`) of a
   message the member withdrew. A canceled message now carries `canceled_at`
   (the API's `updated_at`, kept from the first time it was seen).
@@ -47,7 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   photo/video lost its archived caption on the next re-fetch. `sync_member` now
   stores canceled messages with `state` and `canceled_at` (the server's
   `updated_at`, first sight), keeping any content captured before the
-  withdrawal. A published message with no text and no media is still skipped.
+  withdrawal. A text message with no text and no media in any state other
+  than canceled (not only `published`) is still skipped.
 
 ## [0.4.5] - 2026-11-03
 

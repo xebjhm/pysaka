@@ -162,6 +162,17 @@ CANCELED_STATES = frozenset({"canceled", "cancelled"})
 """Server states of a message the member withdrew (text and media stripped)."""
 
 
+def _normalized_type(raw_type: Any) -> str:
+    """Map an API message type to the export type: text, video, picture or voice."""
+    if raw_type in ["image", "picture"]:
+        return "picture"
+    if raw_type in ["video", "movie"]:
+        return "video"
+    if raw_type in ["voice"]:
+        return "voice"
+    return "text"
+
+
 def normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
     """
     Normalizes a raw API message into the standard export format.
@@ -173,15 +184,8 @@ def normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
     Returns:
         Normalized message dictionary.
     """
-    # Map type to spec: text, video, picture, voice
     raw_type = msg.get("type")
-    msg_type = "text"
-    if raw_type in ["image", "picture"]:
-        msg_type = "picture"
-    elif raw_type in ["video", "movie"]:
-        msg_type = "video"
-    elif raw_type in ["voice"]:
-        msg_type = "voice"
+    msg_type = _normalized_type(raw_type)
 
     normalized: dict[str, Any] = {
         "id": msg["id"],
