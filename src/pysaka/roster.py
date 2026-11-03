@@ -20,7 +20,7 @@ def author_id(message: dict[str, Any]) -> int:
     mid = message.get("member_id")
     if isinstance(mid, int) and not isinstance(mid, bool):
         return mid
-    if isinstance(mid, str) and mid.isdigit():
+    if isinstance(mid, str) and mid.isdecimal():
         return int(mid)
     return ROOM_AUTHOR_ID
 

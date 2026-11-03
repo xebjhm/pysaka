@@ -349,7 +349,16 @@ class SyncManager:
                         old=existing.name,
                         new=member_dir.name,
                     )
-                    existing.rename(member_dir)
+                    try:
+                        existing.rename(member_dir)
+                    except OSError:
+                        logger.warning(
+                            "Member folder rename failed",
+                            member_id=member_id,
+                            old=existing.name,
+                            new=member_dir.name,
+                        )
+                        raise
                     break
         return member_dir
 
@@ -412,7 +421,8 @@ class SyncManager:
             on_new_messages: Optional ``callback(member_info, new_messages)``
                 (sync or async) called once after a successful write when at
                 least one message was not on disk before. Not called during
-                corrupt-file / count-mismatch recovery. Exceptions it raises are
+                corrupt-file / count-mismatch recovery or when
+                ``ignore_cursor`` is True. Exceptions it raises are
                 logged (exception type only) and swallowed. The callback is
                 awaited inline, so a slow callback delays that member's sync;
                 hand heavy work off (e.g. schedule a task). ``member_info`` has
@@ -428,7 +438,8 @@ class SyncManager:
                 (or a full fetch) instead of only those at/after the cursor. Used by a
                 room's one-time history scan so rows older than the cursor (e.g.
                 canceled ones) are merged. Merging is idempotent; the cursor is
-                recomputed from the merged file as usual.
+                recomputed from the merged file as usual. ``on_new_messages`` is not
+                called, because rows recovered from before the cursor are not new.
 
         Messages without a ``member_id`` belong to member 0, the room author (see
         :mod:`pysaka.roster`). Member 0 has no profile images, so none are
@@ -510,7 +521,7 @@ class SyncManager:
             logger.warning("Past message fetch failed", group_id=gid)
             return 0
 
-        mine = [m for m in past if m.get("member_id") == mid]
+        mine = [m for m in past if roster.author_id(m) == mid]
         queue: list[dict[str, Any]] = []
         processed, earliest_failed_ts, _ = self.prepare_messages(mine, member_dir, queue)
 
@@ -736,7 +747,9 @@ class SyncManager:
                 merged = {"version": 1, "letters": letters}
                 return (None if merged == current else merged), new_count
 
-            self._ensure_group_dir(group)  # rename a renamed room's folder before creating anything
+            # Rename a renamed room's / member's folder before creating anything.
+            group_dir = self._ensure_group_dir(group)
+            member_dir = self._ensure_member_dir(group_dir, mid, sanitize_name(member["name"]))
             member_dir.mkdir(parents=True, exist_ok=True)
             try:
                 wrote, added = await asyncio.to_thread(self._locked_update, letters_file, mutate)
@@ -1136,7 +1149,7 @@ class SyncManager:
                 newest_ts = min(newest_ts, earliest_pending_media_ts)
             self.update_sync_state(gid, mid, max_id, len(merged), last_ts=newest_ts)
 
-            if on_new_messages is not None and new_msgs and not recovering:
+            if on_new_messages is not None and new_msgs and not recovering and not ignore_cursor:
                 member_info = {
                     "group_id": gid,
                     "group_name": group["name"],

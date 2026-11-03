@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Client.get_messages(..., page_delay=0.5)` makes the pause between page
   requests configurable (default unchanged).
 - `pysaka.roster` (`ROOM_AUTHOR_ID`, `author_id`, `extra_author_ids`,
-  `room_author`) and `SyncManager.sync_member(..., ignore_cursor=True)`.
+  `room_author`) and `SyncManager.sync_member(..., ignore_cursor=True)`, which merges a
+  member's rows older than the cursor and does not call `on_new_messages`.
 
 ### Changed
 - `sync_member` assigns messages without `member_id` to member 0 (the room

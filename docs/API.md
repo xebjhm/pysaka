@@ -240,9 +240,9 @@ Sync one member's messages, queue their media, and archive the member's profile 
   async, called once after a successful write when messages that were not on
   disk before were added. `member_info` has `group_id`, `group_name`,
   `member_id`, `member_name`, `member_dir` (`Path`), `phone_image` and
-  `initial_sync` (`bool`). Not called during corrupt-file/count-mismatch recovery
-  or by `backfill_past_messages`. It is awaited inline, so a slow callback delays
-  that member's sync (hand heavy work off, e.g. schedule a task). Its exceptions
+  `initial_sync` (`bool`). Not called during corrupt-file/count-mismatch recovery,
+  when `ignore_cursor=True`, or by `backfill_past_messages`. It is awaited inline,
+  so a slow callback delays that member's sync (hand heavy work off, e.g. schedule a task). Its exceptions
   are logged (exception type only, never their text) and swallowed.
   - `initial_sync` is True when `messages.json` did not exist before this write;
     `new_messages` is then the member's whole fetched history, not fresh posts, so
@@ -254,6 +254,8 @@ Sync one member's messages, queue their media, and archive the member's profile 
   `prefetched_messages` (or a full fetch) instead of only those at/after the cursor. Used by a
   room's one-time history scan so rows older than the cursor (e.g. canceled ones) are merged.
   Merging is idempotent; the cursor is recomputed from the merged file as usual.
+  `on_new_messages` is not called when `ignore_cursor=True`, because rows recovered from before the
+  cursor are not new.
 - **Returns**: The number of messages **processed** (re-fetched overlap
   included, so not a count of new messages).
 - On a corrupt or count-short `messages.json`, `sync_member` re-fetches the
@@ -411,7 +413,7 @@ lineup, so rotating-lineup and official rooms hold messages from authors missing
 - `ROOM_AUTHOR_ID: int = 0`: member id for messages the API returns without `member_id` (the room
   itself, shown by the official app with the room name and logo).
 - `author_id(message: dict) -> int`: the message's `member_id` when it is an int (bool excluded),
-  the int value of a numeric string, else `ROOM_AUTHOR_ID`.
+  the int value of a decimal-digit string, else `ROOM_AUTHOR_ID`.
 - `extra_author_ids(api_member_ids: Iterable[int], messages: Iterable[dict]) -> list[int]`: the
   authors of `messages` missing from `api_member_ids`, real ids ascending, then `ROOM_AUTHOR_ID`
   last if any message has no author.
