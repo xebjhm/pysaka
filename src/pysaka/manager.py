@@ -1,16 +1,19 @@
 import asyncio
+import inspect
 import json
 import os
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Literal, Optional, TypeVar
 
 import aiofiles
 import aiohttp
 import structlog
 
+from . import profile_images
 from .client import Client
 from .exceptions import RefreshFailedError, SessionExpiredError
 from .media import get_audio_metadata, get_media_dimensions
@@ -23,6 +26,27 @@ logger = structlog.get_logger()
 # treated as a potential real gap and surfaced in `unresolved`, so completeness is
 # never overclaimed on an unexpected/transient state (e.g. "processing").
 _MEDIA_STRIPPING_STATES = frozenset({"canceled", "cancelled"})
+
+T = TypeVar("T")
+
+# One lock per messages.json (or any JSON file updated via _locked_update). Thread
+# locks, not asyncio locks: SakaDesk's favorite toggle and the sync write both run
+# their file work in worker threads (asyncio.to_thread), which an asyncio.Lock
+# would not serialise. In-process only — cross-process writers are excluded by the
+# consumer (SakaDesk's DataDirLock).
+_FILE_LOCKS: dict[str, threading.Lock] = {}
+_FILE_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(path: Path) -> threading.Lock:
+    """Return the process-wide lock for ``path`` (case-normalised on Windows)."""
+    key = os.path.normcase(str(path.absolute().resolve()))
+    with _FILE_LOCKS_GUARD:
+        lock = _FILE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _FILE_LOCKS[key] = lock
+        return lock
 
 
 class SyncManager:
@@ -106,6 +130,121 @@ class SyncManager:
             except OSError:
                 pass
 
+    @staticmethod
+    def _move_corrupt_aside(path: Path) -> Path:
+        """Rename ``path`` to ``<name>.corrupt-<UTC timestamp>`` and return the new path.
+
+        Caller must hold the file's lock. Raises ``OSError`` if the rename fails.
+        """
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        aside = path.with_name(f"{path.name}.corrupt-{stamp}")
+        path.replace(aside)
+        return aside
+
+    @staticmethod
+    def _locked_update(
+        path: Path,
+        mutate: Callable[[Optional[Any]], tuple[Optional[Any], T]],
+        *,
+        on_corrupt: Literal["raise", "discard", "quarantine"] = "raise",
+    ) -> tuple[bool, T]:
+        """Read-modify-write a JSON file under its process-wide lock.
+
+        Synchronous and blocking — call via ``asyncio.to_thread`` from async code.
+        The lock is not re-entrant, so ``mutate`` must not call ``_locked_update``
+        (or ``update_message_fields*``) on the same path — it would deadlock.
+        ``mutate`` receives the parsed file (``None`` if the file is missing, or if
+        it is unreadable and ``on_corrupt`` is not ``"raise"``) and returns
+        ``(data, result)``. ``data is None`` means "nothing to write". Every writer
+        of a given file must go through this method, otherwise a concurrent
+        read-modify-write can overwrite the other's changes.
+
+        ``on_corrupt`` decides what happens to a file that is not valid JSON:
+        ``"raise"`` raises ``ValueError``; ``"discard"`` passes ``None`` to
+        ``mutate`` and logs nothing (for callers that report the corrupt file
+        themselves); ``"quarantine"`` renames it to
+        ``<name>.corrupt-<UTC timestamp>`` (kept for inspection), logs a warning
+        with the file name and error type, and passes ``None`` to ``mutate``.
+
+        Returns:
+            ``(write_ok, result)``. ``write_ok`` is False only when a write was
+            attempted and ``_atomic_write_json`` failed.
+
+        Raises:
+            ValueError: the file is unreadable JSON and ``on_corrupt`` is ``"raise"``.
+            OSError: reading the file, or renaming it aside, failed.
+        """
+        with _lock_for(path):
+            current: Optional[Any] = None
+            if path.exists():
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        current = json.load(f)
+                except ValueError as e:
+                    if on_corrupt == "raise":
+                        raise
+                    if on_corrupt == "quarantine":
+                        aside = SyncManager._move_corrupt_aside(path)
+                        logger.warning(
+                            "Unreadable JSON file kept aside; rebuilding",
+                            file=path.name,
+                            kept_as=aside.name,
+                            error_type=type(e).__name__,
+                        )
+                    current = None
+            data, result = mutate(current)
+            if data is None:
+                return True, result
+            return SyncManager._atomic_write_json(path, data), result
+
+    @staticmethod
+    def update_message_fields_sync(messages_file: Path, message_id: int, fields: dict[str, Any]) -> bool:
+        """Set ``fields`` on one message of a ``messages.json``, under the file lock.
+
+        Blocking — for callers already running in a worker thread. From async
+        code use :meth:`update_message_fields`. Use one of these instead of reading
+        and rewriting the file yourself: the lock keeps a sync running at the same
+        moment from losing your change (or you its new messages). It does not
+        protect the change from later syncs: a sync that re-fetches this message
+        replaces its record with the API's, so a field the API returns (e.g.
+        ``is_favorite``) is overwritten and any other field you set is dropped,
+        except the ones in ``_LOCAL_DERIVED_FIELDS`` (``width``, ``height``,
+        ``media_duration``, ``is_muted``, ``media_file``), which are carried over
+        when the fresh record lacks them.
+
+        ``message_id`` is compared as-is with the stored ids, so pass an ``int``
+        (a ``str`` never matches).
+
+        Returns:
+            True if the message was found and the file was written; False if the
+            file is missing, the id is absent, or the write failed.
+
+        Raises:
+            ValueError: the file exists but is unreadable JSON.
+            OSError: the file exists but could not be read.
+        """
+
+        def mutate(current: Optional[Any]) -> tuple[Optional[Any], bool]:
+            if not isinstance(current, dict):
+                return None, False
+            for msg in current.get("messages", []):
+                if msg.get("id") == message_id:
+                    msg.update(fields)
+                    return current, True
+            return None, False
+
+        wrote, found = SyncManager._locked_update(messages_file, mutate)
+        return found and wrote
+
+    @staticmethod
+    async def update_message_fields(messages_file: Path, message_id: int, fields: dict[str, Any]) -> bool:
+        """Async form of :meth:`update_message_fields_sync` (runs it in a thread).
+
+        Same return value, ``message_id`` handling and exceptions (``ValueError``
+        on unreadable JSON, ``OSError`` on read errors).
+        """
+        return await asyncio.to_thread(SyncManager.update_message_fields_sync, messages_file, message_id, fields)
+
     def update_sync_state(
         self, group_id: int, member_id: int, last_msg_id: int, count: int, last_ts: Optional[str] = None
     ) -> None:
@@ -120,12 +259,27 @@ class SyncManager:
             last_ts: The newest message's published_at timestamp (primary cursor).
         """
         key = f"{group_id}_{member_id}"
-        self.sync_state[key] = {
-            "last_message_id": last_msg_id,
-            "last_sync_ts": last_ts,
-            "total_messages": count,
-            "last_sync": datetime.now(timezone.utc).isoformat() + "Z",
-        }
+        # Merge, don't replace: other features keep their own keys in the entry
+        # (e.g. backfill's past_backfilled_at), which a full replace would wipe on
+        # every sync.
+        entry = dict(self.sync_state.get(key) or {})
+        entry.update(
+            {
+                "last_message_id": last_msg_id,
+                "last_sync_ts": last_ts,
+                "total_messages": count,
+                "last_sync": datetime.now(timezone.utc).isoformat() + "Z",
+            }
+        )
+        self.sync_state[key] = entry
+        self.save_sync_state()
+
+    def update_total_messages(self, group_id: int, member_id: int, count: int) -> None:
+        """Update only ``total_messages`` for a member (cursor fields untouched)."""
+        key = f"{group_id}_{member_id}"
+        entry = dict(self.sync_state.get(key) or {})
+        entry["total_messages"] = count
+        self.sync_state[key] = entry
         self.save_sync_state()
 
     def get_last_ts(self, group_id: int, member_id: int) -> Optional[str]:
@@ -149,6 +303,65 @@ class SyncManager:
             return state.get("last_message_id")
         return None
 
+    def _member_dir_path(self, group: dict[str, Any], member: dict[str, Any]) -> Path:
+        """The on-disk directory of a member's archive (same naming as sync_member)."""
+        return (
+            self.output_dir
+            / "messages"
+            / f"{group['id']} {sanitize_name(group['name'])}"
+            / f"{member['id']} {sanitize_name(member['name'])}"
+        )
+
+    def _ensure_group_dir(self, group: dict[str, Any]) -> Path:
+        """Return ``messages/<gid> <name>``, renaming a room folder left under an old name.
+
+        If the room was renamed on the server (e.g. "12th Single" -> "16th Single")
+        and only a ``messages/<gid> <old name>`` folder exists, it is renamed
+        instead of leaving a duplicate. Call this before creating anything under
+        the group directory; it does not create the directory itself.
+        """
+        gid = group["id"]
+        messages_dir = self.output_dir / "messages"
+        group_dir = messages_dir / f"{gid} {sanitize_name(group['name'])}"
+        if not group_dir.exists() and messages_dir.exists():
+            for existing in messages_dir.iterdir():
+                if existing.is_dir() and existing.name.startswith(f"{gid} "):
+                    logger.info("Group renamed on server, renaming directory", old=existing.name, new=group_dir.name)
+                    existing.rename(group_dir)
+                    break
+        return group_dir
+
+    @staticmethod
+    def _type_counts(messages: list[dict[str, Any]]) -> dict[str, int]:
+        counts = {"text": 0, "video": 0, "picture": 0, "voice": 0}
+        for msg in messages:
+            mtype = msg.get("type", "text")
+            if mtype in counts:
+                counts[mtype] += 1
+        return counts
+
+    @staticmethod
+    async def _notify_new_messages(
+        callback: Callable[[dict[str, Any], list[dict[str, Any]]], Any],
+        member_info: dict[str, Any],
+        new_messages: list[dict[str, Any]],
+    ) -> None:
+        """Invoke a consumer callback; its failures must never break a sync.
+
+        Only the exception type is logged: its text or traceback may quote the
+        message text the callback was handling.
+        """
+        try:
+            result = callback(member_info, new_messages)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as e:
+            logger.error(
+                "on_new_messages callback failed",
+                member_id=member_info.get("member_id"),
+                error_type=type(e).__name__,
+            )
+
     async def sync_member(
         self,
         session: aiohttp.ClientSession,
@@ -157,9 +370,12 @@ class SyncManager:
         media_queue: list[dict[str, Any]],
         progress_callback: Optional[Any] = None,
         prefetched_messages: Optional[list[dict[str, Any]]] = None,
+        *,
+        on_new_messages: Optional[Callable[[dict[str, Any], list[dict[str, Any]]], Any]] = None,
     ) -> int:
         """
-        Syncs messages for a member and prepares media queue.
+        Syncs messages for a member, prepares the media queue, and archives the
+        member's profile images.
 
         Args:
             session: Active aiohttp session.
@@ -170,28 +386,499 @@ class SyncManager:
             prefetched_messages: Pre-fetched group timeline messages. When
                 provided, the API call is skipped and messages are filtered
                 from this list instead (using this member's own last_id).
+            on_new_messages: Optional ``callback(member_info, new_messages)``
+                (sync or async) called once after a successful write when at
+                least one message was not on disk before. Not called during
+                corrupt-file / count-mismatch recovery. Exceptions it raises are
+                logged (exception type only) and swallowed. The callback is
+                awaited inline, so a slow callback delays that member's sync;
+                hand heavy work off (e.g. schedule a task). ``member_info`` has
+                ``group_id``, ``group_name``, ``member_id``, ``member_name``,
+                ``member_dir``, ``phone_image`` and ``initial_sync``. ``initial_sync`` is True
+                when ``messages.json`` did not exist before this write, in which
+                case ``new_messages`` is the whole fetched history, not fresh
+                posts; consumers sending notifications should ignore those calls.
+                The callback runs before the profile-image step, so a just-changed
+                ``phone_image`` may not be archived yet; use the ``phone_image``
+                URL from ``member_info``.
 
         Returns:
-            Number of new messages processed.
+            Number of messages processed in this run (includes re-fetched
+            overlap, so it is not a count of new messages).
+        """
+        processed = await self._sync_member_messages(
+            session,
+            group,
+            member,
+            media_queue,
+            progress_callback,
+            prefetched_messages,
+            on_new_messages=on_new_messages,
+        )
+        await self._archive_profile_images_safely(session, group, member)
+        return processed
+
+    async def backfill_past_messages(
+        self, session: aiohttp.ClientSession, group: dict[str, Any], member: dict[str, Any]
+    ) -> int:
+        """Merge the room's pre-subscription messages into the member's archive.
+
+        Runs once per member: once ``past_backfilled_at`` is set in the member's
+        sync_state entry, later calls return immediately. Requires a prior
+        successful :meth:`sync_member` (no entry or no ``messages.json`` →
+        skipped). Downloads its own media, because Verify & Fix takes fresh URLs
+        from the timeline, which never contains these messages. The flag is set
+        only when the request succeeded, no past message failed to normalize and
+        every queued file is on disk; otherwise it stays unset and later calls
+        retry (merging is idempotent). Cursor fields are never touched and
+        ``on_new_messages`` is never fired.
+
+        Returns:
+            Number of messages that were not in the archive before.
+
+        Raises:
+            SessionExpiredError: authentication failed (also
+                ``RefreshFailedError``); the flag is left unset.
+            OSError: reading or writing ``messages.json`` or its media failed
+                after the fetch (other unexpected errors after the fetch also
+                propagate), so callers should wrap the call. These do not raise
+                and leave the flag unset: a failed fetch (a warning is logged and
+                0 returned) and, when this member has past messages to merge, a
+                ``messages.json`` that is unreadable JSON or not a JSON object
+                (left untouched; a warning is logged, with the found type for a
+                non-object; 0 returned) or whose write failed (logged by the
+                write; 0 returned).
+        """
+        gid, mid = group["id"], member["id"]
+        key = f"{gid}_{mid}"
+        entry = self.sync_state.get(key)
+        if not entry or entry.get("past_backfilled_at"):
+            return 0
+        member_dir = self._member_dir_path(group, member)
+        messages_file = member_dir / "messages.json"
+        if not messages_file.exists():
+            return 0
+
+        try:
+            past = await self.client.get_past_messages(session, gid, strict=True)
+        except (SessionExpiredError, RefreshFailedError):
+            raise
+        except Exception as e:
+            logger.warning("Past message fetch failed", group_id=gid, error_type=type(e).__name__)
+            return 0
+        if past is None:
+            logger.warning("Past message fetch failed", group_id=gid)
+            return 0
+
+        mine = [m for m in past if m.get("member_id") == mid]
+        queue: list[dict[str, Any]] = []
+        processed, earliest_failed_ts, _ = self.prepare_messages(mine, member_dir, queue)
+
+        added = 0
+        if processed:
+
+            def mutate(current: Optional[Any]) -> tuple[Optional[Any], tuple[int, int, Optional[str]]]:
+                if not isinstance(current, dict):
+                    # None: the file vanished after the existence check above.
+                    return None, (0, -1, None if current is None else type(current).__name__)
+                base = current.get("messages", [])
+                base_ids = {m.get("id") for m in base}
+                new_count = sum(1 for m in processed if m["id"] not in base_ids)
+                merged = self._merge_messages(base, processed)
+                merged.sort(key=lambda x: x.get("timestamp") or "")
+                current["messages"] = merged
+                current["total_messages"] = len(merged)
+                current["message_type_counts"] = self._type_counts(merged)
+                return current, (new_count, len(merged), None)
+
+            try:
+                wrote, (added, total, found_type) = await asyncio.to_thread(self._locked_update, messages_file, mutate)
+            except ValueError:
+                logger.warning("Backfill skipped: messages.json unreadable", group_id=gid, member_id=mid)
+                return 0
+            if found_type is not None:
+                logger.warning(
+                    "Backfill skipped: messages.json is not an object",
+                    group_id=gid,
+                    member_id=mid,
+                    found_type=found_type,
+                )
+                return 0
+            if not wrote or total < 0:
+                return 0
+            self.update_total_messages(gid, mid, total)
+
+        metadata = await self.process_media_queue(session, queue)
+        if metadata.get(member_dir):
+            await self.update_message_metadata(messages_file, metadata[member_dir])
+
+        complete = earliest_failed_ts is None and all(media_file_is_present(item["path"]) for item in queue)
+        if complete:
+            self.sync_state[key]["past_backfilled_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self.save_sync_state()
+        logger.info("Past messages backfilled", group_id=gid, member_id=mid, added=added, complete=complete)
+        return added
+
+    _LETTER_PAGE = 200
+    _LETTER_MAX_PAGES = 50
+
+    @staticmethod
+    def _is_letter_id(value: Any) -> bool:
+        """A letter id is a true integer (not a bool, str or float)."""
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    @staticmethod
+    def _timestamp_text(value: Any) -> str:
+        """``value`` if it is a string, else ``""`` (a non-string timestamp is missing)."""
+        return value if isinstance(value, str) else ""
+
+    @staticmethod
+    def _quarantine_corrupt_letters(path: Path) -> bool:
+        """Move an unreadable ``letters.json`` aside as ``letters.json.corrupt-<UTC>``.
+
+        Blocking, takes the file's lock. Returns True when the file existed but
+        was not valid JSON and was renamed (kept for inspection), else False.
+        """
+        with _lock_for(path):
+            if not path.exists():
+                return False
+            try:
+                with open(path, encoding="utf-8") as f:
+                    json.load(f)
+            except ValueError:
+                SyncManager._move_corrupt_aside(path)
+                return True
+            return False
+
+    async def sync_letters(self, session: aiohttp.ClientSession, group: dict[str, Any], member: dict[str, Any]) -> int:
+        """Archive the account's sent letters to this member.
+
+        Stores ``<member_dir>/letters.json`` (``client_token`` is never stored) and
+        each letter-card image at ``<member_dir>/letters/<id>.<ext>``. Uses its own
+        cursor ``letters_updated_at`` in the member's sync_state entry. The cursor
+        moves to the newest ``updated_at`` among all letters fetched for the room
+        only when the fetch was complete (it ended on a short page; an empty page
+        after a full one, the page cap, or a page with no new letter are treated as
+        incomplete) and every image of this member's letters is on disk, so a failed
+        image is re-fetched with a fresh signed URL next run. When a complete
+        fetch returned letters but none to this member and ``letters.json`` does
+        not exist, an empty ``{"version": 1, "letters": []}`` is written so the
+        cursor persists (an incomplete fetch writes nothing).
+        Pages of 200 are chained by the last letter's ``created_at`` (not its
+        ``updated_at``, which a later favourite would push past unseen letters).
+        A letter whose ``id`` is not an integer (a string, float, bool or a missing
+        id) is skipped and only the id's type name is logged. A non-string
+        ``created_at``/``updated_at`` counts as missing (stored as ``None``).
+        The cursor is used only while ``letters.json`` exists: if it is missing
+        the cursor is dropped and everything is fetched again; if it is not valid
+        JSON it is renamed to ``letters.json.corrupt-<UTC timestamp>`` (kept for
+        inspection), the cursor is dropped, and the letters are rebuilt from a
+        full fetch in the same call.
+        Works for expired subscriptions (the server still returns their letters).
+        Never touches the message cursor and never fires ``on_new_messages``.
+        ``letters.json`` is written only when its content changes or it is
+        created. Before that write (and only when there is something to write),
+        a room folder left under an old room name is renamed, so letters and
+        messages share one folder.
+
+        Raises:
+            SessionExpiredError, RefreshFailedError: auth failures propagate.
+            OSError: creating the member directory, or file I/O after the fetch,
+                failed (other unexpected errors after the fetch also propagate),
+                so callers should wrap the call. A failed fetch does not raise: it
+                logs and returns 0 (a corrupt ``letters.json`` is already set aside
+                by then, so the next call rebuilds it).
+
+        Returns:
+            Number of letters that were not in ``letters.json`` before (all of
+            them after a corrupt or missing file).
+        """
+        gid, mid = group["id"], member["id"]
+        key = f"{gid}_{mid}"
+        member_dir = self._member_dir_path(group, member)
+        letters_file = member_dir / "letters.json"
+        if await asyncio.to_thread(self._quarantine_corrupt_letters, letters_file):
+            logger.warning("letters.json unreadable; kept aside and rebuilding", group_id=gid, member_id=mid)
+        # A cursor is only trustworthy next to the letters.json it describes.
+        stored_cursor = (self.sync_state.get(key) or {}).get("letters_updated_at")
+        cursor = stored_cursor if isinstance(stored_cursor, str) and stored_cursor and letters_file.exists() else None
+        if stored_cursor is not None and cursor is None:
+            entry = dict(self.sync_state[key])
+            entry.pop("letters_updated_at")
+            self.sync_state[key] = entry
+            self.save_sync_state()
+        fetched: dict[int, dict[str, Any]] = {}
+        bad_id_types: set[str] = set()
+        updated_from = cursor
+        complete = False
+        try:
+            for page_no in range(self._LETTER_MAX_PAGES):
+                page = await self.client.get_letters(session, gid, updated_from=updated_from, count=self._LETTER_PAGE)
+                # Only true integers identify a letter ("12", 1.9, True are not ids);
+                # the rest is dropped here and reported once below.
+                keyed = [(item["id"], item) for item in page if self._is_letter_id(item.get("id"))]
+                new_ids = [letter_id for letter_id, _ in keyed if letter_id not in fetched]
+                for letter_id, letter in keyed:
+                    fetched[letter_id] = letter
+                bad_id_types.update(
+                    type(item.get("id")).__name__
+                    for item in page
+                    if item.get("member_id") == mid and not self._is_letter_id(item.get("id"))
+                )
+                if len(page) < self._LETTER_PAGE:
+                    # An empty page after a full one is impossible (updated_from is
+                    # inclusive), so it means the request failed and was swallowed.
+                    complete = page_no == 0 or bool(page)
+                    break
+                if not new_ids:
+                    break
+                # Page by the last letter's creation time, not its updated_at: every
+                # letter with a higher id has updated_at >= created_at >= this value,
+                # whereas a favourited boundary letter's later updated_at would skip
+                # them. Inclusive overlap on purpose: deduped by id above.
+                last = page[-1]
+                updated_from = (
+                    self._timestamp_text(last.get("created_at"))
+                    or self._timestamp_text(last.get("updated_at"))
+                    or updated_from
+                )
+        except (SessionExpiredError, RefreshFailedError):
+            raise
+        except Exception as e:
+            logger.warning("Letter fetch failed", group_id=gid, error_type=type(e).__name__)
+            return 0
+
+        if bad_id_types:
+            logger.warning("Letters skipped: id is not an integer", group_id=gid, id_types=sorted(bad_id_types))
+        records: list[dict[str, Any]] = []
+        downloads: list[tuple[str, Path]] = []
+        for letter_id, letter in fetched.items():
+            if letter.get("member_id") != mid:
+                continue
+            url = letter.get("file")
+            image_file = f"letters/{letter_id}.{get_media_extension(url, 'picture')}" if url else None
+            if url and image_file:
+                downloads.append((url, member_dir / image_file))
+            records.append(
+                {
+                    "id": letter_id,
+                    "member_id": mid,
+                    "text": letter.get("text") or "",
+                    "created_at": self._timestamp_text(letter.get("created_at")) or None,
+                    "updated_at": self._timestamp_text(letter.get("updated_at")) or None,
+                    "is_favorite": bool(letter.get("is_favorite")),
+                    "image_file": image_file,
+                    "width": letter.get("thumbnail_width"),
+                    "height": letter.get("thumbnail_height"),
+                }
+            )
+
+        added = 0
+        # A member with no letters of its own still needs a letters.json after a
+        # complete fetch: the cursor is dropped whenever the file is missing, so
+        # without it every call would refetch the whole room.
+        if records or (complete and fetched and not letters_file.exists()):
+
+            def mutate(current: Optional[Any]) -> tuple[Optional[Any], int]:
+                existing = current.get("letters", []) if isinstance(current, dict) else []
+                by_id = {item.get("id"): item for item in existing}
+                new_count = sum(1 for r in records if r["id"] not in by_id)
+                for r in records:
+                    prev = by_id.get(r["id"])
+                    if prev and r["image_file"] is None and prev.get("image_file"):
+                        r["image_file"] = prev["image_file"]
+                    by_id[r["id"]] = r
+                letters = sorted(by_id.values(), key=lambda item: self._timestamp_text(item.get("created_at")))
+                merged = {"version": 1, "letters": letters}
+                return (None if merged == current else merged), new_count
+
+            self._ensure_group_dir(group)  # rename a renamed room's folder before creating anything
+            member_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                wrote, added = await asyncio.to_thread(self._locked_update, letters_file, mutate)
+            except ValueError:
+                # Unreadable letters.json: leave it for inspection and refetch everything next time.
+                entry = dict(self.sync_state.get(key) or {})
+                entry.pop("letters_updated_at", None)
+                self.sync_state[key] = entry
+                self.save_sync_state()
+                logger.warning("letters.json unreadable; letters cursor reset", group_id=gid, member_id=mid)
+                return 0
+            if not wrote:
+                return 0
+
+            for url, path in downloads:
+                await self.client.download_file(session, url, path)
+
+        if complete and all(media_file_is_present(path) for _, path in downloads):
+            # Over everything fetched, not just this member's rows: other members' letters
+            # in the same group are not ours, so there is nothing to re-fetch for them.
+            newest = max((self._timestamp_text(item.get("updated_at")) for item in fetched.values()), default="")
+            entry = dict(self.sync_state.get(key) or {})
+            if newest and newest > self._timestamp_text(entry.get("letters_updated_at")):
+                entry["letters_updated_at"] = newest
+                self.sync_state[key] = entry
+                self.save_sync_state()
+        logger.info("Letters synced", group_id=gid, member_id=mid, added=added, complete=complete)
+        return added
+
+    async def archive_profile_images(
+        self,
+        session: aiohttp.ClientSession,
+        group: dict[str, Any],
+        member: dict[str, Any],
+        member_dir: Path,
+    ) -> dict[str, int]:
+        """Download the member's current profile images and record them in
+        ``<member_dir>/profile_images/index.json``.
+
+        Idempotent: an image already on disk (non-empty) is skipped. A failed
+        download is not indexed and is retried on the next call. An unreadable
+        ``index.json`` is renamed to ``index.json.corrupt-<UTC timestamp>`` (kept
+        for inspection, a warning is logged) and a fresh index is built; the old
+        history is not carried over (the image files stay on disk).
+
+        Returns:
+            ``{"downloaded": n, "skipped": n, "failed": n}``.
+        """
+        urls = profile_images.image_urls(group, member)
+        root = member_dir / profile_images.DIR_NAME
+        return await self._archive_image_set(session, root, urls)
+
+    async def _archive_image_set(
+        self, session: aiohttp.ClientSession, root: Path, urls: dict[str, str]
+    ) -> dict[str, int]:
+        """Download ``urls`` (kind -> URL) under ``root/<kind>/<basename>`` and
+        update ``root/index.json``. Shared by member and account images."""
+        report = {"downloaded": 0, "skipped": 0, "failed": 0}
+        archived: dict[str, tuple[str, str]] = {}
+        for kind, url in urls.items():
+            rel = profile_images.relative_file(kind, url)
+            if rel is None:
+                report["failed"] += 1
+                continue
+            path = root / rel
+            if media_file_is_present(path):
+                report["skipped"] += 1
+            elif await self.client.download_file(session, url, path):
+                report["downloaded"] += 1
+            else:
+                report["failed"] += 1
+                continue
+            archived[kind] = (rel, url)
+
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def mutate(current: Optional[Any]) -> tuple[Optional[Any], None]:
+            return profile_images.merge_index(current, archived, urls, now_iso), None
+
+        if urls or (root / profile_images.INDEX_NAME).exists():
+            root.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(
+                self._locked_update, root / profile_images.INDEX_NAME, mutate, on_corrupt="quarantine"
+            )
+        return report
+
+    async def _archive_profile_images_safely(
+        self, session: aiohttp.ClientSession, group: dict[str, Any], member: dict[str, Any]
+    ) -> None:
+        """Run :meth:`archive_profile_images`; any failure is logged, never raised,
+        so it cannot change sync_member's result or the cursor."""
+        try:
+            report = await self.archive_profile_images(session, group, member, self._member_dir_path(group, member))
+            if report["downloaded"] or report["failed"]:
+                logger.info("Profile images archived", member_id=member.get("id"), **report)
+        except Exception as e:
+            logger.warning("Profile image archiving failed", member_id=member.get("id"), error_type=type(e).__name__)
+
+    async def archive_account_profile(self, session: aiohttp.ClientSession) -> dict[str, int]:
+        """Archive the account's own nickname and avatar for this service.
+
+        Writes ``<output_dir>/account/profile.json`` (``name`` and ``updated_at``
+        only — birthday, sex, subdivision and FC accounts are personal data the
+        app does not need and are never stored or logged) and archives the avatar
+        under ``account/profile_images/`` with the same index/history as member
+        images. A missing, non-string or empty ``name``, and a missing or
+        non-string ``updated_at``, keep the stored value (``""``/``None`` on first
+        write); only a non-empty string ``thumbnail`` is archived. An unreadable ``profile.json`` (or avatar
+        ``index.json``) is renamed to ``<name>.corrupt-<UTC timestamp>`` (kept
+        for inspection, a warning with the file name is logged) and rebuilt. Auth errors (``SessionExpiredError``,
+        ``RefreshFailedError``) propagate; any other error, from the fetch or
+        from the file/avatar work after it, yields all-zero counts and this
+        method's own error log carries the exception type only (never the
+        nickname). A failed avatar download is logged by
+        :meth:`Client.download_file` with the URL's scheme, host, port and path
+        (the signed query string and any ``user:password@`` are redacted).
+
+        Returns:
+            ``{"downloaded": n, "skipped": n, "failed": n}`` for the avatar
+            (all zero when nothing was archived or a non-auth error occurred).
+        """
+        empty = {"downloaded": 0, "skipped": 0, "failed": 0}
+        try:
+            profile = await self.client.get_profile(session)
+        except (SessionExpiredError, RefreshFailedError):
+            raise
+        except Exception as e:
+            logger.warning("Profile fetch failed", error_type=type(e).__name__)
+            return empty
+        if not isinstance(profile, dict):
+            return empty
+
+        name = profile.get("name")
+        updated_at = profile.get("updated_at")
+        thumbnail = profile.get("thumbnail")
+        urls = {"thumbnail": thumbnail} if isinstance(thumbnail, str) and thumbnail else {}
+
+        def mutate(current: Optional[Any]) -> tuple[Optional[Any], None]:
+            stored = current if isinstance(current, dict) else {}
+            kept_name = stored.get("name")
+            kept_updated_at = stored.get("updated_at")
+            record = {
+                "version": 1,
+                "name": name if isinstance(name, str) and name else (kept_name if isinstance(kept_name, str) else ""),
+                "updated_at": updated_at
+                if isinstance(updated_at, str)
+                else (kept_updated_at if isinstance(kept_updated_at, str) else None),
+            }
+            return (None if current == record else record), None
+
+        try:
+            account_dir = self.output_dir / "account"
+            account_dir.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(self._locked_update, account_dir / "profile.json", mutate, on_corrupt="quarantine")
+            return await self._archive_image_set(session, account_dir / profile_images.DIR_NAME, urls)
+        except (SessionExpiredError, RefreshFailedError):
+            raise
+        except Exception as e:
+            logger.warning("Account profile archiving failed", error_type=type(e).__name__)
+            return empty
+
+    async def _sync_member_messages(
+        self,
+        session: aiohttp.ClientSession,
+        group: dict[str, Any],
+        member: dict[str, Any],
+        media_queue: list[dict[str, Any]],
+        progress_callback: Optional[Any] = None,
+        prefetched_messages: Optional[list[dict[str, Any]]] = None,
+        *,
+        on_new_messages: Optional[Callable[[dict[str, Any], list[dict[str, Any]]], Any]] = None,
+    ) -> int:
+        """
+        Message part of :meth:`sync_member` (see there for arguments).
+
+        Returns:
+            Number of messages processed in this run (re-fetched overlap
+            included).
         """
         gid = group["id"]
         mid = member["id"]
-        gname = sanitize_name(group["name"])
         mname = sanitize_name(member["name"])
 
         # output_dir is already service-specific (e.g., output/日向坂46/)
         # so we only need to add messages/ and the group directory
-        messages_dir = self.output_dir / "messages"
-        group_dir = messages_dir / f"{gid} {gname}"
-
-        # If group was renamed on server (e.g., "12th Single" → "16th Single"),
-        # rename the existing directory instead of creating a duplicate.
-        if not group_dir.exists() and messages_dir.exists():
-            for existing in messages_dir.iterdir():
-                if existing.is_dir() and existing.name.startswith(f"{gid} "):
-                    logger.info("Group renamed on server, renaming directory", old=existing.name, new=group_dir.name)
-                    existing.rename(group_dir)
-                    break
+        group_dir = self._ensure_group_dir(group)
 
         member_dir = group_dir / f"{mid} {mname}"
         member_dir.mkdir(parents=True, exist_ok=True)
@@ -204,9 +891,7 @@ class SyncManager:
         state_key = f"{gid}_{mid}"
         existing_file = member_dir / "messages.json"
 
-        async def fetch_for_member(
-            since_ts: Optional[str], *, recovery: bool = False
-        ) -> list[dict[str, Any]]:
+        async def fetch_for_member(since_ts: Optional[str], *, recovery: bool = False) -> list[dict[str, Any]]:
             """Fetch this member's messages, filtered by the ``since_ts`` cursor.
 
             Normal path: when a shared ``prefetched_messages`` timeline was supplied,
@@ -322,36 +1007,53 @@ class SyncManager:
                 messages, member_dir, media_queue
             )
 
-            # Dedupe (Upsert: prefer fresh API data, but preserve locally-derived
-            # media metadata the API never returns — see _merge_messages).
-            merged = self._merge_messages(existing_msgs, processed)
-            merged.sort(key=lambda x: x.get("timestamp") or "")
-
-            # Stats
-            type_counts = {"text": 0, "video": 0, "picture": 0, "voice": 0}
-            for msg in merged:
-                mtype = msg.get("type", "text")
-                if mtype in type_counts:
-                    type_counts[mtype] += 1
-
-            # Save
-            export_data = {
-                "exported_at": datetime.now(timezone.utc).isoformat() + "Z",
-                "member": {
-                    "id": mid,
-                    "name": mname,
-                    "group_id": gid,
-                    "portrait": member.get("portrait"),
-                    "thumbnail": member.get("thumbnail"),
-                    "phone_image": member.get("phone_image"),
-                    "group_thumbnail": group.get("thumbnail"),
-                },
-                "total_messages": len(merged),
-                "message_type_counts": type_counts,
-                "messages": merged,
+            member_block = {
+                "id": mid,
+                "name": mname,
+                "group_id": gid,
+                "portrait": member.get("portrait"),
+                "thumbnail": member.get("thumbnail"),
+                "phone_image": member.get("phone_image"),
+                "group_thumbnail": group.get("thumbnail"),
             }
 
-            wrote = await asyncio.to_thread(self._atomic_write_json, existing_file, export_data)
+            def mutate(
+                current: Optional[Any],
+            ) -> tuple[Optional[Any], tuple[list[dict[str, Any]], list[dict[str, Any]], bool]]:
+                # Merge against the file as it is NOW, under the lock — not the copy
+                # read before the API call. Another writer (e.g. a favorite toggle)
+                # may have rewritten it since; merging the stale copy would drop
+                # that change, and the other writer's stale copy would drop ours.
+                if not isinstance(current, dict) and not corrupt and existing_file.exists():
+                    # Readable at the pre-read, unreadable now (a corrupt pre-read was
+                    # already logged above). Falls back to the pre-read copy.
+                    logger.warning(
+                        "messages.json unreadable at write time; merging the earlier read",
+                        member_id=mid,
+                        group_id=gid,
+                    )
+                base = current.get("messages", []) if isinstance(current, dict) else existing_msgs
+                base_ids = {m.get("id") for m in base}
+                new_msgs = [m for m in processed if m["id"] not in base_ids]
+                # Dedupe (Upsert: prefer fresh API data, but preserve locally-derived
+                # media metadata the API never returns — see _merge_messages).
+                merged = self._merge_messages(base, processed)
+                merged.sort(key=lambda x: x.get("timestamp") or "")
+                export_data = {
+                    "exported_at": datetime.now(timezone.utc).isoformat() + "Z",
+                    "member": member_block,
+                    "total_messages": len(merged),
+                    "message_type_counts": self._type_counts(merged),
+                    "messages": merged,
+                }
+                # First write of this member's archive (file absent, not merely
+                # unreadable); evaluated under the lock like the merge itself.
+                initial = current is None and not existing_file.exists()
+                return export_data, (merged, new_msgs, initial)
+
+            wrote, (merged, new_msgs, initial_sync) = await asyncio.to_thread(
+                self._locked_update, existing_file, mutate, on_corrupt="discard"
+            )
             if not wrote:
                 # The messages never hit disk — do NOT advance the cursor, or the next
                 # sync would skip them permanently. Abort this member; retry next run.
@@ -363,6 +1065,12 @@ class SyncManager:
             # mutate+serialize on the event loop keeps it atomic under cooperative
             # scheduling. (The messages.json write above writes a local dict, so it is
             # safe to offload.)
+            if recovering:
+                # The rebuilt history comes from the group timeline, which never
+                # holds pre-subscription messages, so a corrupt-file rebuild loses
+                # the backfilled ones. Re-arm the backfill (merging is idempotent;
+                # the server keeps serving them). update_sync_state saves below.
+                (self.sync_state.get(state_key) or {}).pop("past_backfilled_at", None)
             max_id = max(x["id"] for x in merged) if merged else 0
             newest_ts = max((x.get("timestamp") or "" for x in merged), default=None)
             # If any message failed to normalize, do NOT advance the cursor to or
@@ -382,6 +1090,18 @@ class SyncManager:
             if earliest_pending_media_ts is not None and newest_ts is not None:
                 newest_ts = min(newest_ts, earliest_pending_media_ts)
             self.update_sync_state(gid, mid, max_id, len(merged), last_ts=newest_ts)
+
+            if on_new_messages is not None and new_msgs and not recovering:
+                member_info = {
+                    "group_id": gid,
+                    "group_name": group["name"],
+                    "member_id": mid,
+                    "member_name": member["name"],
+                    "member_dir": member_dir,
+                    "phone_image": member.get("phone_image"),
+                    "initial_sync": initial_sync,
+                }
+                await self._notify_new_messages(on_new_messages, member_info, new_msgs)
 
             return len(processed)
 
@@ -505,9 +1225,7 @@ class SyncManager:
     _LOCAL_DERIVED_FIELDS = ("width", "height", "media_duration", "is_muted", "media_file")
 
     @staticmethod
-    def _merge_messages(
-        existing_msgs: list[dict[str, Any]], processed: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    def _merge_messages(existing_msgs: list[dict[str, Any]], processed: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Upsert ``processed`` over ``existing_msgs`` (prefer fresh API data),
         carrying forward locally-derived media metadata the API cannot supply.
 
@@ -696,27 +1414,29 @@ class SyncManager:
             messages_file: Path to messages.json file.
             metadata: Dict mapping message_id to metadata dict
                       (may contain: width, height, media_duration, is_muted).
+
+        Runs under the file lock (see :meth:`_locked_update`).
         """
         if not metadata or not messages_file.exists():
             return
 
-        try:
-            async with aiofiles.open(messages_file, encoding="utf-8") as f:
-                data = json.loads(await f.read())
-
+        def mutate(current: Optional[Any]) -> tuple[Optional[Any], None]:
+            if not isinstance(current, dict):
+                return None, None
             updated = False
-            for msg in data.get("messages", []):
-                msg_id = msg.get("id")
-                if msg_id in metadata:
-                    msg_metadata = metadata[msg_id]
+            for msg in current.get("messages", []):
+                msg_metadata = metadata.get(msg.get("id"))
+                if msg_metadata:
                     for key, value in msg_metadata.items():
                         if value is not None:
                             msg[key] = value
                             updated = True
+            return (current if updated else None), None
 
-            if updated:
-                await asyncio.to_thread(self._atomic_write_json, messages_file, data)
-
+        try:
+            wrote, _ = await asyncio.to_thread(self._locked_update, messages_file, mutate)
+            if not wrote:
+                logger.error("Failed to write message metadata", file=str(messages_file))
         except Exception as e:
             logger.error("Failed to update message metadata", file=str(messages_file), error=str(e))
 

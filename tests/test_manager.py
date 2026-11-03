@@ -147,6 +147,19 @@ async def test_sync_member_flow(sync_manager):
 
 
 @pytest.mark.asyncio
+async def test_sync_member_renames_group_folder_when_room_renamed(sync_manager):
+    old_dir = sync_manager.output_dir / "messages" / "1 Old" / "10 Mem"
+    old_dir.mkdir(parents=True)
+    (old_dir / "keep.txt").write_text("x", encoding="utf-8")
+    sync_manager.client.get_messages.return_value = []
+
+    await sync_manager.sync_member(AsyncMock(), {"id": 1, "name": "New"}, {"id": 10, "name": "Mem"}, [])
+
+    assert [p.name for p in (sync_manager.output_dir / "messages").iterdir()] == ["1 New"]
+    assert (sync_manager.output_dir / "messages" / "1 New" / "10 Mem" / "keep.txt").exists()
+
+
+@pytest.mark.asyncio
 async def test_sync_member_write_failure_does_not_advance_cursor(sync_manager, monkeypatch):
     """If the messages.json write fails, the cursor must NOT advance — otherwise the
     next sync would skip the unwritten messages permanently."""
@@ -623,7 +636,8 @@ async def test_sync_member_recovers_full_history_on_count_mismatch(sync_manager)
 
     sync_manager.client.get_messages.side_effect = fake_get_messages
 
-    await sync_manager.sync_member(session, group, member, media_queue)
+    on_new_messages = MagicMock()
+    await sync_manager.sync_member(session, group, member, media_queue, on_new_messages=on_new_messages)
 
     # File must contain the COMPLETE history, not just the truncated single msg.
     with open(json_path, encoding="utf-8") as f:
@@ -631,11 +645,11 @@ async def test_sync_member_recovers_full_history_on_count_mismatch(sync_manager)
     assert len(data["messages"]) == 3
     assert {m["id"] for m in data["messages"]} == {1, 2, 3}
     # A full re-fetch (since_ts=None) must have occurred.
-    assert any(
-        call.kwargs.get("since_ts") is None for call in sync_manager.client.get_messages.call_args_list
-    )
+    assert any(call.kwargs.get("since_ts") is None for call in sync_manager.client.get_messages.call_args_list)
     # Recovered state reflects the full count.
     assert sync_manager.sync_state["1_10"]["total_messages"] == 3
+    # Recovery must not fire the new-messages callback.
+    on_new_messages.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -674,6 +688,60 @@ async def test_sync_member_recovers_on_corrupt_file(sync_manager):
 
 
 @pytest.mark.asyncio
+async def test_sync_member_corrupt_file_logs_once(sync_manager):
+    """The pre-read already reports a corrupt messages.json; the locked write
+    that then discards it must not log the same event a second time."""
+    from structlog.testing import capture_logs
+
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True, exist_ok=True)
+    (member_dir / "messages.json").write_text("{ broken", encoding="utf-8")
+    sync_manager.client.get_messages.return_value = [
+        {"id": 1, "type": "text", "text": "A", "member_id": 10, "published_at": "2023-01-01T00:00:00Z"}
+    ]
+
+    with capture_logs() as logs:
+        await sync_manager.sync_member(AsyncMock(), {"id": 1, "name": "Grp"}, {"id": 10, "name": "Mem"}, [])
+
+    assert [e["event"] for e in logs if e["log_level"] == "warning"] == ["corrupt_messages_file"]
+
+
+@pytest.mark.asyncio
+async def test_sync_member_logs_file_corrupted_after_pre_read(sync_manager, monkeypatch):
+    """messages.json readable when sync_member first reads it but unreadable once
+    the write lock is taken: the merge falls back to the pre-read copy (unchanged
+    semantics) and the discard is logged, not silent."""
+    from structlog.testing import capture_logs
+
+    group, member = {"id": 1, "name": "Grp"}, {"id": 10, "name": "Mem"}
+    member_dir = sync_manager.output_dir / "messages" / "1 Grp" / "10 Mem"
+    member_dir.mkdir(parents=True, exist_ok=True)
+    json_path = member_dir / "messages.json"
+    old = {"id": 1, "type": "text", "text": "A", "member_id": 10, "timestamp": "2023-01-01T00:00:00Z"}
+    json_path.write_text(json.dumps({"messages": [old]}), encoding="utf-8")
+    sync_manager.client.get_messages.return_value = [
+        {"id": 2, "type": "text", "text": "B", "member_id": 10, "published_at": "2023-01-02T00:00:00Z"}
+    ]
+    original = sync_manager.prepare_messages
+
+    def corrupt_then_prepare(*args, **kwargs):
+        json_path.write_text("{ broken 日本語", encoding="utf-8")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(sync_manager, "prepare_messages", corrupt_then_prepare)
+
+    with capture_logs() as logs:
+        await sync_manager.sync_member(AsyncMock(), group, member, [])
+
+    with open(json_path, encoding="utf-8") as f:
+        assert [m["id"] for m in json.load(f)["messages"]] == [1, 2]
+    (entry,) = [e for e in logs if e["log_level"] == "warning"]
+    assert entry["event"] == "messages.json unreadable at write time; merging the earlier read"
+    assert entry["member_id"] == 10
+    assert "日本語" not in repr(logs)
+
+
+@pytest.mark.asyncio
 async def test_sync_member_recovers_full_history_on_prefetched_branch(sync_manager):
     """PY-MGR-01: recovery must fetch TRUE full history from the API even when a
     prefetched (incremental-window) timeline was supplied. The prefetched slice
@@ -690,10 +758,14 @@ async def test_sync_member_recovers_full_history_on_prefetched_branch(sync_manag
 
     # Readable file has 2 messages, but state expects 3 -> mismatch tripwire.
     json_path.write_text(
-        json.dumps({"messages": [
-            {"id": 2, "type": "text", "content": "B", "timestamp": "2023-01-02T00:00:00Z"},
-            {"id": 3, "type": "text", "content": "C", "timestamp": "2023-01-03T00:00:00Z"},
-        ]}),
+        json.dumps(
+            {
+                "messages": [
+                    {"id": 2, "type": "text", "content": "B", "timestamp": "2023-01-02T00:00:00Z"},
+                    {"id": 3, "type": "text", "content": "C", "timestamp": "2023-01-03T00:00:00Z"},
+                ]
+            }
+        ),
         encoding="utf-8",
     )
     sync_manager.update_sync_state(1, 10, 3, 3, last_ts="2023-01-03T00:00:00Z")
@@ -718,9 +790,7 @@ async def test_sync_member_recovers_full_history_on_prefetched_branch(sync_manag
         {"id": 3, "type": "text", "text": "C", "member_id": 10, "published_at": "2023-01-03T00:00:00Z"},
     ]
 
-    await sync_manager.sync_member(
-        session, group, member, media_queue, prefetched_messages=prefetched
-    )
+    await sync_manager.sync_member(session, group, member, media_queue, prefetched_messages=prefetched)
 
     with open(json_path, encoding="utf-8") as f:
         data = json.load(f)
@@ -728,10 +798,7 @@ async def test_sync_member_recovers_full_history_on_prefetched_branch(sync_manag
     assert {m["id"] for m in data["messages"]} == {1, 2, 3}
     assert sync_manager.sync_state["1_10"]["total_messages"] == 3
     # Recovery must have reached the client with since_ts=None (true full fetch).
-    assert any(
-        call.kwargs.get("since_ts") is None
-        for call in sync_manager.client.get_messages.call_args_list
-    )
+    assert any(call.kwargs.get("since_ts") is None for call in sync_manager.client.get_messages.call_args_list)
 
 
 @pytest.mark.asyncio
@@ -750,9 +817,7 @@ async def test_sync_member_first_sync_uses_prefetched_not_api(sync_manager):
         {"id": 2, "type": "text", "text": "B", "member_id": 99, "published_at": "2023-01-02T00:00:00Z"},
     ]
 
-    await sync_manager.sync_member(
-        session, group, member, media_queue, prefetched_messages=prefetched
-    )
+    await sync_manager.sync_member(session, group, member, media_queue, prefetched_messages=prefetched)
 
     # Prefetch supplied everything -> no per-member API call.
     sync_manager.client.get_messages.assert_not_called()
@@ -766,9 +831,7 @@ def test_merge_preserves_media_file_when_url_stripped():
     """PY-MGR-02: a withdrawn post strips media_url, so the fresh record omits
     media_file; the merge must keep the pointer to the already-downloaded file
     (else the archived media is orphaned and unrecoverable — the URL is gone)."""
-    existing = [
-        {"id": 1, "type": "video", "media_file": "video/1.mp4", "is_muted": True, "width": 720}
-    ]
+    existing = [{"id": 1, "type": "video", "media_file": "video/1.mp4", "is_muted": True, "width": 720}]
     # Fresh re-sync of the now-withdrawn post: no media_file / is_muted / width.
     processed = [{"id": 1, "type": "video", "content": "withdrawn"}]
     merged = SyncManager._merge_messages(existing, processed)
@@ -849,3 +912,192 @@ async def test_sync_member_reraises_refresh_failed(sync_manager):
 
     with pytest.raises(RefreshFailedError):
         await sync_manager.sync_member(session, group, member, [])
+
+
+def _msg(i, ts, member_id=10, **kw):
+    return {"id": i, "type": "text", "text": f"m{i}", "member_id": member_id, "published_at": ts, **kw}
+
+
+@pytest.mark.asyncio
+async def test_on_new_messages_receives_only_genuinely_new(sync_manager):
+    session = AsyncMock()
+    group = {"id": 1, "name": "Grp"}
+    member = {"id": 10, "name": "メンバー", "phone_image": "https://cdn/x/phone.jpg"}
+    sync_manager.client.get_messages.return_value = [_msg(101, "2023-01-01T10:00:00Z")]
+    await sync_manager.sync_member(session, group, member, [])
+
+    # Second sync re-fetches the overlap (101) plus one new message (102).
+    sync_manager.client.get_messages.return_value = [
+        _msg(101, "2023-01-01T10:00:00Z"),
+        _msg(102, "2023-01-01T11:00:00Z", type="voice", file="https://cdn/v.m4a"),
+    ]
+    calls = []
+
+    async def on_new(info, msgs):
+        calls.append((info, [m["id"] for m in msgs]))
+
+    count = await sync_manager.sync_member(session, group, member, [], on_new_messages=on_new)
+
+    assert count == 2  # unchanged contract: processed, not new
+    assert len(calls) == 1
+    info, ids = calls[0]
+    assert ids == [102]
+    assert info["group_id"] == 1 and info["member_id"] == 10
+    assert info["member_name"] == "メンバー"
+    assert info["phone_image"] == "https://cdn/x/phone.jpg"
+    assert info["member_dir"] == sync_manager.output_dir / "messages" / "1 Grp" / "10 メンバー"
+
+
+@pytest.mark.asyncio
+async def test_on_new_messages_flags_initial_sync(sync_manager):
+    session = AsyncMock()
+    group, member = {"id": 1, "name": "G"}, {"id": 10, "name": "M"}
+    infos = []
+
+    def on_new(info, msgs):
+        infos.append(info["initial_sync"])
+
+    sync_manager.client.get_messages.return_value = [_msg(101, "2023-01-01T10:00:00Z")]
+    await sync_manager.sync_member(session, group, member, [], on_new_messages=on_new)
+    sync_manager.client.get_messages.return_value = [_msg(102, "2023-01-01T11:00:00Z")]
+    await sync_manager.sync_member(session, group, member, [], on_new_messages=on_new)
+
+    assert infos == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_on_new_messages_not_called_when_nothing_new(sync_manager):
+    session = AsyncMock()
+    group, member = {"id": 1, "name": "G"}, {"id": 10, "name": "M"}
+    sync_manager.client.get_messages.return_value = [_msg(101, "2023-01-01T10:00:00Z")]
+    await sync_manager.sync_member(session, group, member, [])
+    called = MagicMock()
+    await sync_manager.sync_member(session, group, member, [], on_new_messages=called)
+    called.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_on_new_messages_sync_callable_and_exception_swallowed(sync_manager):
+    session = AsyncMock()
+    group, member = {"id": 1, "name": "G"}, {"id": 10, "name": "M"}
+    sync_manager.client.get_messages.return_value = [_msg(101, "2023-01-01T10:00:00Z")]
+
+    def boom(info, msgs):
+        raise RuntimeError("consumer bug")
+
+    count = await sync_manager.sync_member(session, group, member, [], on_new_messages=boom)
+    assert count == 1
+    assert sync_manager.get_last_ts(1, 10) == "2023-01-01T10:00:00Z"  # cursor still advanced
+
+
+@pytest.mark.asyncio
+async def test_on_new_messages_failure_logs_error_type_only(sync_manager):
+    """The exception text (and its traceback) may quote message text: log only
+    the exception type."""
+    from structlog.testing import capture_logs
+
+    group, member = {"id": 1, "name": "G"}, {"id": 10, "name": "M"}
+    sync_manager.client.get_messages.return_value = [_msg(101, "2023-01-01T10:00:00Z")]
+
+    def boom(info, msgs):
+        raise ValueError("leaked: 秘密のメッセージ")
+
+    with capture_logs() as logs:
+        await sync_manager.sync_member(AsyncMock(), group, member, [], on_new_messages=boom)
+
+    (entry,) = [e for e in logs if e["event"] == "on_new_messages callback failed"]
+    assert entry["error_type"] == "ValueError"
+    assert "error" not in entry and "exc_info" not in entry
+    assert "秘密" not in repr(logs)
+
+
+@pytest.mark.asyncio
+async def test_sync_merge_keeps_concurrent_favorite(sync_manager, monkeypatch):
+    """A favorite written between sync's pre-read and its write must survive:
+    the merge happens under the lock against the file as it is at write time."""
+    session = AsyncMock()
+    group, member = {"id": 1, "name": "G"}, {"id": 10, "name": "M"}
+    sync_manager.client.get_messages.return_value = [_msg(101, "2023-01-01T10:00:00Z")]
+    await sync_manager.sync_member(session, group, member, [])
+    path = sync_manager.output_dir / "messages" / "1 G" / "10 M" / "messages.json"
+
+    original_prepare = sync_manager.prepare_messages
+
+    def prepare_then_favorite(messages, member_dir, queue):
+        # Runs after sync's pre-read and before its write.
+        def fav(current):
+            current["messages"][0]["local_note"] = "kept"
+            return current, None
+
+        SyncManager._locked_update(path, fav)
+        return original_prepare(messages, member_dir, queue)
+
+    monkeypatch.setattr(sync_manager, "prepare_messages", prepare_then_favorite)
+    sync_manager.client.get_messages.return_value = [_msg(102, "2023-01-01T11:00:00Z")]
+    await sync_manager.sync_member(session, group, member, [])
+
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    by_id = {m["id"]: m for m in data["messages"]}
+    assert set(by_id) == {101, 102}
+    assert by_id[101]["local_note"] == "kept"
+
+
+@pytest.mark.asyncio
+async def test_on_new_messages_not_fired_during_recovery(sync_manager):
+    session = AsyncMock()
+    group, member = {"id": 1, "name": "G"}, {"id": 10, "name": "M"}
+    member_dir = sync_manager.output_dir / "messages" / "1 G" / "10 M"
+    member_dir.mkdir(parents=True)
+    (member_dir / "messages.json").write_text("{corrupt", encoding="utf-8")
+    sync_manager.client.get_messages.return_value = [_msg(101, "2023-01-01T10:00:00Z")]
+    called = MagicMock()
+
+    count = await sync_manager.sync_member(session, group, member, [], on_new_messages=called)
+
+    assert count == 1
+    called.assert_not_called()
+
+
+def test_update_sync_state_preserves_unowned_keys(sync_manager):
+    sync_manager.sync_state["1_100"] = {"past_backfilled_at": "2026-11-03T00:00:00Z"}
+    sync_manager.update_sync_state(1, 100, 500, 10, last_ts="2026-11-03T01:00:00Z")
+    entry = sync_manager.sync_state["1_100"]
+    assert entry["past_backfilled_at"] == "2026-11-03T00:00:00Z"
+    assert entry["last_message_id"] == 500 and entry["total_messages"] == 10
+
+
+@pytest.mark.asyncio
+async def test_update_message_metadata_goes_through_lock(sync_manager, tmp_path):
+    p = tmp_path / "messages.json"
+    p.write_text(json.dumps({"messages": [{"id": 1}, {"id": 2}]}), encoding="utf-8")
+    await sync_manager.update_message_metadata(p, {1: {"width": 10, "height": None}})
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["messages"][0]["width"] == 10 and "height" not in data["messages"][0]
+    before = p.stat().st_mtime_ns
+    await sync_manager.update_message_metadata(p, {99: {"width": 1}})  # no match: no write
+    assert p.stat().st_mtime_ns == before
+
+
+@pytest.mark.asyncio
+async def test_update_message_metadata_ignores_non_dict_file(sync_manager, tmp_path):
+    p = tmp_path / "messages.json"
+    p.write_text("[]", encoding="utf-8")
+    await sync_manager.update_message_metadata(p, {1: {"width": 10}})
+    assert p.read_text(encoding="utf-8") == "[]"
+
+
+@pytest.mark.asyncio
+async def test_update_message_metadata_logs_when_write_fails(sync_manager, tmp_path, monkeypatch):
+    p = tmp_path / "messages.json"
+    p.write_text(json.dumps({"messages": [{"id": 1}]}), encoding="utf-8")
+    monkeypatch.setattr(SyncManager, "_atomic_write_json", staticmethod(lambda target, data: False))
+    await sync_manager.update_message_metadata(p, {1: {"width": 10}})  # must not raise
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert "width" not in data["messages"][0]
+
+
+def test_member_dir_path_matches_sync_layout(sync_manager):
+    group, member = {"id": 1, "name": "G/rp"}, {"id": 10, "name": "メ:ンバー"}
+    path = sync_manager._member_dir_path(group, member)
+    assert path == sync_manager.output_dir / "messages" / "1 G_rp" / "10 メ_ンバー"

@@ -271,6 +271,24 @@ class TestGetPastMessages:
             result = await client.get_past_messages(MagicMock(), 123)
             assert result == []
 
+    @pytest.mark.asyncio
+    async def test_get_past_messages_strict_distinguishes_failure(self, client):
+        with patch.object(client, "fetch_json", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = None
+            assert await client.get_past_messages(MagicMock(), 123) == []
+            assert await client.get_past_messages(MagicMock(), 123, strict=True) is None
+            mock_fetch.return_value = {"messages": []}
+            assert await client.get_past_messages(MagicMock(), 123, strict=True) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("payload", [{}, {"messages": None}, {"messages": {"id": 1}}, {"other": []}])
+    async def test_get_past_messages_strict_rejects_malformed_200(self, client, payload):
+        """A 200 whose ``messages`` is missing or not a list is a failure in strict
+        mode, not "no earlier messages" (which would end the backfill for good)."""
+        with patch.object(client, "fetch_json", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = payload
+            assert await client.get_past_messages(MagicMock(), 123, strict=True) is None
+
 
 class TestGetSubscriptionStreak:
     """Tests for get_subscription_streak method."""

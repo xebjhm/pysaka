@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-03
+
+### Added
+- `SyncManager.update_message_fields(messages_file, message_id, fields)` (and the
+  blocking `update_message_fields_sync`) update one message under a per-file
+  lock, so the edit is not lost to a concurrent sync. A later sync that
+  re-fetches the message still replaces its record: fields the API returns
+  (e.g. `is_favorite`) are overwritten, and only `width`, `height`,
+  `media_duration`, `is_muted` and `media_file` are carried over.
+- `SyncManager.sync_member(..., on_new_messages=callback)` reports the messages
+  that were not on disk before, with the member's `phone_image`, for
+  notifications. Exceptions raised by the callback are logged by type only and
+  swallowed.
+- `sync_member` now archives the member's list icon, chat icon and call-screen
+  image into `profile_images/` with an `index.json` history
+  (`SyncManager.archive_profile_images`). URLs in `index.json` are stored
+  without their query string, so CDN signatures are never written to disk. An
+  unreadable `index.json` is kept as `index.json.corrupt-<UTC timestamp>` and
+  rebuilt, with a warning logged.
+- `SyncManager.backfill_past_messages(session, group, member)` adds the room's
+  pre-subscription messages and their media once per member, without moving the
+  cursor.
+- `SyncManager.sync_letters(session, group, member)` archives the account's sent
+  letters (text + letter-card image) into `letters.json` and `letters/`, with
+  its own `letters_updated_at` cursor; works for expired subscriptions. A
+  missing `letters.json` triggers a full refetch, and an unreadable one is kept
+  as `letters.json.corrupt-<UTC timestamp>` and rebuilt in the same call. When
+  a complete fetch returns letters but none to this member, an empty
+  `letters.json` is written so the cursor persists instead of the whole room
+  being refetched on every call.
+- `Client.get_past_messages(..., strict=True)` returns None on a failed request,
+  or on a response whose `messages` is missing or not a list, instead of `[]`.
+  The default (`strict=False`) is unchanged and typed as `list[dict]`; only
+  `strict=True` is typed `Optional[list[dict]]`.
+- `member_info` passed to `on_new_messages` has `initial_sync`, True when the
+  member's `messages.json` was created by that sync (the callback then gets the
+  whole fetched history); ignore those calls when sending notifications.
+- `SyncManager.archive_account_profile(session)` stores the account's own
+  nickname and avatar (with avatar history) under `account/`; other profile
+  fields (birthday, sex, region, FC accounts) are not stored. An unreadable
+  `account/profile.json` is kept as `profile.json.corrupt-<UTC timestamp>` and
+  rebuilt.
+
+### Fixed
+- `Client.download_file` failure logs no longer include the signed query string of
+  the media URL, nor any `user:password@` in it (only scheme, host, port and
+  path), nor exception text that may embed it.
+- `Client.get_messages`: when the `order=asc` probe does not confirm the start of
+  the timeline, the `ApiError` text and a `Timeline start probe rejected` warning
+  now include the probed first id and the oldest collected id, so a room that
+  stops syncing can be diagnosed.
+- **A favorite (or any local `messages.json` edit) made while a sync was writing
+  the same file could drop the newly synced messages permanently**, because the
+  cursor had already advanced past them. `sync_member` and
+  `update_message_metadata` now merge under the same per-file lock as
+  `update_message_fields`.
+- `SyncManager.update_sync_state` keeps keys it does not own in the member's
+  entry (such as `past_backfilled_at`) instead of replacing the whole entry;
+  corrupt-file or count-mismatch recovery clears `past_backfilled_at` so
+  `backfill_past_messages` merges the pre-subscription messages again.
+- `Client.get_messages` no longer raises `ApiError` forever for a room whose
+  whole history is an exact multiple of 200 messages: a full last page without a
+  continuation is accepted when an `order=asc` probe returns the smallest id
+  collected, i.e. the room's first message.
+
 ## [0.4.4] - 2026-11-02
 
 ### Fixed
@@ -272,7 +337,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Secure credential storage via system keyring
 - Token refresh without storing plaintext credentials
 
-[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/xebjhm/pysaka/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/xebjhm/pysaka/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/xebjhm/pysaka/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/xebjhm/pysaka/compare/v0.4.1...v0.4.2

@@ -159,7 +159,7 @@ The main entry point.
 - `get_member(session, member_id)`: Fetch individual member details.
 - `get_account(session)`: Fetch user account information.
 - `get_letters(session, group_id)`: Fetch user's sent letters/cards.
-- `get_past_messages(session, group_id)`: Fetch historical messages.
+- `get_past_messages(session, group_id, *, strict=False)`: Fetch historical messages. With `strict=True` it returns `None` when the request failed instead of `[]`.
 - `get_subscription_streak(session, group_id)`: Fetch consecutive subscription days.
 - `add_favorite(session, message_id)`: Add a message to favorites.
 - `remove_favorite(session, message_id)`: Remove a message from favorites.

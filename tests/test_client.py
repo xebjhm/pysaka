@@ -305,11 +305,18 @@ async def test_get_messages_raises_on_full_page_without_continuation_before_curs
     """A FULL page (``count`` messages) with NO continuation while the cursor is
     unreached is ambiguous: more data should follow a full page, so the token may
     have been dropped. Treating it as the timeline start would let the caller advance
-    its cursor past everything older — fail closed. (A genuine last page of exactly
-    ``count`` messages self-heals once the room gets a new message.)"""
+    its cursor past everything older — fail closed. The ``order=asc`` probe returns
+    an uncollected (older) first message, so the page is not confirmed as the
+    timeline start. (A genuine exact-``count`` last page is accepted immediately via
+    the probe; see ``test_full_last_page_at_timeline_start_is_not_a_gap``.)"""
     from pysaka.exceptions import ApiError
 
-    client.fetch_json = AsyncMock(return_value={"messages": _page(1000, 200, 10), "continuation": None})
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return {"messages": [{"id": 1, "published_at": "2025-12-01T00:00:00Z"}]}
+        return {"messages": _page(1000, 200, 10), "continuation": None}
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
 
     with pytest.raises(ApiError):
         await client.get_messages(mock_session, group_id=1, since_ts="2026-01-01T00:00:00Z")
@@ -318,11 +325,13 @@ async def test_get_messages_raises_on_full_page_without_continuation_before_curs
 @pytest.mark.asyncio
 async def test_get_messages_full_page_without_continuation_no_cursor_is_clean_end(client, mock_session):
     """With no cursor (full fetch) there is no gap to protect: a full last page with
-    no continuation simply ends pagination."""
+    no continuation simply ends pagination, without any ``order=asc`` probe request."""
     client.fetch_json = AsyncMock(return_value={"messages": _page(1000, 200, 10), "continuation": None})
 
     msgs = await client.get_messages(mock_session, group_id=1)
     assert len(msgs) == 200
+    assert client.fetch_json.await_count == 1
+    assert all(call.args[2].get("order") != "asc" for call in client.fetch_json.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -630,3 +639,177 @@ async def test_download_file_retries_then_succeeds(tmp_path, client, mock_sessio
     ok = await client.download_file(mock_session, "https://cdn/3.jpg", dest, retries=3)
     assert ok is True
     assert dest.read_bytes() == b"OK"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["status", "exception"])
+async def test_download_file_logs_never_contain_signed_query(tmp_path, client, mock_session, failure):
+    from structlog.testing import capture_logs
+
+    url = "https://cdn/x.jpg?sig=SECRET#frag"
+    if failure == "status":
+        resp = mock_session.get.return_value.__aenter__.return_value
+        resp.status = 403
+    else:
+        # aiohttp error messages embed the request URL, query included.
+        mock_session.get.return_value.__aenter__.side_effect = RuntimeError(f"Cannot connect to {url}")
+    with capture_logs() as logs:
+        ok = await client.download_file(mock_session, url, tmp_path / "x.jpg", retries=1)
+    assert ok is False
+    dumped = str(logs)
+    assert "SECRET" not in dumped and "frag" not in dumped
+    assert "/x.jpg" in dumped
+
+
+def test_redact_url_tolerates_unparseable_urls():
+    from pysaka.client import _redact_url
+
+    assert _redact_url("http://[abc/x.jpg?sig=SECRET") == "<unparseable url>"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://user:pass@cdn.example.com/a.jpg?sig=S", "https://cdn.example.com/a.jpg"),
+        ("https://user:pass@cdn.example.com:8443/a.jpg#f", "https://cdn.example.com:8443/a.jpg"),
+        ("https://token@CDN.example.com/a.jpg", "https://cdn.example.com/a.jpg"),
+        ("http://u:p@[::1]:8080/x.jpg", "http://[::1]:8080/x.jpg"),
+        ("https://cdn.example.com:99999/a.jpg", "https://cdn.example.com/a.jpg"),  # invalid port dropped
+        ("/relative/path.jpg?sig=S", "/relative/path.jpg"),
+    ],
+)
+def test_redact_url_drops_userinfo(url, expected):
+    """Credentials in the authority (``user:pass@``) must never reach the logs."""
+    from pysaka.client import _redact_url
+
+    assert _redact_url(url) == expected
+
+
+@pytest.mark.asyncio
+async def test_download_file_with_unparseable_url_fails_cleanly(tmp_path, client, mock_session):
+    from structlog.testing import capture_logs
+
+    mock_session.get.return_value.__aenter__.return_value.status = 403
+    with capture_logs() as logs:
+        ok = await client.download_file(mock_session, "http://[abc/x.jpg?sig=SECRET", tmp_path / "x.jpg", retries=1)
+    assert ok is False
+    dumped = str(logs)
+    assert "SECRET" not in dumped and "<unparseable url>" in dumped
+
+
+def _desc_page(start_id, n, ts_fn):
+    # Newest first (order=desc), like the API.
+    return [{"id": i, "published_at": ts_fn(i)} for i in range(start_id + n - 1, start_id - 1, -1)]
+
+
+def _sec_ts(i):
+    return f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}Z"
+
+
+@pytest.mark.asyncio
+async def test_full_last_page_at_timeline_start_is_not_a_gap(monkeypatch):
+    """History is exactly 400 messages: the second page is full (200) and has no
+    continuation. When the room's first message (order=asc probe) is in the
+    collected set, this is the start of the timeline — return, don't raise."""
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
+    client = Client(group=Group.HINATAZAKA46, access_token="t")
+    pages = [
+        {"messages": _desc_page(201, 200, _sec_ts), "continuation": "c1"},
+        {"messages": _desc_page(1, 200, _sec_ts)},  # full, no continuation
+    ]
+    calls = []
+
+    async def fetch(session, endpoint, params=None):
+        calls.append(params)
+        if params.get("order") == "asc":
+            return {"messages": [{"id": 1, "published_at": _sec_ts(1)}]}
+        return pages.pop(0)
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
+    msgs = await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
+    assert len(msgs) == 400
+    probes = [p for p in calls if p.get("order") == "asc"]
+    assert len(probes) == 1
+    assert probes[0]["clear_unread"] == "false"
+    assert probes[0]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_full_last_page_still_raises_when_first_message_not_collected(monkeypatch):
+    """A full last page whose room-start message (order=asc probe) was never collected
+    is still a possible gap, so it raises."""
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
+    client = Client(group=Group.HINATAZAKA46, access_token="t")
+    pages = [{"messages": _desc_page(201, 200, _sec_ts)}]  # full, no continuation, but id 1 never seen
+
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return {"messages": [{"id": 1, "published_at": _sec_ts(1)}]}
+        return pages.pop(0)
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
+    with pytest.raises(ApiError):
+        await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
+
+
+@pytest.mark.asyncio
+async def test_full_last_page_raises_when_probe_fails(monkeypatch):
+    """If the order=asc probe fails, the full last page cannot be confirmed as the
+    timeline start, so it fails closed."""
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
+    client = Client(group=Group.HINATAZAKA46, access_token="t")
+    pages = [{"messages": _desc_page(1, 200, _sec_ts)}]
+
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return None
+        return pages.pop(0)
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
+    with pytest.raises(ApiError):
+        await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
+
+
+@pytest.mark.asyncio
+async def test_full_last_page_raises_when_probe_ignores_order(monkeypatch):
+    """A server that ignores ``order=asc`` answers the probe with the NEWEST message,
+    which is always in the collected set. That must not pass for the room's first
+    message: ids 1..200 were never fetched, so the dropped continuation is a gap."""
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
+    client = Client(group=Group.HINATAZAKA46, access_token="t")
+    pages = [{"messages": _desc_page(201, 200, _sec_ts)}]  # full page of ids 400..201, token dropped
+
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return {"messages": [{"id": 400, "published_at": _sec_ts(400)}]}
+        return pages.pop(0)
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
+    with pytest.raises(ApiError):
+        await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("probe_id", "logged_first_id"), [(400, 400), ("400", None)])
+async def test_probe_rejection_reports_ids(monkeypatch, probe_id, logged_first_id):
+    """A rejected probe names the probed first id and the oldest collected id,
+    so a frozen room can be diagnosed from the log or the error text."""
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
+    client = Client(group=Group.HINATAZAKA46, access_token="t")
+    pages = [{"messages": _desc_page(201, 200, _sec_ts)}]
+
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return {"messages": [{"id": probe_id, "published_at": _sec_ts(400)}]}
+        return pages.pop(0)
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
+    with capture_logs() as logs, pytest.raises(ApiError) as exc:
+        await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
+
+    assert f"probe_first_id={logged_first_id}" in str(exc.value)
+    assert "oldest_collected_id=201" in str(exc.value)
+    (entry,) = [e for e in logs if e["event"] == "Timeline start probe rejected"]
+    assert (entry["probe_first_id"], entry["oldest_collected_id"]) == (logged_first_id, 201)
