@@ -39,18 +39,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `messages/<gid> */<mid> <old name>` to the member's current name instead of
   creating a second folder. If a member or room folder rename fails
   (`OSError`, e.g. a file locked on Windows), `sync_member` and `sync_letters`
-  log a warning and return
-  0 without writing or moving a cursor (before: the error escaped
-  `sync_member`).
-- `Client.get_member(session, member_id)` now returns None when the response
+  log a warning and return 0 without writing or moving a cursor (before: the
+  error escaped `sync_member`).
+- `Client.get_member(session, member_id)` now returns `None` when the response
   body is not a JSON object (before: the raw body). It also works for members
   who are no longer in any room's member list (e.g. graduated members who
   posted in an official room).
-- **Breaking:** HTTP 429 now raises `RateLimitedError` (a subclass of `ApiError`,
-  `retry_after` from the `Retry-After` header) instead of returning None from
-  `Client.fetch_json`. Before, `get_groups`, `get_members` and `get_messages`
-  returned `[]` while rate limited, which callers could not tell apart from
-  "nothing there". Callers that already handle `ApiError` need no change.
+- **Breaking:** HTTP 429 now raises `RateLimitedError` (a subclass of `ApiError`)
+  from every `Client` method built on `fetch_json`: `fetch_json`, `get_groups`,
+  `get_members`, `get_messages`, `get_profile`, `get_account`, `get_member`,
+  `get_news`, `get_tags`, `get_fc_contents`, `get_organizations`,
+  `get_products`, `get_letters`, `get_past_messages`, `get_subscription_streak`
+  and `mark_group_read`. Before, they returned their failure value while rate
+  limited (`None`, `[]` or `False`), which callers could not tell apart from
+  "nothing there". `retry_after` holds the `Retry-After` header in seconds, or
+  `None` when it is absent, not a number, not finite or negative. Callers that
+  already handle `ApiError` need no change; others should catch
+  `RateLimitedError` and back off.
 
 ### Fixed
 - Renaming a room folder (`messages/<gid> <old room name>`) or a member folder

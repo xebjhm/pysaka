@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import math
 import os
 from collections.abc import Mapping
 from enum import Enum
@@ -48,12 +49,18 @@ def _int_or_none(value: Any) -> Optional[int]:
 
 
 def _rate_limited(endpoint: str, resp: Any) -> RateLimitedError:
-    """Build the error for a 429 response (Retry-After parsed when numeric)."""
+    """Build the error for a 429 response.
+
+    ``retry_after`` is the ``Retry-After`` header as seconds when it is a finite,
+    non-negative number, else None (absent, an HTTP date, ``nan``, ``inf``, negative).
+    """
     headers = getattr(resp, "headers", None)
     raw = headers.get("Retry-After") if isinstance(headers, Mapping) else None
     try:
         retry_after: Optional[float] = float(raw) if raw is not None else None
     except (TypeError, ValueError):
+        retry_after = None
+    if retry_after is not None and not (math.isfinite(retry_after) and retry_after >= 0):
         retry_after = None
     logger.warning("API rate limited", endpoint=endpoint, retry_after=retry_after)
     return RateLimitedError(f"Rate limited at {endpoint}", retry_after)
@@ -275,10 +282,12 @@ class Client:
             params: Query parameters.
 
         Returns:
-            JSON response as dict or None if failed.
+            JSON response as dict, or None for any other failure: a client error
+            (4xx other than 429), a 401 that the token refresh could not fix, or an
+            unexpected error while handling the response.
 
         Raises:
-            ApiError: If the API returns a server error (5xx) or other unhandled status.
+            ApiError: On a server error (5xx) or a network error / timeout.
             RateLimitedError: On HTTP 429 (also after a token refresh).
             SessionExpiredError: If the session is invalidated during the request.
             RefreshFailedError: If a 401 triggers a token refresh and all refresh
@@ -666,6 +675,12 @@ class Client:
             List of group objects. Includes closed groups (state='closed')
             for graduation detection — callers should skip syncing these
             as their timeline/members endpoints return 404.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         org_id = self.config.get("organization_id")
         params = {"organization_id": org_id} if org_id is not None else None
@@ -704,6 +719,12 @@ class Client:
 
         Returns:
             List of member objects.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         result = await self.fetch_json(session, f"/groups/{group_id}/members")
         return result or []
@@ -766,6 +787,8 @@ class Client:
                 continuation (always), a full page with a missing continuation
                 (unless the ``order=asc`` probe confirms the timeline start), or
                 a page that replays already-collected messages.
+            RateLimitedError: On HTTP 429 for any page (a subclass of
+                ``ApiError``), instead of returning ``[]`` or a partial list.
         """
         all_messages: dict[int, dict[str, Any]] = {}
         page = 0
@@ -1070,7 +1093,15 @@ class Client:
             session: Active aiohttp ClientSession.
 
         Returns:
-            Dict containing profile info (nickname, etc.) or None if failed.
+            Dict containing profile info (nickname, etc.), or None when the
+            request failed without raising (e.g. a 4xx other than 429; see
+            ``fetch_json``).
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning None.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         return await self.fetch_json(session, "/profile")
 
@@ -1084,6 +1115,12 @@ class Client:
 
         Returns:
             List of news items.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         params = {"platform": self.platform, "count": count}
         data = await self.fetch_json(session, "/announcements", params)
@@ -1100,6 +1137,12 @@ class Client:
 
         Returns:
             List of tags.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         data = await self.fetch_json(session, "/tags")
         if data and "tags" in data:
@@ -1116,6 +1159,12 @@ class Client:
 
         Returns:
             List of FC content items.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         data = await self.fetch_json(session, "/fc-contents", {"organization_id": organization_id})
         if data and "contents" in data:
@@ -1131,6 +1180,12 @@ class Client:
 
         Returns:
             List of organizations.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         data = await self.fetch_json(session, "/organizations")
         if data and "organizations" in data:
@@ -1149,6 +1204,12 @@ class Client:
 
         Returns:
             List of products.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         params = {}
         if product_type:
@@ -1246,6 +1307,12 @@ class Client:
 
         Returns:
             List of letter objects.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]``.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         params: dict[str, Any] = {"count": count}
         if updated_from:
@@ -1293,6 +1360,12 @@ class Client:
             List of historical message objects (possibly empty); None only when
             ``strict`` is True and the request failed or returned no
             ``messages`` list.
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning ``[]`` (or None with ``strict``).
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         data = await self.fetch_json(session, f"/groups/{group_id}/past_messages")
         if strict:
@@ -1316,7 +1389,14 @@ class Client:
             group_id: The ID of the group/member room to mark read.
 
         Returns:
-            True if the request succeeded.
+            True if the request succeeded; False when it failed without raising
+            (e.g. a 4xx other than 429; see ``fetch_json``).
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning False.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         params: dict[str, Any] = {"count": 1, "order": "desc", "clear_unread": "true"}
         data = await self.fetch_json(session, f"/groups/{group_id}/timeline", params)
@@ -1331,7 +1411,14 @@ class Client:
             group_id: The ID of the group/member.
 
         Returns:
-            Dict with streak information or None if failed.
+            Dict with streak information, or None when the request failed
+            without raising (e.g. a 4xx other than 429; see ``fetch_json``).
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning None.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         return await self.fetch_json(session, f"/groups/{group_id}/consecutive-subscription-day")
 
@@ -1348,8 +1435,8 @@ class Client:
 
         Returns:
             The member dict (``id``, ``name``, ``thumbnail``, ``phone_image``, ...),
-            or None when the request failed with a client error (e.g. 4xx) or the
-            body is not a JSON object.
+            or None when the request failed without raising (e.g. a 4xx other
+            than 429; see ``fetch_json``) or the body is not a JSON object.
 
         Raises:
             ApiError: On a server error (5xx) or a network error.
@@ -1368,7 +1455,14 @@ class Client:
             session: Active aiohttp ClientSession.
 
         Returns:
-            Account info dict or None if failed.
+            Account info dict, or None when the request failed without raising
+            (e.g. a 4xx other than 429; see ``fetch_json``).
+
+        Raises:
+            RateLimitedError: On HTTP 429 (a subclass of ``ApiError``), instead of
+                returning None.
+            ApiError: On a server error (5xx) or a network error.
+            SessionExpiredError, RefreshFailedError: auth failures (from ``fetch_json``).
         """
         return await self.fetch_json(session, "/account")
 

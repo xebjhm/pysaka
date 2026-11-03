@@ -40,6 +40,16 @@ interaction). Reuses the browser session stored in `auth_dir`.
 ### `Client`
 Main API client supporting all Sakamichi groups.
 
+**Errors of the GET methods.** Every method built on `fetch_json` (`get_groups`, `get_members`,
+`get_messages`, `get_profile`, `get_news`, `get_tags`, `get_fc_contents`, `get_organizations`,
+`get_products`, `get_member`, `get_account`, `get_letters`, `get_past_messages`,
+`get_subscription_streak`, `mark_group_read`) raises `RateLimitedError` (a subclass of `ApiError`)
+on HTTP 429 instead of returning its failure value (`None`, `[]` or `False`). They also raise
+`ApiError` on a server error (5xx) or a network error / timeout, and `SessionExpiredError` /
+`RefreshFailedError` on auth failures. The failure value is returned only when the request failed
+without raising: a 4xx other than 429, a 401 the token refresh could not fix, or an unexpected
+error while handling the response.
+
 #### `__init__(group: Union[Group, str] = Group.HINATAZAKA46, access_token: str = None, refresh_token: str = None, cookies: dict = None, app_id: str = None, user_agent: str = None, auth_dir: Union[str, Path] = None, use_token_storage: bool = False, platform: str = "web")`
 - **group**: Target group, enum or string (default `Group.HINATAZAKA46`).
 - **access_token** / **refresh_token** / **cookies**: Credentials from
@@ -58,13 +68,13 @@ Main API client supporting all Sakamichi groups.
 #### `get_groups(session: aiohttp.ClientSession, include_inactive: bool = False) -> List[dict]`
 - **session**: Active aiohttp session.
 - **include_inactive**: If True, returns `expired` and `suspended` subscriptions too.
-- **Returns**: List of group objects.
-- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list).
+- **Returns**: List of group objects (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
 #### `get_members(session, group_id: int) -> List[dict]`
 - **group_id**: Target group ID.
-- **Returns**: List of member objects.
-- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list).
+- **Returns**: List of member objects (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
 #### `get_messages(session, group_id: int, since_id: int = None, since_ts: str = None, max_id: int = None, progress_callback = None, clear_unread: bool = False, page_delay: float = 0.5) -> List[dict]`
 - **group_id**: Target group ID.
@@ -101,44 +111,53 @@ Main API client supporting all Sakamichi groups.
 - **Returns**: `True` if success/exists.
 
 #### `get_profile(session) -> Optional[dict]`
-- **Returns**: Dict containing profile info (nickname, etc.) or `None` if failed.
+- **Returns**: Dict containing profile info (nickname, etc.), or `None` when the request failed
+  without raising.
+- **Raises**: `RateLimitedError` on HTTP 429 (not `None`); see "Errors of the GET methods".
 
 #### `get_news(session, count: int = 20) -> List[dict]`
 - **count**: Number of items to fetch (default 20).
-- **Returns**: List of news/announcement items.
+- **Returns**: List of news/announcement items (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
 #### `get_tags(session) -> List[dict]`
-- **Returns**: List of tags.
+- **Returns**: List of tags (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
 #### `get_fc_contents(session, organization_id: int = 1) -> List[dict]`
 - **organization_id**: Organization ID (default 1).
-- **Returns**: List of Fan Club content items.
+- **Returns**: List of Fan Club content items (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
 #### `get_organizations(session) -> List[dict]`
-- **Returns**: List of organizations.
+- **Returns**: List of organizations (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
 #### `get_products(session, product_type: str = None) -> List[dict]`
 - **product_type**: Optional filter (e.g. `'subscription'`, `'fc_subscription'`).
-- **Returns**: List of products.
+- **Returns**: List of products (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
 #### `get_member(session, member_id: int) -> Optional[dict]`
 - **member_id**: The member's id.
 - **Returns**: The member dict (`id`, `name`, `thumbnail`, `phone_image`, ...) from
-  `GET /members/{id}`, or `None` when the request failed with a client error
-  (e.g. 4xx) or the body is not a JSON object. Works for members who are no
+  `GET /members/{id}`, or `None` when the request failed without raising (e.g. a 4xx other than
+  429) or the body is not a JSON object. Works for members who are no
   longer in any room's member list.
 - **Raises**: `ApiError` on a server (5xx) or network error; `RateLimitedError`
   on HTTP 429; `SessionExpiredError` / `RefreshFailedError` on auth failures
   (propagated from `fetch_json`).
 
 #### `get_account(session) -> Optional[dict]`
-- **Returns**: Account info dict or `None` if failed.
+- **Returns**: Account info dict, or `None` when the request failed without raising.
+- **Raises**: `RateLimitedError` on HTTP 429 (not `None`); see "Errors of the GET methods".
 
 #### `get_letters(session, group_id: int, updated_from: str = None, count: int = 200) -> List[dict]`
 - **group_id**: Target group ID.
 - **updated_from**: ISO timestamp to fetch letters updated after.
 - **count**: Number of letters to fetch (default 200).
-- **Returns**: List of letter objects.
+- **Returns**: List of letter objects (`[]` when the request failed without raising).
+- **Raises**: `RateLimitedError` on HTTP 429 (not an empty list); see "Errors of the GET methods".
 
 #### `get_past_messages(session, group_id: int, *, strict: bool = False) -> List[dict]  # Optional[List[dict]] when strict=True`
 Messages from the ~1–1.5 days before the account's first subscription to the room (still returned
@@ -149,11 +168,13 @@ or the response has no `messages` list.
   returns `None` instead of `[]`, so it can be told apart from a room with no earlier messages. Type
   checkers see `list[dict]` for `strict=False` and `Optional[list[dict]]` for `strict=True`.
 - **Returns**: List of historical message objects; `None` only when `strict=True` and the request
-  failed or returned no `messages` list.
+  failed without raising or returned no `messages` list.
+- **Raises**: `RateLimitedError` on HTTP 429 (not `[]` or `None`); see "Errors of the GET methods".
 
 #### `get_subscription_streak(session, group_id: int) -> Optional[dict]`
 - **group_id**: Target group ID.
-- **Returns**: Dict with streak information or `None` if failed.
+- **Returns**: Dict with streak information, or `None` when the request failed without raising.
+- **Raises**: `RateLimitedError` on HTTP 429 (not `None`); see "Errors of the GET methods".
 
 #### `post_json(session, endpoint: str, data: dict = None) -> Optional[dict]`
 - **endpoint**: API endpoint path (e.g. `"/messages/123/favorite"`).
@@ -176,13 +197,17 @@ or the response has no `messages` list.
 - **group_id**: Target group ID.
 - Explicitly clears the room's unread count on the server (the official app's
   room-open signal). Opt-in; background sync does not call this.
-- **Returns**: `True` if successful, `False` otherwise.
+- **Returns**: `True` if successful, `False` when the request failed without raising.
+- **Raises**: `RateLimitedError` on HTTP 429 (not `False`); see "Errors of the GET methods".
 
 #### `fetch_json(session, endpoint: str, params: dict = None) -> Optional[dict]`
 Low-level authenticated GET returning parsed JSON (used internally by the
-higher-level `get_*` methods). Handles token refresh and raises `ApiError` on
-non-recoverable HTTP errors. HTTP 429 raises `RateLimitedError` (a subclass of
-`ApiError`) instead of returning None. See the `ApiError` example below.
+higher-level `get_*` methods). Handles token refresh. Returns `None` for a 4xx other than 429, a
+401 the refresh could not fix, or an unexpected error while handling the response. Raises
+`ApiError` on a server error (5xx) or a network error / timeout, `RateLimitedError` (a subclass of
+`ApiError`) on HTTP 429 instead of returning `None` (`retry_after` is `None` unless the header is a
+finite, non-negative number), and `SessionExpiredError` / `RefreshFailedError` on auth failures.
+See the `ApiError` example below.
 
 #### `refresh_access_token(session) -> bool`
 - **session**: Active aiohttp session.
@@ -675,12 +700,12 @@ except ApiError as e:
 
 ### `RateLimitedError`
 Subclass of `ApiError`, raised when the API answers HTTP 429 Too Many Requests.
-Raised by `fetch_json` and by the list calls built on it (`get_groups`,
-`get_members`, `get_messages`), instead of returning None or `[]`.
+Raised by `fetch_json` and by every `Client` method built on it (see "Errors of the GET methods"
+under `Client`), instead of returning `None`, `[]` or `False`.
 
 - **status_code**: `429`.
 - **retry_after**: `Optional[float]` - seconds from the `Retry-After` header, or
-  `None` when the header is absent or not a number.
+  `None` when the header is absent, not a number, not finite (`nan`, `inf`) or negative.
 
 ```python
 import asyncio
