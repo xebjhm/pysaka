@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
 
+import aiohttp
 import structlog
 from bs4 import BeautifulSoup
 
@@ -194,11 +195,15 @@ class NogizakaBlogScraper(BaseBlogScraper):
             payload cannot be parsed.
         """
         url = f"{self.base_url}/s/n46/api/list/member"
-        async with self.session.get(url, params={"callback": "res"}) as resp:
-            if resp.status != 200:
-                logger.warning("birthdays_unavailable", status=resp.status)
-                return {}
-            text = await resp.text()
+        try:
+            async with self.session.get(url, params={"callback": "res"}) as resp:
+                if resp.status != 200:
+                    logger.warning("birthdays_unavailable", status=resp.status)
+                    return {}
+                text = await resp.text()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning("birthdays_unavailable", error_type=type(e).__name__)
+            return {}
         try:
             birthdays = birthdays_from_member_json(parse_jsonp(text))
         except (ValueError, json.JSONDecodeError) as e:

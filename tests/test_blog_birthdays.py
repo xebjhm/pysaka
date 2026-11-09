@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import aiohttp
 import pytest
 from structlog.testing import capture_logs
 
@@ -203,6 +204,16 @@ async def test_nogizaka_birthdays_success():
     text = "res(" + (FIX / "nogizaka_member.json").read_text(encoding="utf-8") + ")"
     session.get.return_value = MockResponse(text=text, status=200)
     assert await NogizakaBlogScraper(session).get_member_birthdays() == {"テスト 一": "2003-08-08"}
+
+
+@pytest.mark.asyncio
+async def test_nogizaka_birthdays_network_error():
+    session = MagicMock()
+    session.get.side_effect = aiohttp.ClientError("boom")
+    with capture_logs() as logs:
+        assert await NogizakaBlogScraper(session).get_member_birthdays() == {}
+    failed = [e for e in logs if e["event"] == "birthdays_unavailable"]
+    assert failed and failed[0]["error_type"] == "ClientError"
 
 
 @pytest.mark.asyncio
