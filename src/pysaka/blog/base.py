@@ -2,12 +2,44 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 
 import aiohttp
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+_JP_DATE_RE = re.compile(r"^\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*$")
+_SLASH_DATE_RE = re.compile(r"^\s*(\d{4})\s*/\s*(\d{1,2})\s*/\s*(\d{1,2})\s*$")
+
+#: Max concurrent profile-page requests when collecting birthdays.
+BIRTHDAY_CONCURRENCY = 4
+#: Pause (seconds) after each profile-page request, to stay polite.
+BIRTHDAY_REQUEST_DELAY = 0.2
+
+
+def parse_jp_birthday(text: str) -> str | None:
+    """Parse ``YYYY年M月D日`` or ``YYYY/M/D`` into ``YYYY-MM-DD``.
+
+    Args:
+        text: Raw date text from an official site.
+
+    Returns:
+        ISO date string, or ``None`` if the text is not a valid date.
+    """
+    match = _JP_DATE_RE.match(text or "") or _SLASH_DATE_RE.match(text or "")
+    if not match:
+        return None
+    year, month, day = (int(g) for g in match.groups())
+    try:
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return None
 
 
 class BlogGoneError(Exception):
@@ -225,3 +257,65 @@ class BaseBlogScraper(ABC):
             return thumbnail, entry.published_at, entry.title
         except Exception:
             return None, None, None
+
+    async def get_member_birthdays(self) -> dict[str, str]:
+        """Fetch member birthdays from the group's official site.
+
+        Returns:
+            Mapping of member display name (exactly as the site writes it) to
+            ``"YYYY-MM-DD"``. Members without a parsable birthday are omitted.
+            The base implementation returns an empty mapping.
+        """
+        return {}
+
+    async def _collect_profile_birthdays(
+        self,
+        members: list[MemberInfo],
+        profile_url: Callable[[str], str],
+        parse: Callable[[str], str | None],
+    ) -> dict[str, str]:
+        """Fetch each member's profile page and parse its birthday.
+
+        Requests are capped by ``BIRTHDAY_CONCURRENCY`` and each is followed by
+        a short pause. Failures are logged per member id and skipped.
+
+        Args:
+            members: Members (id + display name) to look up.
+            profile_url: Builds the profile page URL from a member id.
+            parse: Extracts ``YYYY-MM-DD`` from profile HTML.
+
+        Returns:
+            Mapping of member name to ``"YYYY-MM-DD"``.
+        """
+        semaphore = asyncio.Semaphore(BIRTHDAY_CONCURRENCY)
+
+        async def fetch(member: MemberInfo) -> tuple[str, str | None]:
+            async with semaphore:
+                try:
+                    async with self.session.get(profile_url(member.id), params={"ima": "0000"}) as resp:
+                        if resp.status != 200:
+                            logger.warning(
+                                "birthday_fetch_failed",
+                                member_id=member.id,
+                                error_type=f"http_{resp.status}",
+                            )
+                            return member.name, None
+                        html = await resp.text()
+                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                    logger.warning(
+                        "birthday_fetch_failed",
+                        member_id=member.id,
+                        error_type=type(e).__name__,
+                    )
+                    return member.name, None
+                finally:
+                    await asyncio.sleep(BIRTHDAY_REQUEST_DELAY)
+            birthday = parse(html)
+            if birthday is None:
+                logger.info("birthday_not_found", member_id=member.id)
+            return member.name, birthday
+
+        results = await asyncio.gather(*(fetch(m) for m in members))
+        birthdays = {name: b for name, b in results if b}
+        logger.info("birthdays_fetched", count=len(birthdays))
+        return birthdays
