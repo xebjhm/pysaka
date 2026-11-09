@@ -7,6 +7,7 @@ import re
 from collections.abc import AsyncIterator
 from datetime import datetime
 
+import aiohttp
 import structlog
 from bs4 import BeautifulSoup
 
@@ -124,6 +125,17 @@ class HinatazakaBlogScraper(BaseBlogScraper):
 
         Returns:
             List of MemberInfo objects with id, name, and thumbnail_url.
+            Names are the raw link text (kanji name immediately followed by
+            the kana reading); cached by consumers, so left unchanged.
+        """
+        return await self._scrape_members(artist_page_only=False)
+
+    async def _scrape_members(self, *, artist_page_only: bool) -> list[MemberInfo]:
+        """Scrape members; ``artist_page_only`` yields clean names and no mascots.
+
+        With ``artist_page_only`` the name is read from the ``.c-member__name``
+        element only (excluding ``.c-member__kana``) and the diary page, which
+        lists non-member accounts such as ポカ, is not scraped.
         """
         members: list[MemberInfo] = []
         seen_ids: set[str] = set()
@@ -165,6 +177,9 @@ class HinatazakaBlogScraper(BaseBlogScraper):
 
                     # Get member name from link text or nearby elements
                     name = link.get_text(strip=True)
+                    if artist_page_only:
+                        name_elem = link.select_one(".c-member__name")
+                        name = name_elem.get_text(strip=True) if name_elem else name
                     if not name or name.isspace():
                         # Try to find name in parent or sibling elements
                         parent = link.find_parent("li") or link.find_parent("div")
@@ -189,6 +204,9 @@ class HinatazakaBlogScraper(BaseBlogScraper):
                     status=resp.status,
                     url=artist_url,
                 )
+
+        if artist_page_only:
+            return members
 
         # Also scrape the diary member page to catch mascots like ポカ
         diary_url = f"{self.base_url}/s/official/diary/member"
@@ -256,7 +274,13 @@ class HinatazakaBlogScraper(BaseBlogScraper):
             Mapping of member display name to ``"YYYY-MM-DD"``; members whose
             profile has no parsable birthday are omitted.
         """
-        members = await self.get_members_with_thumbnails()
+        try:
+            # Artist page only: clean names, and no diary-only accounts (ポカ)
+            # that have no /artist/{id} profile.
+            members = await self._scrape_members(artist_page_only=True)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning("birthdays_unavailable", error_type=type(e).__name__)
+            return {}
         if not members:
             logger.warning("birthdays_unavailable", status=None)
             return {}

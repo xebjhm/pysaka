@@ -115,6 +115,17 @@ def _profile_router(pages: dict[str, tuple[int, str]]):
     return get
 
 
+def _stub_members(scraper, fn):
+    """Stub the member lookup used by ``get_member_birthdays``."""
+    scraper.get_members_with_thumbnails = fn
+    if hasattr(scraper, "_scrape_members"):
+
+        async def scrape(*, artist_page_only):
+            return await fn()
+
+        scraper._scrape_members = scrape
+
+
 HINATA_OK = (FIX / "hinatazaka_artist.html").read_text(encoding="utf-8")
 SAKURA_OK = (FIX / "sakurazaka_artist.html").read_text(encoding="utf-8")
 
@@ -131,7 +142,7 @@ async def test_profile_scrapers_birthdays(cls, ok_html):
     async def members():
         return [MemberInfo("1", "A", "u"), MemberInfo("2", "B", "u")]
 
-    scraper.get_members_with_thumbnails = members
+    _stub_members(scraper, members)
     session.get.side_effect = _profile_router({"1": (200, ok_html), "2": (200, "<html></html>")})
     result = await scraper.get_member_birthdays()
     assert list(result) == ["A"] and len(result["A"]) == 10
@@ -146,7 +157,7 @@ async def test_profile_scrapers_failure_logged(cls):
     async def members():
         return [MemberInfo("1", "A", "u")]
 
-    scraper.get_members_with_thumbnails = members
+    _stub_members(scraper, members)
     session.get.side_effect = _profile_router({"1": (503, "")})
     with capture_logs() as logs:
         assert await scraper.get_member_birthdays() == {}
@@ -162,7 +173,7 @@ async def test_profile_scrapers_no_members_unavailable(cls):
     async def members():
         return []
 
-    scraper.get_members_with_thumbnails = members
+    _stub_members(scraper, members)
     with capture_logs() as logs:
         assert await scraper.get_member_birthdays() == {}
     assert any(e["event"] == "birthdays_unavailable" for e in logs)
@@ -191,7 +202,7 @@ async def test_profile_fetch_concurrency_capped():
     async def members():
         return [MemberInfo(str(i), f"M{i}", "u") for i in range(12)]
 
-    scraper.get_members_with_thumbnails = members
+    _stub_members(scraper, members)
     session.get.side_effect = lambda url, params=None: Slow(text=HINATA_OK)
     result = await scraper.get_member_birthdays()
     assert len(result) == 12
@@ -226,3 +237,64 @@ async def test_nogizaka_birthdays_unavailable(status, body):
     assert any(e["event"] == "birthdays_unavailable" for e in logs)
     if status != 200:
         assert [e for e in logs if e["event"] == "birthdays_unavailable"][0]["status"] == status
+
+
+HINATA_LIST = (FIX / "hinatazaka_artist_list.html").read_text(encoding="utf-8")
+SAKURA_LIST = (FIX / "sakurazaka_artist_list.html").read_text(encoding="utf-8")
+
+
+def _list_and_profiles(list_url_part, list_html, profile_html):
+    """session.get side effect: the member list page, then profile pages."""
+    requested = []
+
+    def get(url, params=None):
+        requested.append(url)
+        if list_url_part in url:
+            return MockResponse(text=list_html)
+        return MockResponse(text=profile_html)
+
+    return get, requested
+
+
+@pytest.mark.asyncio
+async def test_hinatazaka_list_names_exclude_kana():
+    session = MagicMock()
+    get, requested = _list_and_profiles("/search/artist", HINATA_LIST, HINATA_OK)
+    session.get.side_effect = get
+    result = await HinatazakaBlogScraper(session).get_member_birthdays()
+    assert result == {"金村 美玖": "2002-09-10", "小坂 菜緒": "2002-09-10"}
+    # Mascots only listed on the diary page are never requested as profiles.
+    assert not any("/diary/" in u for u in requested)
+    assert sorted(u.rsplit("/", 1)[-1] for u in requested if "/artist/" in u and "search" not in u) == ["12", "14"]
+
+
+@pytest.mark.asyncio
+async def test_hinatazaka_public_member_names_unchanged():
+    """get_members_with_thumbnails keeps the raw link text (cached by consumers)."""
+    session = MagicMock()
+    session.get.side_effect = lambda url, params=None: MockResponse(
+        text=HINATA_LIST if "/search/artist" in url else "<html></html>"
+    )
+    members = await HinatazakaBlogScraper(session).get_members_with_thumbnails()
+    assert members[0].name == "金村 美玖かねむら みく"
+
+
+@pytest.mark.asyncio
+async def test_sakurazaka_list_names_clean():
+    session = MagicMock()
+    get, _ = _list_and_profiles("/search/artist", SAKURA_LIST, SAKURA_OK)
+    session.get.side_effect = get
+    result = await SakurazakaBlogScraper(session).get_member_birthdays()
+    assert result == {"浅井 恋乃未": "2004-12-22", "石森 璃花": "2004-12-22"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cls", [HinatazakaBlogScraper, SakurazakaBlogScraper])
+@pytest.mark.parametrize("exc", [aiohttp.ClientError("boom"), TimeoutError()])
+async def test_profile_scrapers_list_network_error(cls, exc):
+    session = MagicMock()
+    session.get.side_effect = exc
+    with capture_logs() as logs:
+        assert await cls(session).get_member_birthdays() == {}
+    failed = [e for e in logs if e["event"] == "birthdays_unavailable"]
+    assert failed and failed[0]["error_type"] == type(exc).__name__

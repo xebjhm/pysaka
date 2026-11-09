@@ -7,6 +7,7 @@ import re
 from collections.abc import AsyncIterator
 from datetime import datetime
 
+import aiohttp
 import structlog
 from bs4 import BeautifulSoup
 
@@ -188,7 +189,11 @@ class SakurazakaBlogScraper(BaseBlogScraper):
             Mapping of member display name to ``"YYYY-MM-DD"``; members whose
             profile has no parsable birthday are omitted.
         """
-        members = await self.get_members_with_thumbnails()
+        try:
+            members = await self.get_members_with_thumbnails()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning("birthdays_unavailable", error_type=type(e).__name__)
+            return {}
         if not members:
             logger.warning("birthdays_unavailable", status=None)
             return {}
