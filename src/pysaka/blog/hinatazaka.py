@@ -7,10 +7,17 @@ import re
 from collections.abc import AsyncIterator
 from datetime import datetime
 
+import aiohttp
 import structlog
 from bs4 import BeautifulSoup
 
-from .base import BaseBlogScraper, BlogEntry, BlogGoneError, MemberInfo
+from .base import (
+    BaseBlogScraper,
+    BlogEntry,
+    BlogGoneError,
+    MemberInfo,
+    parse_jp_birthday,
+)
 from .config import (
     DETAIL_DELAY,
     FULL_CONTENT_PAGE_DELAY,
@@ -21,6 +28,29 @@ from .config import (
 )
 
 logger = structlog.get_logger(__name__)
+
+LABEL_TAGS = "td"
+VALUE_TAGS = "td"
+
+
+def parse_birthday_from_profile(html: str) -> str | None:
+    """Extract the birthday from an artist profile page.
+
+    Finds the cell labelled ``生年月日`` and parses the following sibling.
+
+    Args:
+        html: Artist profile page HTML.
+
+    Returns:
+        ``"YYYY-MM-DD"`` or ``None`` when absent or unparsable.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for label in soup.find_all(LABEL_TAGS):
+        if label.get_text(strip=True) == "生年月日":
+            value = label.find_next_sibling(VALUE_TAGS)
+            if value is not None:
+                return parse_jp_birthday(value.get_text(strip=True))
+    return None
 
 
 class HinatazakaBlogScraper(BaseBlogScraper):
@@ -95,6 +125,17 @@ class HinatazakaBlogScraper(BaseBlogScraper):
 
         Returns:
             List of MemberInfo objects with id, name, and thumbnail_url.
+            Names are the raw link text (kanji name immediately followed by
+            the kana reading); cached by consumers, so left unchanged.
+        """
+        return await self._scrape_members(artist_page_only=False)
+
+    async def _scrape_members(self, *, artist_page_only: bool) -> list[MemberInfo]:
+        """Scrape members; ``artist_page_only`` yields clean names and no mascots.
+
+        With ``artist_page_only`` the name is read from the ``.c-member__name``
+        element only (excluding ``.c-member__kana``) and the diary page, which
+        lists non-member accounts such as ポカ, is not scraped.
         """
         members: list[MemberInfo] = []
         seen_ids: set[str] = set()
@@ -136,6 +177,9 @@ class HinatazakaBlogScraper(BaseBlogScraper):
 
                     # Get member name from link text or nearby elements
                     name = link.get_text(strip=True)
+                    if artist_page_only:
+                        name_elem = link.select_one(".c-member__name")
+                        name = name_elem.get_text(strip=True) if name_elem else name
                     if not name or name.isspace():
                         # Try to find name in parent or sibling elements
                         parent = link.find_parent("li") or link.find_parent("div")
@@ -160,6 +204,9 @@ class HinatazakaBlogScraper(BaseBlogScraper):
                     status=resp.status,
                     url=artist_url,
                 )
+
+        if artist_page_only:
+            return members
 
         # Also scrape the diary member page to catch mascots like ポカ
         diary_url = f"{self.base_url}/s/official/diary/member"
@@ -219,6 +266,29 @@ class HinatazakaBlogScraper(BaseBlogScraper):
             count=len(members),
         )
         return members
+
+    async def get_member_birthdays(self) -> dict[str, str]:
+        """Fetch member birthdays from the artist profile pages.
+
+        Returns:
+            Mapping of member display name to ``"YYYY-MM-DD"``; members whose
+            profile has no parsable birthday are omitted.
+        """
+        try:
+            # Artist page only: clean names, and no diary-only accounts (ポカ)
+            # that have no /artist/{id} profile.
+            members = await self._scrape_members(artist_page_only=True)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning("birthdays_unavailable", error_type=type(e).__name__)
+            return {}
+        if not members:
+            logger.warning("birthdays_unavailable", status=None)
+            return {}
+        return await self._collect_profile_birthdays(
+            members,
+            lambda member_id: f"{self.base_url}/s/official/artist/{member_id}",
+            parse_birthday_from_profile,
+        )
 
     async def get_blogs_metadata(
         self,
