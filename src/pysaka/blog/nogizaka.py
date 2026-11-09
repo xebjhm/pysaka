@@ -11,7 +11,13 @@ from typing import Any
 import structlog
 from bs4 import BeautifulSoup
 
-from .base import BaseBlogScraper, BlogEntry, BlogGoneError, MemberInfo
+from .base import (
+    BaseBlogScraper,
+    BlogEntry,
+    BlogGoneError,
+    MemberInfo,
+    parse_jp_birthday,
+)
 from .config import (
     FULL_CONTENT_PAGE_DELAY,
     MAX_PAGES_SAFETY_CAP,
@@ -48,6 +54,31 @@ def parse_jsonp(text: str, callback: str = "res") -> dict[str, Any]:
         raise ValueError("Invalid JSONP format: missing closing parenthesis")
     json_str = text[len(prefix) : -1]
     result: dict[str, Any] = json.loads(json_str)
+    return result
+
+
+def birthdays_from_member_json(data: dict[str, Any]) -> dict[str, str]:
+    """Map member name to ``YYYY-MM-DD`` from the member list JSON.
+
+    Reads each ``data["data"]`` entry's ``name`` and ``birthday`` (the key may
+    be absent). Group accounts (codes 46 / 10001) are skipped.
+
+    Args:
+        data: Parsed member list payload.
+
+    Returns:
+        Mapping of member name to ISO birthday; unparsable entries omitted.
+    """
+    result: dict[str, str] = {}
+    for member in data.get("data", []):
+        if not isinstance(member, dict):
+            continue
+        if member.get("code") in ("46", "10001"):
+            continue
+        name = member.get("name")
+        birthday = parse_jp_birthday(str(member.get("birthday") or ""))
+        if name and birthday:
+            result[name] = birthday
     return result
 
 
@@ -153,6 +184,28 @@ class NogizakaBlogScraper(BaseBlogScraper):
                     error=str(e),
                 )
                 return []
+
+    async def get_member_birthdays(self) -> dict[str, str]:
+        """Fetch member birthdays from the member list JSON API.
+
+        Returns:
+            Mapping of member name to ``"YYYY-MM-DD"``. Empty when the API does
+            not answer 200 (it has been seen answering 202 with no body) or the
+            payload cannot be parsed.
+        """
+        url = f"{self.base_url}/s/n46/api/list/member"
+        async with self.session.get(url, params={"callback": "res"}) as resp:
+            if resp.status != 200:
+                logger.warning("birthdays_unavailable", status=resp.status)
+                return {}
+            text = await resp.text()
+        try:
+            birthdays = birthdays_from_member_json(parse_jsonp(text))
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.warning("birthdays_unavailable", status=200, error_type=type(e).__name__)
+            return {}
+        logger.info("birthdays_fetched", count=len(birthdays))
+        return birthdays
 
     async def get_blogs_metadata(
         self,

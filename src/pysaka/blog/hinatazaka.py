@@ -10,7 +10,13 @@ from datetime import datetime
 import structlog
 from bs4 import BeautifulSoup
 
-from .base import BaseBlogScraper, BlogEntry, BlogGoneError, MemberInfo
+from .base import (
+    BaseBlogScraper,
+    BlogEntry,
+    BlogGoneError,
+    MemberInfo,
+    parse_jp_birthday,
+)
 from .config import (
     DETAIL_DELAY,
     FULL_CONTENT_PAGE_DELAY,
@@ -21,6 +27,29 @@ from .config import (
 )
 
 logger = structlog.get_logger(__name__)
+
+LABEL_TAGS = "td"
+VALUE_TAGS = "td"
+
+
+def parse_birthday_from_profile(html: str) -> str | None:
+    """Extract the birthday from an artist profile page.
+
+    Finds the cell labelled ``生年月日`` and parses the following sibling.
+
+    Args:
+        html: Artist profile page HTML.
+
+    Returns:
+        ``"YYYY-MM-DD"`` or ``None`` when absent or unparsable.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for label in soup.find_all(LABEL_TAGS):
+        if label.get_text(strip=True) == "生年月日":
+            value = label.find_next_sibling(VALUE_TAGS)
+            if value is not None:
+                return parse_jp_birthday(value.get_text(strip=True))
+    return None
 
 
 class HinatazakaBlogScraper(BaseBlogScraper):
@@ -219,6 +248,23 @@ class HinatazakaBlogScraper(BaseBlogScraper):
             count=len(members),
         )
         return members
+
+    async def get_member_birthdays(self) -> dict[str, str]:
+        """Fetch member birthdays from the artist profile pages.
+
+        Returns:
+            Mapping of member display name to ``"YYYY-MM-DD"``; members whose
+            profile has no parsable birthday are omitted.
+        """
+        members = await self.get_members_with_thumbnails()
+        if not members:
+            logger.warning("birthdays_unavailable", status=None)
+            return {}
+        return await self._collect_profile_birthdays(
+            members,
+            lambda member_id: f"{self.base_url}/s/official/artist/{member_id}",
+            parse_birthday_from_profile,
+        )
 
     async def get_blogs_metadata(
         self,
