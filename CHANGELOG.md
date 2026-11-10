@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-11-10
+
 ### Added
 - `SyncManager.backfill_past_messages(..., media_queue=None)` and
   `SyncManager.sync_letters(..., media_queue=None)` can defer their media.
@@ -513,7 +515,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Secure credential storage via system keyring
 - Token refresh without storing plaintext credentials
 
-[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.7...HEAD
+[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.8...HEAD
+[0.4.8]: https://github.com/xebjhm/pysaka/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/xebjhm/pysaka/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/xebjhm/pysaka/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/xebjhm/pysaka/compare/v0.4.4...v0.4.5
