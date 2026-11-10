@@ -120,6 +120,12 @@ class SyncManager:
         self.sync_state: dict[str, dict[str, Any]] = {}
         # member id -> /members/{id} result for this manager's lifetime (None = unknown)
         self._member_cache: dict[int, Optional[dict[str, Any]]] = {}
+        # sync_state key -> deferred completion waiting for finalize_deferred_media:
+        # backfill (queued paths, every past message normalized) and letters
+        # (missing card paths, newest fetched updated_at). Memory only: a run that
+        # never finalizes leaves the flags and cursors unset.
+        self._pending_backfill: dict[str, tuple[list[Path], bool]] = {}
+        self._pending_letters: dict[str, tuple[list[Path], str]] = {}
         self.load_sync_state()
 
     def load_sync_state(self) -> None:
@@ -856,15 +862,20 @@ class SyncManager:
         return None
 
     async def backfill_past_messages(
-        self, session: aiohttp.ClientSession, group: dict[str, Any], member: dict[str, Any]
+        self,
+        session: aiohttp.ClientSession,
+        group: dict[str, Any],
+        member: dict[str, Any],
+        media_queue: Optional[list[dict[str, Any]]] = None,
     ) -> int:
         """Merge the room's pre-subscription messages into the member's archive.
 
         Runs once per member: once ``past_backfilled_at`` is set in the member's
         sync_state entry, later calls return immediately. Requires a prior
         successful :meth:`sync_member` (no entry or no ``messages.json`` →
-        skipped). Downloads its own media, because Verify & Fix takes fresh URLs
-        from the timeline, which never contains these messages. The flag is set
+        skipped). Fetches its own media (or queues it for the caller, see
+        *Deferred media*), because Verify & Fix takes fresh URLs from the
+        timeline, which never contains these messages. The flag is set
         only when the request succeeded, no past message failed to normalize and
         every queued file is on disk; otherwise it stays unset and later calls
         retry (merging is idempotent). Cursor fields are never touched and
@@ -872,6 +883,23 @@ class SyncManager:
 
         Returns 0 for member 0 (the room author), which has no own timeline or
         letters.
+
+        Deferred media: with ``media_queue`` (a list), the media items are
+        appended to it in the :meth:`sync_member` item format instead of being
+        downloaded here, so the caller fetches them with the rest of its queue
+        (and merges their dimensions as usual). The flag is then not set by
+        this call: :meth:`finalize_deferred_media`, called after the caller's
+        downloads, sets it under the same rule. When nothing had to be queued,
+        the usual rule applies here at once (the flag is set unless a past
+        message failed to normalize). Call it at most once per member before
+        finalizing: a second call queues the same files again. With ``None``
+        (the default) the media is downloaded here, as before.
+
+        Args:
+            session: Active aiohttp session.
+            group: Group dict (``id``, ``name``).
+            member: Member dict (``id``, ``name``).
+            media_queue: Optional caller queue for deferred media downloads.
 
         Returns:
             Number of messages that were not in the archive before.
@@ -951,6 +979,21 @@ class SyncManager:
                 return 0
             self.update_total_messages(gid, mid, total)
 
+        if media_queue is not None and queue:
+            # Deferred: the caller downloads these with its own queue, then
+            # finalize_deferred_media applies the completion rule below.
+            media_queue.extend(queue)
+            self._pending_backfill[key] = ([item["path"] for item in queue], earliest_failed_ts is None)
+            logger.info(
+                "Past messages backfilled",
+                group_id=gid,
+                member_id=mid,
+                added=added,
+                complete=False,
+                deferred=len(queue),
+            )
+            return added
+
         metadata = await self.process_media_queue(session, queue)
         if metadata.get(member_dir):
             await self.update_message_metadata(messages_file, metadata[member_dir])
@@ -993,7 +1036,13 @@ class SyncManager:
                 return True
             return False
 
-    async def sync_letters(self, session: aiohttp.ClientSession, group: dict[str, Any], member: dict[str, Any]) -> int:
+    async def sync_letters(
+        self,
+        session: aiohttp.ClientSession,
+        group: dict[str, Any],
+        member: dict[str, Any],
+        media_queue: Optional[list[dict[str, Any]]] = None,
+    ) -> int:
         """Archive the account's sent letters to this member.
 
         Stores ``<member_dir>/letters.json`` (``client_token`` is never stored) and
@@ -1021,6 +1070,18 @@ class SyncManager:
         letters.
         Works for expired subscriptions (the server still returns their letters).
         Never touches the message cursor and never fires ``on_new_messages``.
+        Deferred images: with ``media_queue`` (a list), each card image not yet
+        on disk is appended to it as ``{"url", "path", "timestamp": None,
+        "media_type": "picture", "kind": "letter"}`` (no ``member_dir``, so
+        :meth:`process_media_queue` returns no metadata for it and nothing
+        reaches ``messages.json``) instead of being downloaded here. After a
+        complete fetch whose images are not all on disk yet, the cursor move
+        waits for :meth:`finalize_deferred_media`; with every image already
+        present it moves at once. Call it at most once per member before
+        finalizing. With ``None`` (the default) the images are downloaded here,
+        as before. The log line ``Letters synced`` says what happened to the
+        cursor: ``advanced``, ``unchanged``, ``held`` (an image is missing),
+        ``deferred`` or ``incomplete`` (the fetch was incomplete).
         ``letters.json`` is written only when its content changes or it is
         created. Before that write (and only when there is something to write),
         a room folder left under an old room name and a member folder left under
@@ -1164,20 +1225,117 @@ class SyncManager:
             if not wrote:
                 return 0
 
-            for url, path in downloads:
-                await self.client.download_file(session, url, path)
+            if media_queue is None:
+                for url, path in downloads:
+                    await self.client.download_file(session, url, path)
+            else:
+                # Deferred: no member_dir (and no message_id), so process_media_queue
+                # returns no metadata for letter cards and nothing reaches messages.json.
+                deferred = [
+                    {"url": url, "path": path, "timestamp": None, "media_type": "picture", "kind": "letter"}
+                    for url, path in downloads
+                    if not media_file_is_present(path)
+                ]
+                media_queue.extend(deferred)
 
-        if complete and all(media_file_is_present(path) for _, path in downloads):
+        missing = [path for _, path in downloads if not media_file_is_present(path)]
+        cursor = "incomplete"
+        if complete:
             # Over everything fetched, not just this member's rows: other members' letters
             # in the same group are not ours, so there is nothing to re-fetch for them.
             newest = max((self._timestamp_text(item.get("updated_at")) for item in fetched.values()), default="")
+            if not missing:
+                cursor = "advanced" if self._advance_letters_cursor(key, newest) else "unchanged"
+            elif media_queue is not None:
+                self._pending_letters[key] = (missing, newest)
+                cursor = "deferred"
+            else:
+                cursor = "held"
+        logger.info(
+            "Letters synced",
+            group_id=gid,
+            member_id=mid,
+            added=added,
+            complete=complete,
+            cursor=cursor,
+            missing=len(missing),
+        )
+        return added
+
+    def _advance_letters_cursor(self, key: str, newest: str) -> bool:
+        """Move ``letters_updated_at`` forward to ``newest`` (never back). True when saved."""
+        entry = dict(self.sync_state.get(key) or {})
+        if newest and newest > self._timestamp_text(entry.get("letters_updated_at")):
+            entry["letters_updated_at"] = newest
+            self.sync_state[key] = entry
+            self.save_sync_state()
+            return True
+        return False
+
+    def finalize_deferred_media(self) -> dict[str, Any]:
+        """Complete the backfills and letter syncs whose media was deferred.
+
+        Call after downloading the items that :meth:`backfill_past_messages`
+        and :meth:`sync_letters` appended to a caller ``media_queue``. For each
+        pending backfill, ``past_backfilled_at`` is set when every past message
+        normalized, its sync_state entry still exists and every queued file is
+        on disk. For each pending letter sync whose card images are all on disk,
+        ``letters_updated_at`` moves forward (never back) to the newest fetched
+        ``updated_at``. ``sync_state`` is saved once if anything changed, and
+        the pending set is cleared either way, so an entry that could not
+        complete is retried by the next sync (merging is idempotent); a backfill
+        whose sync_state entry is gone is not retried (backfill needs that
+        entry). Each incomplete entry is logged (``Deferred media left
+        pending`` with its state key, kind, reason and missing-file count).
+        Pending entries are kept in memory only: a run that never calls this
+        leaves the flags and cursors unset.
+
+        Returns:
+            ``{"backfill_marked": n, "letters_marked": n, "still_pending": n,
+            "saved": bool}``. ``letters_marked`` counts letter syncs whose
+            images are all on disk (the cursor is written only when newer);
+            ``still_pending`` counts entries left incomplete; ``saved`` is
+            False only when a needed ``sync_state`` write failed (the new
+            values then stay in memory for this run only).
+        """
+        report: dict[str, Any] = {"backfill_marked": 0, "letters_marked": 0, "still_pending": 0}
+        changed = False
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def left_pending(key: str, kind: str, reason: str, missing: int) -> None:
+            report["still_pending"] += 1
+            logger.info("Deferred media left pending", state_key=key, kind=kind, reason=reason, missing=missing)
+
+        for key, (paths, normalized) in self._pending_backfill.items():
+            missing = sum(1 for p in paths if not media_file_is_present(p))
+            if not normalized:
+                left_pending(key, "backfill", "not_normalized", missing)
+            elif key not in self.sync_state:
+                left_pending(key, "backfill", "no_state", missing)
+            elif missing:
+                left_pending(key, "backfill", "media_missing", missing)
+            else:
+                self.sync_state[key]["past_backfilled_at"] = stamp
+                report["backfill_marked"] += 1
+                changed = True
+        for key, (paths, newest) in self._pending_letters.items():
+            missing = sum(1 for p in paths if not media_file_is_present(p))
+            if missing:
+                left_pending(key, "letters", "media_missing", missing)
+                continue
             entry = dict(self.sync_state.get(key) or {})
             if newest and newest > self._timestamp_text(entry.get("letters_updated_at")):
                 entry["letters_updated_at"] = newest
                 self.sync_state[key] = entry
-                self.save_sync_state()
-        logger.info("Letters synced", group_id=gid, member_id=mid, added=added, complete=complete)
-        return added
+                changed = True
+            report["letters_marked"] += 1
+        self._pending_backfill.clear()
+        self._pending_letters.clear()
+        report["saved"] = self.save_sync_state() if changed else True
+        if not report["saved"]:
+            logger.warning("Deferred media finalize could not save sync_state")
+        logger.info("Deferred media finalized", **report)
+        return report
 
     async def archive_profile_images(
         self,
@@ -1879,6 +2037,7 @@ class SyncManager:
         queue: list[dict[str, Any]],
         concurrency: int = 5,
         progress_callback: Optional[Any] = None,
+        item_callback: Optional[Any] = None,
     ) -> dict[Path, dict[int, dict[str, Any]]]:
         """
         Downloads files in the queue.
@@ -1892,7 +2051,15 @@ class SyncManager:
             session: Active aiohttp session (or PooledSession wrapper).
             queue: List of media items to download.
             concurrency: Deprecated — kept for backward compatibility.
-            progress_callback: Optional callback.
+            progress_callback: Optional ``(completed, total)`` callback (sync or
+                async), called after each successful download; ``completed``
+                counts successes only.
+            item_callback: Optional ``(ok)`` callback (sync or async), called
+                once per item after its download attempt, success (``True``) or
+                failure (``False``), so a caller can count processed items.
+
+        A callback that raises is logged (``Media queue callback failed``, with
+        the callback name and error type) and never stops the downloads.
 
         Returns:
             Dict mapping member_dir to {message_id: metadata_dict} for downloaded media.
@@ -1900,6 +2067,17 @@ class SyncManager:
         """
         if not queue:
             return {}
+
+        async def _call_safely(callback: Any, name: str, *args: Any) -> None:
+            # A caller's callback must never abort the queue (and lose the
+            # metadata of files already downloaded).
+            try:
+                if asyncio.iscoroutinefunction(callback):
+                    await callback(*args)
+                else:
+                    callback(*args)
+            except Exception as e:
+                logger.warning("Media queue callback failed", callback=name, error_type=type(e).__name__)
 
         # Concurrency is managed by the caller's PooledSession / AdaptivePool.
         # No local semaphore needed — each HTTP request in download_file
@@ -1940,10 +2118,9 @@ class SyncManager:
 
                 completed += 1
                 if progress_callback:
-                    if asyncio.iscoroutinefunction(progress_callback):
-                        await progress_callback(completed, total)
-                    else:
-                        progress_callback(completed, total)
+                    await _call_safely(progress_callback, "progress", completed, total)
+            if item_callback:
+                await _call_safely(item_callback, "item", bool(res))
 
         await asyncio.gather(*[worker(item) for item in queue])
         return metadata_by_dir
