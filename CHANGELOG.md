@@ -11,24 +11,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SyncManager.backfill_past_messages(..., media_queue=None)` and
   `SyncManager.sync_letters(..., media_queue=None)` can defer their media.
   Before, both always downloaded media inline (pre-subscription message media,
-  letter-card images), so a caller's "metadata" step also wrote media one file
-  at a time. With a list, the items are appended to it instead: backfill items
-  use the `sync_member` item format; letter items are
+  letter-card images), outside the caller's media queue and progress count.
+  With a list, the items are appended to it instead: backfill items use the
+  `sync_member` item format; letter items are
   `{"url", "path", "timestamp": None, "media_type": "picture", "kind": "letter"}`
-  with no `member_dir`, so `process_media_queue` never writes their dimensions
-  into `messages.json`. The `past_backfilled_at` flag and the
-  `letters_updated_at` cursor then wait for `finalize_deferred_media()`, unless
-  nothing had to be queued. The default `None` keeps today's inline behavior.
+  with no `member_dir`, so `process_media_queue` returns no metadata for them.
+  The `past_backfilled_at` flag and the `letters_updated_at` cursor then wait
+  for `finalize_deferred_media()`; when nothing had to be queued, the usual
+  rules apply at once, as inline. Call each at most once per member before
+  finalizing. The default `None` keeps the previous inline behavior.
 - `SyncManager.finalize_deferred_media()` applies the usual completion rules to
   the deferred backfills and letter syncs once the caller has downloaded the
-  queued files, saves `sync_state` once, clears the pending set, and returns
-  `{"backfill_marked", "letters_marked", "still_pending"}`. Pending entries live
-  in memory only, so a run that never calls it leaves the flags unset and the
-  next sync retries.
+  queued files (the letters cursor only moves forward), saves `sync_state` once
+  if anything changed, clears the pending set, logs each entry it leaves
+  incomplete with the reason, and returns
+  `{"backfill_marked", "letters_marked", "still_pending", "saved"}`. Pending
+  entries live in memory only, so a run that never calls it leaves the flags
+  unset and the next sync retries.
 - `SyncManager.process_media_queue(..., item_callback=None)`: an `(ok: bool)`
   callback (sync or async) called once per item, for failures too, so a caller
-  can count processed files. `progress_callback` is unchanged and still counts
-  successes only.
+  can count processed files. `progress_callback` still counts successes only.
+
+### Changed
+- `SyncManager.process_media_queue`: a `progress_callback` (or the new
+  `item_callback`) that raises is now logged and no longer aborts the queue.
+  Before, the exception escaped and the metadata of files already downloaded
+  was lost.
+- The `Letters synced` log line now carries `cursor` (`advanced`, `unchanged`,
+  `held`, `deferred` or `incomplete`) and `missing` instead of only `complete`.
 
 ## [0.4.7] - 2026-11-10
 

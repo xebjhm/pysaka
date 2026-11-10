@@ -1,7 +1,7 @@
 """Deferred backfill / letter media (``media_queue`` + ``finalize_deferred_media``)."""
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -93,12 +93,17 @@ async def test_backfill_with_queue_downloads_nothing_and_defers_flag(manager, ti
     await _download_all(manager, queue)
     report = manager.finalize_deferred_media()
 
-    assert report == {"backfill_marked": 1, "letters_marked": 0, "still_pending": 0}
+    assert report == {"backfill_marked": 1, "letters_marked": 0, "still_pending": 0, "saved": True}
     assert manager.sync_state["79_134"]["past_backfilled_at"] == NOW
     on_disk = json.loads((manager.state_file).read_text(encoding="utf-8"))
     assert on_disk["79_134"]["past_backfilled_at"] == NOW
     # Pending set is cleared: a second finalize does nothing.
-    assert manager.finalize_deferred_media() == {"backfill_marked": 0, "letters_marked": 0, "still_pending": 0}
+    assert manager.finalize_deferred_media() == {
+        "backfill_marked": 0,
+        "letters_marked": 0,
+        "still_pending": 0,
+        "saved": True,
+    }
 
 
 async def test_backfill_deferred_missing_file_stays_unflagged(manager):
@@ -111,7 +116,7 @@ async def test_backfill_deferred_missing_file_stays_unflagged(manager):
 
     report = manager.finalize_deferred_media()  # never downloaded
 
-    assert report == {"backfill_marked": 0, "letters_marked": 0, "still_pending": 1}
+    assert report == {"backfill_marked": 0, "letters_marked": 0, "still_pending": 1, "saved": True}
     assert "past_backfilled_at" not in manager.sync_state["79_134"]
     # Next sync retries the backfill (flag unset).
     manager.client.get_past_messages.reset_mock()
@@ -148,7 +153,12 @@ async def test_backfill_deferred_normalize_failure_never_flags(manager, monkeypa
     await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER, media_queue=queue)
     await _download_all(manager, queue)
 
-    assert manager.finalize_deferred_media() == {"backfill_marked": 0, "letters_marked": 0, "still_pending": 1}
+    assert manager.finalize_deferred_media() == {
+        "backfill_marked": 0,
+        "letters_marked": 0,
+        "still_pending": 1,
+        "saved": True,
+    }
     assert "past_backfilled_at" not in manager.sync_state["79_134"]
 
 
@@ -192,7 +202,7 @@ async def test_letters_with_queue_defer_images_and_cursor(manager):
     await _download_all(manager, queue)
     report = manager.finalize_deferred_media()
 
-    assert report == {"backfill_marked": 0, "letters_marked": 1, "still_pending": 0}
+    assert report == {"backfill_marked": 0, "letters_marked": 1, "still_pending": 0, "saved": True}
     assert manager.sync_state["79_134"]["letters_updated_at"] == "2026-01-01T00:03:00Z"
 
 
@@ -202,7 +212,12 @@ async def test_letters_deferred_failed_image_holds_cursor(manager):
     await manager.sync_letters(AsyncMock(), GROUP, MEMBER, media_queue=queue)
     await _download_all(manager, queue)  # the "fail" URL writes nothing
 
-    assert manager.finalize_deferred_media() == {"backfill_marked": 0, "letters_marked": 0, "still_pending": 1}
+    assert manager.finalize_deferred_media() == {
+        "backfill_marked": 0,
+        "letters_marked": 0,
+        "still_pending": 1,
+        "saved": True,
+    }
     assert "letters_updated_at" not in (manager.sync_state.get("79_134") or {})
 
 
@@ -229,7 +244,12 @@ async def test_letters_deferred_incomplete_fetch_records_nothing(manager, monkey
     await _download_all(manager, queue)
 
     assert len(queue) == 1  # the image is still fetched
-    assert manager.finalize_deferred_media() == {"backfill_marked": 0, "letters_marked": 0, "still_pending": 0}
+    assert manager.finalize_deferred_media() == {
+        "backfill_marked": 0,
+        "letters_marked": 0,
+        "still_pending": 0,
+        "saved": True,
+    }
     assert "letters_updated_at" not in (manager.sync_state.get("79_134") or {})
 
 
@@ -265,4 +285,190 @@ async def test_item_callback_reports_failures_progress_counts_successes(manager,
 
 
 async def test_finalize_with_nothing_pending(manager):
-    assert manager.finalize_deferred_media() == {"backfill_marked": 0, "letters_marked": 0, "still_pending": 0}
+    assert manager.finalize_deferred_media() == {
+        "backfill_marked": 0,
+        "letters_marked": 0,
+        "still_pending": 0,
+        "saved": True,
+    }
+
+
+# --- review follow-ups (release v0.4.8) --------------------------------------
+
+
+async def test_finalize_never_moves_the_letters_cursor_back_and_skips_the_save(manager):
+    manager.client.get_letters.return_value = [_letter(1, "2026-01-01T00:01:00Z")]
+    queue: list = []
+    await manager.sync_letters(AsyncMock(), GROUP, MEMBER, media_queue=queue)
+    await _download_all(manager, queue)
+    manager.sync_state.setdefault("79_134", {})["letters_updated_at"] = "2026-05-01T00:00:00Z"
+    manager.save_sync_state = MagicMock(return_value=True)
+
+    report = manager.finalize_deferred_media()
+
+    assert report == {"backfill_marked": 0, "letters_marked": 1, "still_pending": 0, "saved": True}
+    assert manager.sync_state["79_134"]["letters_updated_at"] == "2026-05-01T00:00:00Z"
+    manager.save_sync_state.assert_not_called()
+
+
+async def test_finalize_backfill_without_state_entry_stays_pending(manager):
+    from structlog.testing import capture_logs
+
+    await _first_sync(manager)
+    manager.client.get_past_messages.return_value = [
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/p.jpg"),
+    ]
+    queue: list = []
+    await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER, media_queue=queue)
+    await _download_all(manager, queue)
+    del manager.sync_state["79_134"]
+
+    with capture_logs() as logs:
+        report = manager.finalize_deferred_media()
+
+    assert report["still_pending"] == 1 and report["backfill_marked"] == 0
+    (entry,) = [e for e in logs if e["event"] == "Deferred media left pending"]
+    assert entry == {
+        "event": "Deferred media left pending",
+        "log_level": "info",
+        "state_key": "79_134",
+        "kind": "backfill",
+        "reason": "no_state",
+        "missing": 0,
+    }
+
+
+async def test_partial_download_keeps_the_entry_pending_with_its_reason(manager):
+    from structlog.testing import capture_logs
+
+    await _first_sync(manager)
+    manager.client.get_past_messages.return_value = [
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/ok/a.jpg"),
+        _m(402, "2026-06-14T13:41:00Z", type="picture", file="https://cdn/fail/b.jpg"),
+    ]
+    queue: list = []
+    await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER, media_queue=queue)
+    assert len(queue) == 2
+    await _download_all(manager, queue)  # the "fail" one writes nothing
+
+    with capture_logs() as logs:
+        report = manager.finalize_deferred_media()
+
+    assert report["still_pending"] == 1
+    assert "past_backfilled_at" not in manager.sync_state["79_134"]
+    (entry,) = [e for e in logs if e["event"] == "Deferred media left pending"]
+    assert (entry["reason"], entry["missing"]) == ("media_missing", 1)
+
+
+async def test_mixed_queue_through_the_real_process_media_queue(manager):
+    member_dir = await _first_sync(manager)
+    manager.client.get_past_messages.return_value = [
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/p.jpg"),
+    ]
+    manager.client.get_letters.return_value = [_letter(1, "2026-01-01T00:01:00Z")]
+    queue: list = []
+    await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER, media_queue=queue)
+    await manager.sync_letters(AsyncMock(), GROUP, MEMBER, media_queue=queue)
+    assert len(queue) == 2
+
+    import pysaka.manager as mgr
+
+    with patch.object(mgr, "get_media_dimensions", return_value=(640, 480)):
+        metadata = await manager.process_media_queue(AsyncMock(), queue)
+
+    # Only the backfill item yields metadata, keyed for update_message_metadata.
+    assert metadata == {member_dir: {401: {"width": 640, "height": 480}}}
+    report = manager.finalize_deferred_media()
+    assert report == {"backfill_marked": 1, "letters_marked": 1, "still_pending": 0, "saved": True}
+    on_disk = json.loads(manager.state_file.read_text(encoding="utf-8"))["79_134"]
+    assert "past_backfilled_at" in on_disk
+    assert on_disk["letters_updated_at"] == "2026-01-01T00:01:00Z"
+
+
+async def test_failed_deferred_letter_is_requeued_and_completes_on_retry(manager):
+    manager.client.get_letters.return_value = [_letter(1, "2026-01-01T00:01:00Z", url="fail")]
+    first: list = []
+    await manager.sync_letters(AsyncMock(), GROUP, MEMBER, media_queue=first)
+    await _download_all(manager, first)
+    assert manager.finalize_deferred_media()["still_pending"] == 1
+
+    manager.client.get_letters.reset_mock()
+    manager.client.get_letters.return_value = [_letter(1, "2026-01-01T00:01:00Z", url="ok")]
+    second: list = []
+    await manager.sync_letters(AsyncMock(), GROUP, MEMBER, media_queue=second)
+
+    assert len(second) == 1  # the image is queued again with a fresh URL
+    assert manager.client.get_letters.await_args.kwargs["updated_from"] is None  # cursor was held
+    await _download_all(manager, second)
+    assert manager.finalize_deferred_media()["letters_marked"] == 1
+    assert manager.sync_state["79_134"]["letters_updated_at"] == "2026-01-01T00:01:00Z"
+
+
+async def test_letters_write_failure_with_queue_leaves_nothing_pending(manager, monkeypatch):
+    monkeypatch.setattr(manager, "_locked_update", lambda path, mutate: (False, 0))
+    manager.client.get_letters.return_value = [_letter(1, "2026-01-01T00:01:00Z")]
+    queue: list = []
+
+    assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER, media_queue=queue) == 0
+
+    assert queue == []
+    assert manager.finalize_deferred_media() == {
+        "backfill_marked": 0,
+        "letters_marked": 0,
+        "still_pending": 0,
+        "saved": True,
+    }
+
+
+async def test_finalize_reports_a_failed_save(manager):
+    await _first_sync(manager)
+    manager.client.get_past_messages.return_value = [
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/p.jpg"),
+    ]
+    queue: list = []
+    await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER, media_queue=queue)
+    await _download_all(manager, queue)
+    manager.save_sync_state = MagicMock(return_value=False)
+
+    report = manager.finalize_deferred_media()
+
+    assert report["backfill_marked"] == 1 and report["saved"] is False
+
+
+@pytest.mark.parametrize("which", ["progress", "item"])
+async def test_a_raising_callback_never_stops_the_queue(manager, tmp_path, which):
+    from structlog.testing import capture_logs
+
+    queue = [
+        {"url": f"https://cdn/ok/{i}.jpg", "path": tmp_path / f"{i}.jpg", "timestamp": None, "message_id": i}
+        for i in range(3)
+    ]
+
+    def boom(*args):
+        raise RuntimeError("callback bug")
+
+    kwargs = {"progress_callback": boom} if which == "progress" else {"item_callback": boom}
+    with capture_logs() as logs:
+        await manager.process_media_queue(AsyncMock(), queue, **kwargs)
+
+    assert all(item["path"].exists() for item in queue)
+    failures = [e for e in logs if e["event"] == "Media queue callback failed"]
+    assert len(failures) == 3 and failures[0]["callback"] == which
+    assert failures[0]["error_type"] == "RuntimeError"
+
+
+@pytest.mark.parametrize(
+    "letters,url,expected",
+    [
+        ([("2026-01-01T00:01:00Z", "ok")], "ok", "advanced"),
+        ([("2026-01-01T00:01:00Z", "fail")], None, "held"),
+    ],
+)
+async def test_letters_log_says_what_happened_to_the_cursor(manager, letters, url, expected):
+    from structlog.testing import capture_logs
+
+    manager.client.get_letters.return_value = [_letter(i + 1, ts, url=u) for i, (ts, u) in enumerate(letters)]
+    with capture_logs() as logs:
+        await manager.sync_letters(AsyncMock(), GROUP, MEMBER)
+    (entry,) = [e for e in logs if e["event"] == "Letters synced"]
+    assert entry["cursor"] == expected
