@@ -287,9 +287,7 @@ class TestClientRefreshToken:
         persisted = {}
         tm = MagicMock()
         tm.save_session = MagicMock(
-            side_effect=lambda group, at, rt, cookies: persisted.update(
-                {"session": dict(cookies).get("session")}
-            )
+            side_effect=lambda group, at, rt, cookies: persisted.update({"session": dict(cookies).get("session")})
         )
         client.token_manager = tm
 

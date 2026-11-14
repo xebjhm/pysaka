@@ -23,7 +23,7 @@ def _letter(i, upd, member_id=134, url="ok"):
         "group_id": 79,
         "member_id": member_id,
         "text": f"手紙 {i}",
-        "file": f"https://cdn/{url}/letters/{i}.jpg" if url else None,
+        "file": f"https://cdn.example.com/{url}/letters/{i}.jpg" if url else None,
         "thumbnail_width": 300,
         "thumbnail_height": 480,
         "is_favorite": False,
@@ -75,7 +75,7 @@ async def test_backfill_with_queue_downloads_nothing_and_defers_flag(manager, ti
     member_dir = await _first_sync(manager)
     manager.client.get_past_messages.return_value = [
         _m(400, "2026-06-14T04:57:00Z"),
-        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/p.jpg"),
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn.example.com/p.jpg"),
     ]
     queue: list = []
 
@@ -109,7 +109,7 @@ async def test_backfill_with_queue_downloads_nothing_and_defers_flag(manager, ti
 async def test_backfill_deferred_missing_file_stays_unflagged(manager):
     await _first_sync(manager)
     manager.client.get_past_messages.return_value = [
-        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/p.jpg"),
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn.example.com/p.jpg"),
     ]
     queue: list = []
     await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER, media_queue=queue)
@@ -140,7 +140,7 @@ async def test_backfill_deferred_without_media_flags_at_once(manager, time_machi
 async def test_backfill_deferred_normalize_failure_never_flags(manager, monkeypatch):
     await _first_sync(manager)
     manager.client.get_past_messages.return_value = [
-        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/p.jpg"),
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn.example.com/p.jpg"),
     ]
     real_prepare = manager.prepare_messages
 
@@ -166,7 +166,7 @@ async def test_backfill_without_queue_keeps_inline_download(manager, time_machin
     time_machine.move_to(NOW)
     member_dir = await _first_sync(manager)
     manager.client.get_past_messages.return_value = [
-        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/p.jpg"),
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn.example.com/p.jpg"),
     ]
 
     await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER)
@@ -259,9 +259,9 @@ async def test_letters_deferred_incomplete_fetch_records_nothing(manager, monkey
 @pytest.mark.parametrize("is_async", [True, False])
 async def test_item_callback_reports_failures_progress_counts_successes(manager, tmp_path, is_async):
     queue = [
-        {"url": "https://cdn/ok/1.jpg", "path": tmp_path / "a.jpg", "timestamp": None, "message_id": 1},
-        {"url": "https://cdn/fail/2.jpg", "path": tmp_path / "b.jpg", "timestamp": None, "message_id": 2},
-        {"url": "https://cdn/ok/3.jpg", "path": tmp_path / "c.jpg", "timestamp": None, "message_id": 3},
+        {"url": "https://cdn.example.com/ok/1.jpg", "path": tmp_path / "a.jpg", "timestamp": None, "message_id": 1},
+        {"url": "https://cdn.example.com/fail/2.jpg", "path": tmp_path / "b.jpg", "timestamp": None, "message_id": 2},
+        {"url": "https://cdn.example.com/ok/3.jpg", "path": tmp_path / "c.jpg", "timestamp": None, "message_id": 3},
     ]
     outcomes: list[bool] = []
     progress: list[int] = []
@@ -316,7 +316,7 @@ async def test_finalize_backfill_without_state_entry_stays_pending(manager):
 
     await _first_sync(manager)
     manager.client.get_past_messages.return_value = [
-        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/p.jpg"),
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn.example.com/p.jpg"),
     ]
     queue: list = []
     await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER, media_queue=queue)
@@ -343,8 +343,8 @@ async def test_partial_download_keeps_the_entry_pending_with_its_reason(manager)
 
     await _first_sync(manager)
     manager.client.get_past_messages.return_value = [
-        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/ok/a.jpg"),
-        _m(402, "2026-06-14T13:41:00Z", type="picture", file="https://cdn/fail/b.jpg"),
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn.example.com/ok/a.jpg"),
+        _m(402, "2026-06-14T13:41:00Z", type="picture", file="https://cdn.example.com/fail/b.jpg"),
     ]
     queue: list = []
     await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER, media_queue=queue)
@@ -363,7 +363,7 @@ async def test_partial_download_keeps_the_entry_pending_with_its_reason(manager)
 async def test_mixed_queue_through_the_real_process_media_queue(manager):
     member_dir = await _first_sync(manager)
     manager.client.get_past_messages.return_value = [
-        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/p.jpg"),
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn.example.com/p.jpg"),
     ]
     manager.client.get_letters.return_value = [_letter(1, "2026-01-01T00:01:00Z")]
     queue: list = []
@@ -423,7 +423,7 @@ async def test_letters_write_failure_with_queue_leaves_nothing_pending(manager, 
 async def test_finalize_reports_a_failed_save(manager):
     await _first_sync(manager)
     manager.client.get_past_messages.return_value = [
-        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/p.jpg"),
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn.example.com/p.jpg"),
     ]
     queue: list = []
     await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER, media_queue=queue)
@@ -440,7 +440,12 @@ async def test_a_raising_callback_never_stops_the_queue(manager, tmp_path, which
     from structlog.testing import capture_logs
 
     queue = [
-        {"url": f"https://cdn/ok/{i}.jpg", "path": tmp_path / f"{i}.jpg", "timestamp": None, "message_id": i}
+        {
+            "url": f"https://cdn.example.com/ok/{i}.jpg",
+            "path": tmp_path / f"{i}.jpg",
+            "timestamp": None,
+            "message_id": i,
+        }
         for i in range(3)
     ]
 

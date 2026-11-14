@@ -699,9 +699,7 @@ class TestSameDaySkipCursor:
         since_date = datetime(2026, 7, 6, 21, 5, tzinfo=JST)
 
         blogs = []
-        async for blog in scraper.get_blogs_metadata(
-            "1", since_date=since_date, max_pages=2, member_name="山崎天"
-        ):
+        async for blog in scraper.get_blogs_metadata("1", since_date=since_date, max_pages=2, member_name="山崎天"):
             blogs.append(blog)
 
         # Both same-day blogs must be yielded (caller dedupes by id); the strict
@@ -733,9 +731,7 @@ class TestSameDaySkipCursor:
         since_date = datetime(2026, 7, 6, 21, 5, tzinfo=JST)
 
         blogs = []
-        async for blog in scraper.get_blogs_metadata(
-            "1", since_date=since_date, max_pages=2, member_name="山崎天"
-        ):
+        async for blog in scraper.get_blogs_metadata("1", since_date=since_date, max_pages=2, member_name="山崎天"):
             blogs.append(blog)
 
         assert blogs == [], "strictly-older-day blog should have been filtered"
@@ -807,9 +803,7 @@ class TestSameDaySkipCursor:
         since_date = datetime(2026, 7, 6, 21, 5, tzinfo=JST)
 
         blogs = []
-        async for blog in scraper.get_blogs_metadata(
-            "1", since_date=since_date, max_pages=2, member_name="山崎天"
-        ):
+        async for blog in scraper.get_blogs_metadata("1", since_date=since_date, max_pages=2, member_name="山崎天"):
             blogs.append(blog)
 
         assert len(blogs) == 1
@@ -857,9 +851,7 @@ class TestMaxPagesSafetyCap:
 
         with capture_logs() as logs:
             blogs = []
-            async for blog in scraper.get_blogs_metadata(
-                "1", max_pages=10_000, member_name="山崎天"
-            ):
+            async for blog in scraper.get_blogs_metadata("1", max_pages=10_000, member_name="山崎天"):
                 blogs.append(blog)
 
         # Stopped at the (monkeypatched) cap of 2 pages, not the natural 10.

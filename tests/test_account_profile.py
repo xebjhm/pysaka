@@ -15,7 +15,7 @@ PROFILE = {
     "birthday": "1990-01-01",
     "sex": "male",
     "subdivision": "TW-TPE",
-    "thumbnail": "https://cdn/users/thumbnails/u-20260101-000000.jpeg?sig=abc",
+    "thumbnail": "https://cdn.example.com/users/thumbnails/u-20260101-000000.jpeg?sig=abc",
     "fc_accounts": [{"organization_id": 1, "account": "secret"}],
     "updated_at": "2026-10-01T00:00:00Z",
 }
@@ -51,7 +51,9 @@ async def test_stores_name_and_avatar_only(manager):
         assert secret not in blob
     assert (account / "profile_images" / "thumbnail" / "u-20260101-000000.jpeg").read_bytes() == b"me"
     index_text = (account / "profile_images" / "index.json").read_text(encoding="utf-8")
-    assert json.loads(index_text)["current"] == {"thumbnail": "https://cdn/users/thumbnails/u-20260101-000000.jpeg"}
+    assert json.loads(index_text)["current"] == {
+        "thumbnail": "https://cdn.example.com/users/thumbnails/u-20260101-000000.jpeg"
+    }
     assert "sig=abc" not in index_text
 
 
@@ -60,7 +62,7 @@ async def test_second_run_skips_and_avatar_change_adds_history(manager):
     assert (await manager.archive_account_profile(AsyncMock()))["skipped"] == 1
     manager.client.get_profile.return_value = {
         **PROFILE,
-        "thumbnail": "https://cdn/users/thumbnails/u-20261101-000000.jpeg",
+        "thumbnail": "https://cdn.example.com/users/thumbnails/u-20261101-000000.jpeg",
     }
     await manager.archive_account_profile(AsyncMock())
     idx = _read(manager.output_dir / "account" / "profile_images" / "index.json")

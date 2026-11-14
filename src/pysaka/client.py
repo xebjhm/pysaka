@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Optional, Union, overload
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import aiofiles
 import aiohttp
@@ -16,7 +16,7 @@ import structlog
 
 from .credentials import get_token_manager
 from .exceptions import ApiError, RateLimitedError, RefreshFailedError, SessionExpiredError
-from .net_policy import as_int_id
+from .net_policy import as_int_id, media_url_refusal, secure_media_url
 from .utils import get_jwt_remaining_seconds, get_media_extension, media_file_is_present
 
 logger = structlog.get_logger()
@@ -1188,6 +1188,45 @@ class Client:
 
         return sorted(all_messages.values(), key=lambda x: x["id"])
 
+    _MEDIA_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+    _MAX_MEDIA_REDIRECTS = 3
+
+    async def _get_media(
+        self, session: aiohttp.ClientSession, url: str
+    ) -> Union[tuple[int, bytes, Optional[str], Optional[str]], str]:
+        """GET ``url``, following up to ``_MAX_MEDIA_REDIRECTS`` redirects by hand.
+
+        Each redirect target must pass :func:`pysaka.net_policy.media_url_refusal`
+        (``http://`` is upgraded). Returns ``(status, body, content_length,
+        content_encoding)`` of the final response (body empty unless the status
+        is 200), or a refusal code: ``redirect_<code>``,
+        ``redirect_without_location`` or ``redirect_limit``. Network errors
+        propagate.
+        """
+        current = url
+        for _ in range(self._MAX_MEDIA_REDIRECTS + 1):
+            async with session.get(current, allow_redirects=False) as resp:
+                if resp.status in self._MEDIA_REDIRECT_STATUSES:
+                    location = resp.headers.get("Location")
+                    if not location:
+                        return "redirect_without_location"
+                    target = urljoin(current, location)
+                    refusal = media_url_refusal(target)
+                    if refusal is not None:
+                        return f"redirect_{refusal}"
+                    current = secure_media_url(target)
+                    continue
+                if resp.status != 200:
+                    return resp.status, b"", None, None
+                data = await resp.read()
+                return (
+                    200,
+                    data,
+                    resp.headers.get("Content-Length"),
+                    resp.headers.get("Content-Encoding"),
+                )
+        return "redirect_limit"
+
     async def download_file(
         self,
         session: aiohttp.ClientSession,
@@ -1208,6 +1247,12 @@ class Client:
         with a short backoff. On ultimate failure leaves NO file behind — a prior
         truncated/0-byte stub is treated as missing and re-downloaded.
 
+        Refuses a URL that :func:`pysaka.net_policy.media_url_refusal` rejects
+        (``Download refused`` with the ``reason``; no request is sent) and fetches
+        ``http://`` URLs as ``https://``. Redirects are followed by hand, at most
+        ``_MAX_MEDIA_REDIRECTS``, each target checked the same way; a refused
+        redirect returns False at once, without retries.
+
         Args:
             session: Active aiohttp ClientSession.
             url: The download URL.
@@ -1224,6 +1269,12 @@ class Client:
         if media_file_is_present(filepath):
             return True
 
+        refusal = media_url_refusal(url)
+        if refusal is not None:
+            logger.warning("Download refused", reason=refusal)
+            return False
+        url = secure_media_url(url)
+
         filepath.parent.mkdir(parents=True, exist_ok=True)
         tmp = filepath.with_name(filepath.name + ".part")
         last_err: Optional[str] = None
@@ -1232,28 +1283,24 @@ class Client:
 
         for attempt in range(retries):
             try:
-                async with session.get(url) as resp:
-                    if resp.status != 200:
-                        last_err, last_err_is_type = f"status {resp.status}", False
-                        logger.warning("Download failed", status=resp.status, url=safe_url)
-                    else:
-                        data = await resp.read()
-                        declared = resp.headers.get("Content-Length")
-                        encoding = resp.headers.get("Content-Encoding")
-                        if not data:
-                            last_err, last_err_is_type = "empty body", False
-                        elif (
-                            encoding is None
-                            and declared is not None
-                            and declared.isdigit()
-                            and int(declared) != len(data)
-                        ):
-                            last_err, last_err_is_type = f"size mismatch got={len(data)} declared={declared}", False
-                        else:
-                            async with aiofiles.open(tmp, "wb") as f:
-                                await f.write(data)
-                            os.replace(tmp, filepath)
-                            return True
+                result = await self._get_media(session, url)
+                if isinstance(result, str):
+                    # A refused redirect is a decision, not a transient error.
+                    logger.warning("Download refused", reason=result)
+                    return False
+                status, data, declared, encoding = result
+                if status != 200:
+                    last_err, last_err_is_type = f"status {status}", False
+                    logger.warning("Download failed", status=status, url=safe_url)
+                elif not data:
+                    last_err, last_err_is_type = "empty body", False
+                elif encoding is None and declared is not None and declared.isdigit() and int(declared) != len(data):
+                    last_err, last_err_is_type = f"size mismatch got={len(data)} declared={declared}", False
+                else:
+                    async with aiofiles.open(tmp, "wb") as f:
+                        await f.write(data)
+                    os.replace(tmp, filepath)
+                    return True
             except Exception as e:  # noqa: BLE001 - transient network errors are retried
                 # str(e) can embed the signed URL, so only the exception type is kept.
                 last_err, last_err_is_type = type(e).__name__, True

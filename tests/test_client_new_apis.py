@@ -402,7 +402,9 @@ class TestRemoveFavorite:
 
 
 async def test_get_member_returns_profile(client, mock_session):
-    client.fetch_json = AsyncMock(return_value={"id": 29, "name": "加藤 史帆", "thumbnail": "https://cdn/t.jpg"})
+    client.fetch_json = AsyncMock(
+        return_value={"id": 29, "name": "加藤 史帆", "thumbnail": "https://cdn.example.com/t.jpg"}
+    )
     member = await client.get_member(mock_session, 29)
     assert member["name"] == "加藤 史帆"
     client.fetch_json.assert_awaited_once_with(mock_session, "/members/29")

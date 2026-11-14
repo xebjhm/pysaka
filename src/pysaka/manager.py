@@ -2040,6 +2040,8 @@ class SyncManager:
             source-removed stub): they cannot be located or verified on disk, so they
             are reported separately rather than silently ignored — otherwise the
             result would claim 'all present' while such media is genuinely absent.
+            A ``media_file`` that is not a string or points outside ``output_dir`` is
+            also listed in ``unresolved`` (no path) and never checked on disk.
 
             ``error`` is ``None`` for a readable manifest. When messages.json cannot
             be used it is set to a stable id so callers can distinguish it from a
@@ -2049,6 +2051,7 @@ class SyncManager:
             object). In every case the zero/empty counts are still returned.
         """
         result: dict[str, Any] = {"checked": 0, "missing": [], "unresolved": [], "error": None}
+        refused = 0
         messages_file = member_dir / "messages.json"
         if not messages_file.exists():
             # An absent manifest is NOT the same as a fully-synced member (which also
@@ -2099,6 +2102,19 @@ class SyncManager:
                     }
                 )
                 continue
+            if not isinstance(media_file, str) or not is_contained(self.output_dir / media_file, self.output_dir):
+                # A stored path that leaves the archive is never checked or re-downloaded
+                # (security audit 2026-11-13: Verify & Fix recreated it). Paths into other
+                # folders of the archive stay "missing", as before (rename tests rely on it).
+                refused += 1
+                result["unresolved"].append(
+                    {
+                        "message_id": msg.get("id"),
+                        "media_type": mtype,
+                        "timestamp": msg.get("timestamp") or msg.get("published_at"),
+                    }
+                )
+                continue
             result["checked"] += 1
             path = self.output_dir / media_file
             present = media_file_is_present(path)
@@ -2111,6 +2127,8 @@ class SyncManager:
                         "timestamp": msg.get("timestamp") or msg.get("published_at"),
                     }
                 )
+        if refused:
+            logger.warning("saka.scan.media_file_refused", count=refused)
         return result
 
     async def process_media_queue(
@@ -2143,6 +2161,10 @@ class SyncManager:
         A callback that raises is logged (``Media queue callback failed``, with
         the callback name and error type) and never stops the downloads.
 
+        Items whose ``path`` is not inside this manager's ``output_dir`` are not
+        downloaded (``item_callback(False)``) and are counted in one
+        ``Media items refused`` warning.
+
         Returns:
             Dict mapping member_dir to {message_id: metadata_dict} for downloaded media.
             metadata_dict contains: width, height, media_duration, is_muted (as applicable).
@@ -2166,12 +2188,20 @@ class SyncManager:
         # acquires a pool slot via the session wrapper.
         total = len(queue)
         completed = 0
+        refused = 0
         # Group metadata by member_dir for efficient batch updates
         metadata_by_dir: dict[Path, dict[int, dict[str, Any]]] = {}
 
         async def worker(item: dict[str, Any]) -> None:
-            nonlocal completed
-            res = await self.client.download_file(session, item["url"], item["path"], item["timestamp"])
+            nonlocal completed, refused
+            raw_path = item.get("path")
+            path = Path(raw_path) if isinstance(raw_path, str) else raw_path
+            if not isinstance(path, Path) or not is_contained(path, self.output_dir):
+                refused += 1
+                if item_callback:
+                    await _call_safely(item_callback, "item", False)
+                return
+            res = await self.client.download_file(session, item["url"], path, item["timestamp"])
             if res:
                 media_type = item.get("media_type", "")
                 member_dir = item.get("member_dir")
@@ -2180,14 +2210,14 @@ class SyncManager:
 
                     # Extract dimensions for pictures and videos
                     if media_type in ("picture", "video"):
-                        width, height = get_media_dimensions(item["path"], media_type)
+                        width, height = get_media_dimensions(path, media_type)
                         if width and height:
                             metadata["width"] = width
                             metadata["height"] = height
 
                     # Extract audio metadata for videos and voice messages
                     if media_type in ("video", "voice"):
-                        audio_meta = get_audio_metadata(item["path"], media_type)
+                        audio_meta = get_audio_metadata(path, media_type)
                         if audio_meta.get("duration") is not None:
                             metadata["media_duration"] = audio_meta["duration"]
                         if audio_meta.get("is_muted") is not None:
@@ -2205,6 +2235,8 @@ class SyncManager:
                 await _call_safely(item_callback, "item", bool(res))
 
         await asyncio.gather(*[worker(item) for item in queue])
+        if refused:
+            logger.warning("Media items refused", reason="outside_output_dir", count=refused)
         return metadata_by_dir
 
     async def update_message_metadata(self, messages_file: Path, metadata: dict[int, dict[str, Any]]) -> None:

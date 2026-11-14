@@ -179,3 +179,118 @@ def test_numeric_string_message_ids_are_stored_as_ints(manager):
         processed, _, _ = manager.prepare_messages([_row("8", "2026-01-03T00:00:00Z")], member_dir, queue)
     assert processed[0]["id"] == 8 and queue[0]["message_id"] == 8
     assert processed[0]["media_file"] == str((member_dir / "picture" / "8.jpg").relative_to(manager.output_dir))
+
+
+class _Resp:
+    def __init__(self, status, body=b"", headers=None):
+        self.status = status
+        self._body = body
+        self.headers = headers or {}
+
+    async def read(self):
+        return self._body
+
+
+class _Ctx:
+    def __init__(self, resp):
+        self.resp = resp
+
+    async def __aenter__(self):
+        return self.resp
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _session(*responses):
+    session = MagicMock()
+    session.get = MagicMock(side_effect=[_Ctx(r) for r in responses])
+    return session
+
+
+@pytest.mark.asyncio
+async def test_download_refuses_a_local_address_without_a_request(tmp_path):
+    session = _session()
+    with capture_logs() as logs:
+        ok = await _client().download_file(session, "https://192.168.1.1/a.jpg", tmp_path / "a.jpg")
+    assert ok is False
+    session.get.assert_not_called()
+    assert [e["reason"] for e in logs if e["event"] == "Download refused"] == ["ip_literal"]
+    assert not (tmp_path / "a.jpg").exists()
+
+
+@pytest.mark.asyncio
+async def test_download_upgrades_http_to_https(tmp_path):
+    session = _session(_Resp(200, b"JPEG"))
+    ok = await _client().download_file(session, "http://cdn.example.com/a.jpg", tmp_path / "a.jpg")
+    assert ok is True
+    session.get.assert_called_once_with("https://cdn.example.com/a.jpg", allow_redirects=False)
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_into_the_local_network_is_refused_and_not_retried(tmp_path):
+    session = _session(_Resp(302, headers={"Location": "http://nas/secret"}))
+    with capture_logs() as logs:
+        ok = await _client().download_file(session, "https://cdn.example.com/a.jpg", tmp_path / "a.jpg")
+    assert ok is False
+    assert session.get.call_count == 1
+    assert [e["reason"] for e in logs if e["event"] == "Download refused"] == ["redirect_local_name"]
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_to_another_public_host_is_followed(tmp_path):
+    session = _session(
+        _Resp(302, headers={"Location": "https://cdn2.example.com/a.jpg"}),
+        _Resp(200, b"JPEG"),
+    )
+    ok = await _client().download_file(session, "https://cdn.example.com/a.jpg", tmp_path / "a.jpg")
+    assert ok is True
+    assert (tmp_path / "a.jpg").read_bytes() == b"JPEG"
+    assert session.get.call_args_list[1].args[0] == "https://cdn2.example.com/a.jpg"
+
+
+@pytest.mark.asyncio
+async def test_too_many_redirects_are_refused(tmp_path):
+    hop = {"Location": "https://cdn.example.com/next.jpg"}
+    session = _session(*[_Resp(302, headers=hop) for _ in range(4)])
+    with capture_logs() as logs:
+        ok = await _client().download_file(session, "https://cdn.example.com/a.jpg", tmp_path / "a.jpg")
+    assert ok is False
+    assert [e["reason"] for e in logs if e["event"] == "Download refused"] == ["redirect_limit"]
+
+
+@pytest.mark.asyncio
+async def test_queue_items_outside_the_output_folder_are_refused(manager, mock_client, tmp_path):
+    outside = tmp_path / "elsewhere" / "x.jpg"
+    seen: list = []
+    queue = [
+        {
+            "url": "https://cdn.example.com/x.jpg",
+            "path": outside,
+            "timestamp": None,
+            "message_id": 1,
+            "media_type": "picture",
+        }
+    ]
+    with capture_logs() as logs:
+        await manager.process_media_queue(MagicMock(), queue, item_callback=lambda ok: seen.append(ok))
+    mock_client.download_file.assert_not_called()
+    assert seen == [False]
+    (refused,) = [e for e in logs if e["event"] == "Media items refused"]
+    assert (refused["reason"], refused["count"]) == ("outside_output_dir", 1)
+
+
+def test_scan_reports_an_escaping_media_file_as_unresolved(manager):
+    import json
+
+    member_dir = _member_dir(manager)
+    (member_dir / "messages.json").write_text(
+        json.dumps({"messages": [{"id": 1, "type": "picture", "media_file": "../../../../escape.jpg"}]}),
+        encoding="utf-8",
+    )
+    with capture_logs() as logs:
+        result = manager.scan_member_media(member_dir)
+    assert result["missing"] == [] and result["checked"] == 0
+    assert [u["message_id"] for u in result["unresolved"]] == [1]
+    assert [e["count"] for e in logs if e["event"] == "saka.scan.media_file_refused"] == [1]

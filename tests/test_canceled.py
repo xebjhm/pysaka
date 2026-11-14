@@ -78,7 +78,7 @@ async def test_published_update_still_wins(manager):
 
 
 async def test_media_file_still_inherited_on_cancel(manager):
-    await _sync(manager, [_raw(1, type="picture", file="https://cdn/p.jpg")])
+    await _sync(manager, [_raw(1, type="picture", file="https://cdn.example.com/p.jpg")])
     stored = await _sync(manager, [_raw(1, state="canceled", type="picture")], ignore_cursor=True)
     assert stored[1].get("media_file")
 

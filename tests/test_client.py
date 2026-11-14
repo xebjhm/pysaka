@@ -666,7 +666,7 @@ async def test_download_file_zero_byte_stub_is_redownloaded(tmp_path, client, mo
     resp.status = 200
     resp.read = AsyncMock(return_value=b"REALBYTES")
     resp.headers = {}
-    ok = await client.download_file(mock_session, "https://cdn/1.jpg", dest)
+    ok = await client.download_file(mock_session, "https://cdn.example.com/1.jpg", dest)
     assert ok is True
     assert dest.read_bytes() == b"REALBYTES"
 
@@ -678,7 +678,7 @@ async def test_download_file_content_length_mismatch_leaves_no_stub(tmp_path, cl
     resp.status = 200
     resp.read = AsyncMock(return_value=b"AB")
     resp.headers = {"Content-Length": "999"}
-    ok = await client.download_file(mock_session, "https://cdn/2.jpg", dest, retries=1)
+    ok = await client.download_file(mock_session, "https://cdn.example.com/2.jpg", dest, retries=1)
     assert ok is False
     assert not dest.exists()  # no truncated stub
     assert not (dest.parent / "2.jpg.part").exists()
@@ -694,7 +694,7 @@ async def test_download_file_skips_length_check_when_encoded(tmp_path, client, m
     resp.status = 200
     resp.read = AsyncMock(return_value=b"DECOMPRESSED_BYTES")
     resp.headers = {"Content-Encoding": "gzip", "Content-Length": "999"}
-    ok = await client.download_file(mock_session, "https://cdn/4.jpg", dest)
+    ok = await client.download_file(mock_session, "https://cdn.example.com/4.jpg", dest)
     assert ok is True
     assert dest.read_bytes() == b"DECOMPRESSED_BYTES"
 
@@ -709,7 +709,7 @@ async def test_download_file_retries_then_succeeds(tmp_path, client, mock_sessio
     resp_ok.read = AsyncMock(return_value=b"OK")
     resp_ok.headers = {}
     mock_session.get.return_value.__aenter__.side_effect = [resp_500, resp_ok]
-    ok = await client.download_file(mock_session, "https://cdn/3.jpg", dest, retries=3)
+    ok = await client.download_file(mock_session, "https://cdn.example.com/3.jpg", dest, retries=3)
     assert ok is True
     assert dest.read_bytes() == b"OK"
 
@@ -719,7 +719,7 @@ async def test_download_file_retries_then_succeeds(tmp_path, client, mock_sessio
 async def test_download_file_logs_never_contain_signed_query(tmp_path, client, mock_session, failure):
     from structlog.testing import capture_logs
 
-    url = "https://cdn/x.jpg?sig=SECRET#frag"
+    url = "https://cdn.example.com/x.jpg?sig=SECRET#frag"
     if failure == "status":
         resp = mock_session.get.return_value.__aenter__.return_value
         resp.status = 403
@@ -762,12 +762,12 @@ def test_redact_url_drops_userinfo(url, expected):
 async def test_download_file_with_unparseable_url_fails_cleanly(tmp_path, client, mock_session):
     from structlog.testing import capture_logs
 
-    mock_session.get.return_value.__aenter__.return_value.status = 403
     with capture_logs() as logs:
         ok = await client.download_file(mock_session, "http://[abc/x.jpg?sig=SECRET", tmp_path / "x.jpg", retries=1)
     assert ok is False
-    dumped = str(logs)
-    assert "SECRET" not in dumped and "<unparseable url>" in dumped
+    mock_session.get.assert_not_called()  # refused before any request
+    assert "SECRET" not in str(logs)
+    assert [e["reason"] for e in logs if e["event"] == "Download refused"] == ["malformed"]
 
 
 def _desc_page(start_id, n, ts_fn):
