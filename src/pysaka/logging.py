@@ -219,7 +219,7 @@ def _redact_secrets(logger: logging.Logger, method_name: str, event_dict: dict[s
     Processor to redact sensitive data from log output.
 
     Redacts (a) values under a sensitive key at any nesting depth, and (b)
-    secret-shaped substrings (Bearer values / JWTs) embedded in string values —
+    secret-shaped substrings (Bearer values, JWTs, provider API keys) embedded in string values —
     including the rendered ``event`` message. Builds a fully redacted COPY so a
     live credential dict logged by a caller is never mutated (PY-CORE-03).
     """
