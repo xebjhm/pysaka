@@ -27,6 +27,9 @@ def test_containment_is_lexical(tmp_path):
     base = tmp_path / "out"
     assert is_contained(base / "a" / "b.jpg", base)
     assert is_contained(base, base)
+    assert not is_contained(base, base, strict=True)
+    assert is_contained(base / "a.jpg", base, strict=True)
+    assert not is_contained(base / "a" / ".." / ".." / "x", base, strict=True)
     assert not is_contained(base / ".." / "x", base)
     assert not is_contained(base / "a" / ".." / ".." / "x", base)
     assert not is_contained(tmp_path / "out2" / "x", base)
@@ -41,7 +44,6 @@ def test_containment_is_lexical(tmp_path):
         "https://cdn.example.com:443/a.jpg",
         "https://CDN.Example.com/a.jpg?sig=1",
         "HTTPS://cdn.example.com/a.jpg",
-        "https://cdn.example.com:443/a.jpg",
     ],
 )
 def test_public_web_addresses_are_allowed(url):
@@ -96,3 +98,7 @@ def test_http_is_upgraded_to_https():
     assert secure_media_url("http://cdn.example.com:080/a.jpg") == "https://cdn.example.com/a.jpg"
     assert secure_media_url("http://cdn.example.com:/a.jpg") == "https://cdn.example.com/a.jpg"
     assert secure_media_url("https://cdn.example.com:443/a.jpg") == "https://cdn.example.com/a.jpg"
+
+
+def test_secure_media_url_keeps_a_non_default_port_it_was_not_asked_to_judge():
+    assert secure_media_url("http://cdn.example.com:8080/a") == "https://cdn.example.com:8080/a"
