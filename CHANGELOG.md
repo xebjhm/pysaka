@@ -14,13 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `Client.get_messages` drops timeline rows whose `id` is not an integer (or
-  its ASCII digits) and logs `Timeline ids refused` with the count; every
-  returned row's `id` is an `int`. Before, a string id reached file names and a
-  mixed page raised `TypeError` while sorting. The page's oldest timestamp
-  (progress callback, cursor stop) comes from its last kept row, so a
-  non-dict or refused last row no longer crashes or moves the cursor. A page
-  with rows but none usable raises `ApiError` instead of returning `[]`, which
-  read as an empty room.
+  its ASCII digits) and logs `Timeline ids refused` with the count (also when a
+  later page fails); every returned row's `id` is an `int`. Before, such rows
+  were returned with their raw ids, so a string id reached file names, and a
+  page mixing them with integer ids raised `TypeError` or `KeyError`. The
+  page's oldest timestamp (progress callback, cursor stop) comes from its last
+  kept row, so a non-dict or refused last row no longer crashes or moves the
+  cursor. On full and incremental fetches alike, a page with rows but none
+  usable now raises `ApiError`.
 - `SyncManager.sync_member`, `backfill_past_messages` and `sync_letters`
   return 0 without touching the disk when the group or member `id` is not an
   integer (`Room ids refused`); numeric-string ids are used as `int`.
@@ -29,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are not queued, stored or checked on disk and no longer hold the cursor
   (`earliest_failed_ts` ignores them); logged as `Messages refused`. A media
   path that would leave the member folder is dropped the same way.
-- `SyncManager.process_media_queue` refuses items whose `path` is not a `Path`
+- `SyncManager.process_media_queue` refuses items whose `path` is not a `Path` or `str`
   or not strictly inside the manager's `output_dir` (not downloaded,
   `item_callback(False)`, one `Media items refused` warning per `reason`:
   `bad_path` or `outside_output_dir`). `SyncManager.scan_member_media` lists a
@@ -41,7 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (other schemes, IP literals, local names, non-default ports, user info) with
   `Download refused` and sends no request; `http://` is fetched as `https://`.
   Redirects are followed by hand (at most 3), each target checked the same way;
-  a refused redirect is not retried and leaves no `.part` file.
+  a refused redirect is not retried and leaves no `.part` file. Before,
+  aiohttp followed up to 10 redirects unchecked.
 - The log redaction processor also redacts `api_key`, `apikey`, `x-api-key`
   and `x-goog-api-key` values and Gemini (`AIza...`) and `sk-...` key shapes in
   free text.

@@ -140,7 +140,7 @@ the seconds left (`None` when not blocked). Logging: `Timeline requests blocked`
   (and pass `page_delay=0` so the pause is not doubled).
 - **Returns**: List of message objects (sorted by ID ascending). Rows whose
   `id` is not an integer (or the ASCII digits of one, e.g. `"12"`) are dropped
-  and counted in one `Timeline ids refused` warning (`group_id`, `count`);
+  and counted in one `Timeline ids refused` warning (`group_id`, `count`) logged on every exit, including when a later page fails;
   every returned row's `id` is an `int`. The page's oldest timestamp (the
   `progress_callback` date and the cursor stop) is read from its last kept row.
   A partial last
@@ -174,7 +174,7 @@ the seconds left (`None` when not blocked). Logging: `Timeline requests blocked`
   fetched as `https://`.
 - **Redirects** are followed by hand, at most 3 (so at most 4 requests), each
   target resolved against the current URL, checked the same way and upgraded to
-  `https://`; later hops are sent with `allow_redirects=False`. A refused
+  `https://`; every request, the first included, is sent with `allow_redirects=False`. A refused
   redirect (`redirect_<reason>`, `redirect_without_location`, `redirect_limit`)
   returns `False` at once, without retries, and leaves no `.part` file.
 
