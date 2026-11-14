@@ -977,7 +977,8 @@ class Client:
             messages; merely being collected is not enough.
             Rows whose ``id`` is not an integer (or the ASCII digits of one) are
             dropped and counted in a ``Timeline ids refused`` warning; every
-            returned row's ``id`` is an ``int``.
+            returned row's ``id`` is an ``int``. The page's oldest timestamp
+            (progress callback, cursor stop) is read from its last kept row.
 
         Raises:
             ApiError: If pagination stops in a way that could hide unfetched
@@ -989,7 +990,8 @@ class Client:
                 unreached: a full page with a repeated continuation (always), a
                 full page with a missing continuation (unless the ``order=asc``
                 probe confirms the timeline start), or a page that replays
-                already-collected messages.
+                already-collected messages; or a page whose rows all lack an
+                integer ``id`` (nothing usable, so the room is not read as empty).
             RateLimitedError: On HTTP 429 for any page (a subclass of
                 ``ApiError``), instead of returning ``[]`` or a partial list.
         """
@@ -1070,6 +1072,7 @@ class Client:
                 break
 
             known_before_page = len(all_messages)
+            accepted: list[dict[str, Any]] = []
             for m in messages:
                 # Ids name archive files: keep only integer ids (security audit
                 # 2026-11-13); a mixed page also broke the sort below.
@@ -1080,27 +1083,36 @@ class Client:
                 if type(m["id"]) is not int:
                     m = {**m, "id": mid}
                 all_messages[mid] = m
+                accepted.append(m)
 
                 # Legacy path: discover timestamp of since_id message
                 if need_discover_ts and mid == since_id:
                     effective_ts = m.get("published_at")
                     need_discover_ts = False
 
-            if progress_callback and messages:
-                oldest_in_batch = messages[-1].get("published_at")
+            if not accepted:
+                # Nothing usable on the page: its oldest timestamp is unknown, so
+                # the cursor/gap checks below cannot run. Fail closed (a retry
+                # next sync) instead of returning [] that reads as an empty room.
+                logger.warning("Timeline ids refused", group_id=group_id, count=refused_ids)
+                raise ApiError(f"Timeline page for group {group_id} had no usable messages")
+
+            # Rows are newest-first, so the last accepted row is the page's oldest.
+            oldest_in_batch = accepted[-1].get("published_at")
+            if progress_callback:
                 if asyncio.iscoroutinefunction(progress_callback):
                     await progress_callback(oldest_in_batch, len(all_messages))
                 else:
                     progress_callback(oldest_in_batch, len(all_messages))
 
             # Stop condition: oldest message in this batch is older than cursor
-            if effective_ts and messages:
-                oldest_timestamp = messages[-1].get("published_at", "")
+            if effective_ts:
+                oldest_timestamp = oldest_in_batch or ""
                 if oldest_timestamp and oldest_timestamp <= effective_ts:
                     break
 
             current_continuation = data.get("continuation")
-            oldest_timestamp = messages[-1].get("published_at", "")
+            oldest_timestamp = oldest_in_batch or ""
             before_cursor = bool(effective_ts and oldest_timestamp and oldest_timestamp > effective_ts)
             # Cursor not reached yet: a timestamp cursor still older than this page,
             # or a legacy since_id whose message has not been seen yet. A full fetch
@@ -1287,6 +1299,8 @@ class Client:
                 if isinstance(result, str):
                     # A refused redirect is a decision, not a transient error.
                     logger.warning("Download refused", reason=result)
+                    with contextlib.suppress(OSError):
+                        tmp.unlink(missing_ok=True)
                     return False
                 status, data, declared, encoding = result
                 if status != 200:
