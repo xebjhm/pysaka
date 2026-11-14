@@ -2200,15 +2200,8 @@ class SyncManager:
             nonlocal completed
             raw_path = item.get("path")
             path = Path(raw_path) if isinstance(raw_path, str) else raw_path
-            reason = (
-                "bad_path"
-                if not isinstance(path, Path)
-                else None
-                if is_contained(path, self.output_dir, strict=True)
-                else "outside_output_dir"
-            )
-            if reason is not None:
-                refused[reason] += 1
+            if not isinstance(path, Path) or not is_contained(path, self.output_dir, strict=True):
+                refused["bad_path" if not isinstance(path, Path) else "outside_output_dir"] += 1
                 if item_callback:
                     await _call_safely(item_callback, "item", False)
                 return
