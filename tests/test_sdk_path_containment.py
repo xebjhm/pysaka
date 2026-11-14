@@ -73,11 +73,14 @@ async def test_sync_member_refuses_a_bad_group_id_before_touching_disk(manager, 
 
 
 @pytest.mark.asyncio
-async def test_sync_member_refuses_a_bad_member_id(manager):
+async def test_sync_member_refuses_a_bad_member_id(manager, mock_client, tmp_path):
     with capture_logs() as logs:
         n = await manager.sync_member(MagicMock(), GROUP, {"id": "../m", "name": "m"}, [], prefetched_messages=[])
     assert n == 0
+    assert not (tmp_path / "out" / "messages").exists()
+    assert {p.name for p in tmp_path.iterdir()} <= {"out"}
     assert [e["kind"] for e in logs if e["event"] == "Room ids refused"] == ["member"]
+    mock_client.get_messages.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -89,12 +92,36 @@ async def test_numeric_string_ids_name_the_same_folders_as_ints(manager):
     assert (manager.output_dir / "messages" / "34 g" / "58 m" / "picture").is_dir()
 
 
+def _tree(root):
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+
+
 @pytest.mark.asyncio
-async def test_backfill_and_letters_refuse_bad_ids(manager, mock_client):
-    bad = {"id": "../m", "name": "m"}
-    assert await manager.backfill_past_messages(MagicMock(), GROUP, bad) == 0
-    assert await manager.sync_letters(MagicMock(), GROUP, bad) == 0
+async def test_backfill_refuses_a_bad_member_id_even_with_a_matching_state_entry(manager, mock_client, tmp_path):
+    # Seed what the unguarded code would need to get past its early returns.
+    manager.sync_state["34_../m"] = {"last_id": 1}
+    (manager.output_dir / "messages" / "34 g").mkdir(parents=True)
+    (manager.output_dir / "messages" / "m").mkdir()
+    (manager.output_dir / "messages" / "m" / "messages.json").write_text("{}", encoding="utf-8")
+    before = _tree(tmp_path)
+    with capture_logs() as logs:
+        n = await manager.backfill_past_messages(MagicMock(), GROUP, {"id": "../m", "name": "m"})
+    assert n == 0
+    assert [e["kind"] for e in logs if e["event"] == "Room ids refused"] == ["member"]
     mock_client.get_past_messages.assert_not_called()
+    assert _tree(tmp_path) == before
+
+
+@pytest.mark.asyncio
+async def test_letters_refuse_a_bad_member_id_before_fetching_or_touching_disk(manager, mock_client, tmp_path):
+    mock_client.get_letters = AsyncMock(return_value=[])
+    with capture_logs() as logs:
+        n = await manager.sync_letters(MagicMock(), GROUP, {"id": "../m", "name": "m"})
+    assert n == 0
+    assert [e["kind"] for e in logs if e["event"] == "Room ids refused"] == ["member"]
+    mock_client.get_letters.assert_not_called()
+    assert not (tmp_path / "out" / "messages").exists()
+    assert {p.name for p in tmp_path.iterdir()} <= {"out"}
 
 
 @pytest.mark.asyncio
