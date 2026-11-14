@@ -215,8 +215,8 @@ async def test_sync_member_prepare_failure_holds_cursor(sync_manager):
     prefetched = [
         # Valid, newer message — normalizes fine.
         {"id": 101, "type": "text", "text": "Hi", "member_id": 10, "published_at": "2023-01-01T10:00:00Z"},
-        # Malformed: no "id" -> normalize_message raises KeyError. Older timestamp.
-        {"type": "text", "text": "Broken", "member_id": 10, "published_at": "2023-01-01T09:00:00Z"},
+        # Malformed: a non-string media URL makes the row fail to prepare. Older timestamp.
+        {"id": 102, "type": "picture", "file": 123, "member_id": 10, "published_at": "2023-01-01T09:00:00Z"},
     ]
 
     count = await sync_manager.sync_member(session, group, member, media_queue, prefetched_messages=prefetched)

@@ -398,8 +398,9 @@ async def test_ignore_cursor_new_pending_media_still_clamps(manager):
 async def test_ignore_cursor_old_normalize_failure_does_not_pull_cursor_back(manager):
     member = {"id": 79, "name": "日向坂46"}
     await manager.sync_member(AsyncMock(), GROUP, member, [], prefetched_messages=[_m(20, "2026-01-01T00:00:00Z", 79)])
-    broken_old = {"type": "text", "text": "x", "member_id": 79, "published_at": "2020-01-01T00:00:00Z"}  # no id
-    broken_new = {**broken_old, "published_at": "2026-02-01T00:00:00Z"}
+    # A non-string media URL makes a row fail to prepare (a missing id is now dropped instead).
+    broken_old = {"id": 90, "type": "picture", "file": 123, "member_id": 79, "published_at": "2020-01-01T00:00:00Z"}
+    broken_new = {**broken_old, "id": 91, "published_at": "2026-02-01T00:00:00Z"}
     later = _m(30, "2026-03-01T00:00:00Z", 79)
 
     await manager.sync_member(

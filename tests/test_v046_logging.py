@@ -200,8 +200,15 @@ async def test_ignore_cursor_logs_exclusions_below_the_floor(manager):
     await _sync_room(manager, member, [_m(20, 79, ts="2026-01-01T00:00:00Z")])
     pic = {"id": 15, "type": "picture", "file": "https://cdn/15.jpg?sig=SECRETURL", "member_id": 79}
     old_pic = {**pic, "published_at": "2020-01-01T00:00:00Z"}
-    bad = {"id": 16, "member_id": 79, "published_at": "2020-01-02T00:00:00Z", "type": "text", "text": SECRET}
-    del bad["id"]  # normalize_message raises KeyError -> a failed row
+    # A non-string media URL makes the row fail to prepare -> a failed row.
+    bad = {
+        "id": 16,
+        "member_id": 79,
+        "published_at": "2020-01-02T00:00:00Z",
+        "type": "picture",
+        "file": 123,
+        "text": SECRET,
+    }
     with capture_logs() as logs:
         await _sync_room(manager, member, [old_pic, bad, _m(20, 79, ts="2026-01-01T00:00:00Z")], ignore_cursor=True)
     (dbg,) = _events(logs, "Old rows excluded from cursor clamp")

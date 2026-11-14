@@ -1,5 +1,6 @@
 """Server ids and media URLs never lead outside the archive (security audit 2026-11-13)."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -138,3 +139,43 @@ def test_path_builders_refuse_anything_but_int_ids(manager):
         manager._ensure_group_dir({"id": "34", "name": "g"})
     with pytest.raises(ValueError):
         manager._ensure_member_dir(manager.output_dir, "58", "m")
+
+
+def _member_dir(manager) -> Path:
+    member_dir = manager.output_dir / "messages" / "34 g" / "58 m"
+    member_dir.mkdir(parents=True)
+    return member_dir
+
+
+def _row(mid, ts, url="https://cdn.example.com/a.jpg"):
+    return {"id": mid, "type": "picture", "file": url, "published_at": ts, "text": None}
+
+
+def test_rows_with_unsafe_ids_are_dropped_and_do_not_hold_the_cursor(manager):
+    member_dir = _member_dir(manager)
+    queue: list = []
+    rows = [
+        _row("../../../../escape", "2026-01-01T00:00:00Z"),
+        _row("/abs/escape", "2026-01-01T00:00:01Z"),
+        _row(7, "2026-01-02T00:00:00Z", "https://cdn.example.com/7.jpg"),
+    ]
+    with capture_logs() as logs, patch("pysaka.manager.media_file_is_present", return_value=False) as present:
+        processed, failed_ts, pending_ts = manager.prepare_messages(rows, member_dir, queue)
+    assert [p["id"] for p in processed] == [7]
+    assert failed_ts is None
+    assert pending_ts == "2026-01-02T00:00:00Z"
+    assert [item["message_id"] for item in queue] == [7]
+    assert queue[0]["path"] == member_dir / "picture" / "7.jpg"
+    assert all(call.args[0].parent == member_dir / "picture" for call in present.call_args_list)
+    (refused,) = [e for e in logs if e["event"] == "Messages refused"]
+    assert (refused["reason"], refused["count"]) == ("bad_id", 2)
+    assert "escape" not in repr(logs)
+
+
+def test_numeric_string_message_ids_are_stored_as_ints(manager):
+    member_dir = _member_dir(manager)
+    queue: list = []
+    with patch("pysaka.manager.media_file_is_present", return_value=False):
+        processed, _, _ = manager.prepare_messages([_row("8", "2026-01-03T00:00:00Z")], member_dir, queue)
+    assert processed[0]["id"] == 8 and queue[0]["message_id"] == 8
+    assert processed[0]["media_file"] == str((member_dir / "picture" / "8.jpg").relative_to(manager.output_dir))

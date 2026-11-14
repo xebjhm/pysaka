@@ -18,7 +18,7 @@ from . import profile_images, roster
 from .client import Client
 from .exceptions import RefreshFailedError, SessionExpiredError
 from .media import get_audio_metadata, get_media_dimensions
-from .net_policy import as_int_id
+from .net_policy import as_int_id, is_contained
 from .utils import (
     CANCELED_STATES,
     _normalized_type,
@@ -1836,13 +1836,30 @@ class SyncManager:
             ``earliest_pending_media_ts`` is the ``published_at`` (or ``""`` if none) of
             the oldest message whose media was queued for download; ``None`` if no media
             was queued. The caller must not advance the cursor past it.
+
+        Rows whose ``id`` is not an integer (:func:`pysaka.net_policy.as_int_id`) are
+        dropped: not queued, not stored, not checked on disk and not counted in
+        ``earliest_failed_ts``; they are counted in a ``Messages refused`` warning
+        (``reason=bad_id``). A media path that would leave ``member_dir`` is dropped
+        the same way (``reason=outside_member_dir``).
         """
         processed = []
         earliest_failed_ts: Optional[str] = None
         earliest_pending_media_ts: Optional[str] = None
         below_floor_pending = 0
         below_floor_failed = 0
+        refused_ids = 0
+        refused_paths = 0
         for msg in messages:
+            # Ids name files: a row whose id cannot is dropped, not failed. Retrying
+            # never fixes it, so it must not hold the cursor (security audit
+            # 2026-11-13, ledger C-T5), and nothing is queued, stored or stat()ed.
+            msg_id = as_int_id(msg.get("id")) if isinstance(msg, dict) else None
+            if msg_id is None:
+                refused_ids += 1
+                continue
+            if type(msg["id"]) is not int:
+                msg = {**msg, "id": msg_id}
             try:
                 # Normalize core fields
                 p_msg = normalize_message(msg)
@@ -1862,7 +1879,10 @@ class SyncManager:
                     elif msg_type == "voice":
                         subdir = "voice"
 
-                    filepath = member_dir / subdir / f"{msg['id']}.{ext}"
+                    filepath = member_dir / subdir / f"{msg_id}.{ext}"
+                    if not is_contained(filepath, member_dir):
+                        refused_paths += 1
+                        continue
 
                     # Compute presence the same way scan_member_media does: absent OR zero-byte = missing.
                     media_present = media_file_is_present(filepath)
@@ -1874,7 +1894,7 @@ class SyncManager:
                                 "url": media_url,
                                 "path": filepath,
                                 "timestamp": msg.get("published_at"),
-                                "message_id": msg["id"],
+                                "message_id": msg_id,
                                 "media_type": msg_type,
                                 "member_dir": member_dir,
                             }
@@ -1916,6 +1936,10 @@ class SyncManager:
                     below_floor_failed += 1
                 # Only the type: the exception text may quote the message that failed.
                 logger.error("Prepare error", message_id=mid, error_type=type(e).__name__, **_error_origin(e))
+        if refused_ids:
+            logger.warning("Messages refused", reason="bad_id", count=refused_ids)
+        if refused_paths:
+            logger.warning("Messages refused", reason="outside_member_dir", count=refused_paths)
         if below_floor_pending or below_floor_failed:
             logger.debug(
                 "Old rows excluded from cursor clamp",
