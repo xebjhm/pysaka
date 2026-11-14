@@ -7,7 +7,7 @@ media URLs the client downloads. Both come from the remote service, so:
   the ASCII digits of one; ``"../x"``, an absolute path or ``True`` never
   becomes part of a file name;
 - :func:`is_contained` tells whether a destination stays inside its base
-  folder, judged lexically (``..`` collapsed, links not followed), so it also
+  folder (``strict=True``: strictly below it), judged lexically (``..`` collapsed, links not followed), so it also
   holds for files not created yet;
 - :func:`media_url_refusal` refuses media URLs that are not plain public web
   addresses (other schemes, IP literals, local names, other ports, user
@@ -47,11 +47,17 @@ def as_int_id(value: Any) -> Optional[int]:
     return None
 
 
-def is_contained(path: Path, base: Path) -> bool:
-    """True when ``path`` is ``base`` or inside it (``..`` collapsed; links not followed)."""
+def is_contained(path: Path, base: Path, *, strict: bool = False) -> bool:
+    """True when ``path`` is ``base`` or inside it (``..`` collapsed; links not followed).
+
+    With ``strict=True`` ``base`` itself does not count: use it for files, which
+    must live below the folder, never be the folder.
+    """
     try:
         rel = Path(os.path.normpath(path)).relative_to(os.path.normpath(base))
     except ValueError:
+        return False
+    if strict and not rel.parts:
         return False
     return ".." not in rel.parts
 

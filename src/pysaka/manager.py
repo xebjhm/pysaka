@@ -1880,7 +1880,7 @@ class SyncManager:
                         subdir = "voice"
 
                     filepath = member_dir / subdir / f"{msg_id}.{ext}"
-                    if not is_contained(filepath, member_dir):
+                    if not is_contained(filepath, member_dir, strict=True):
                         refused_paths += 1
                         continue
 
@@ -2102,7 +2102,9 @@ class SyncManager:
                     }
                 )
                 continue
-            if not isinstance(media_file, str) or not is_contained(self.output_dir / media_file, self.output_dir):
+            if not isinstance(media_file, str) or not is_contained(
+                self.output_dir / media_file, self.output_dir, strict=True
+            ):
                 # A stored path that leaves the archive is never checked or re-downloaded
                 # (security audit 2026-11-13: Verify & Fix recreated it). Paths into other
                 # folders of the archive stay "missing", as before (rename tests rely on it).
@@ -2161,9 +2163,11 @@ class SyncManager:
         A callback that raises is logged (``Media queue callback failed``, with
         the callback name and error type) and never stops the downloads.
 
-        Items whose ``path`` is not inside this manager's ``output_dir`` are not
-        downloaded (``item_callback(False)``) and are counted in one
-        ``Media items refused`` warning.
+        Items whose ``path`` is not a ``Path`` (or string) are refused with
+        ``reason="bad_path"``, and those whose ``path`` is not strictly inside this
+        manager's ``output_dir`` with ``reason="outside_output_dir"``. Neither is
+        downloaded (``item_callback(False)``); each reason gets one
+        ``Media items refused`` warning with its ``count``.
 
         Returns:
             Dict mapping member_dir to {message_id: metadata_dict} for downloaded media.
@@ -2188,16 +2192,23 @@ class SyncManager:
         # acquires a pool slot via the session wrapper.
         total = len(queue)
         completed = 0
-        refused = 0
+        refused = {"bad_path": 0, "outside_output_dir": 0}
         # Group metadata by member_dir for efficient batch updates
         metadata_by_dir: dict[Path, dict[int, dict[str, Any]]] = {}
 
         async def worker(item: dict[str, Any]) -> None:
-            nonlocal completed, refused
+            nonlocal completed
             raw_path = item.get("path")
             path = Path(raw_path) if isinstance(raw_path, str) else raw_path
-            if not isinstance(path, Path) or not is_contained(path, self.output_dir):
-                refused += 1
+            reason = (
+                "bad_path"
+                if not isinstance(path, Path)
+                else None
+                if is_contained(path, self.output_dir, strict=True)
+                else "outside_output_dir"
+            )
+            if reason is not None:
+                refused[reason] += 1
                 if item_callback:
                     await _call_safely(item_callback, "item", False)
                 return
@@ -2235,8 +2246,9 @@ class SyncManager:
                 await _call_safely(item_callback, "item", bool(res))
 
         await asyncio.gather(*[worker(item) for item in queue])
-        if refused:
-            logger.warning("Media items refused", reason="outside_output_dir", count=refused)
+        for reason, count in refused.items():
+            if count:
+                logger.warning("Media items refused", reason=reason, count=count)
         return metadata_by_dir
 
     async def update_message_metadata(self, messages_file: Path, metadata: dict[int, dict[str, Any]]) -> None:
