@@ -18,6 +18,7 @@ from . import profile_images, roster
 from .client import Client
 from .exceptions import RefreshFailedError, SessionExpiredError
 from .media import get_audio_metadata, get_media_dimensions
+from .net_policy import as_int_id
 from .utils import (
     CANCELED_STATES,
     _normalized_type,
@@ -413,14 +414,18 @@ class SyncManager:
         non-dict entries are not expected. A stored ``"messages": null`` counts as
         empty. False when an author's ids are missing, or when a ``messages.json`` is
         unreadable, not a JSON object, or has a ``messages`` value that is not a list
-        (a warning with group id, member id and the reason is logged). Catches what a
+        (a warning with group id, member id and the reason is logged). False
+        (``Room ids refused``) when the group id is not an integer. Catches what a
         raised exception would not: a write that failed (``sync_member`` returns 0)
         or a message that failed to normalize.
         """
         return await asyncio.to_thread(self._room_archive_complete_sync, group, messages)
 
     def _room_archive_complete_sync(self, group: dict[str, Any], messages: list[dict[str, Any]]) -> bool:
-        gid = group["id"]
+        gid = as_int_id(group.get("id"))
+        if gid is None:
+            logger.warning("Room ids refused", kind="group")
+            return False
         wanted: dict[int, set[int]] = {}
         skipped = 0
         for m in messages:
@@ -469,13 +474,43 @@ class SyncManager:
         )
         return True
 
+    def _room_ids(
+        self, group: dict[str, Any], member: dict[str, Any]
+    ) -> Optional[tuple[dict[str, Any], dict[str, Any]]]:
+        """Copies of ``group`` and ``member`` with ``int`` ids, or None when either id is not one.
+
+        Room and member ids name archive folders, so ``"../x"`` or an absolute path
+        must never reach a path (security audit 2026-11-13). Logs ``Room ids
+        refused`` (``kind`` = ``group`` or ``member``) and returns None then.
+        """
+        gid = as_int_id(group.get("id"))
+        mid = as_int_id(member.get("id"))
+        if gid is None or mid is None:
+            logger.warning("Room ids refused", kind="group" if gid is None else "member")
+            return None
+        return {**group, "id": gid}, {**member, "id": mid}
+
+    @staticmethod
+    def _dir_id(value: Any) -> int:
+        """An id that may name a folder: a true non-negative ``int``; else ``ValueError``.
+
+        The public entry points normalise ids with :meth:`_room_ids` first; this
+        stops a caller that skipped it instead of writing outside the archive.
+        """
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("bad_id")
+        return value
+
     def _member_dir_path(self, group: dict[str, Any], member: dict[str, Any]) -> Path:
-        """The on-disk directory of a member's archive (same naming as sync_member)."""
+        """The on-disk directory of a member's archive (same naming as sync_member).
+
+        Raises ``ValueError`` for an id that is not an ``int`` (see :meth:`_dir_id`).
+        """
         return (
             self.output_dir
             / "messages"
-            / f"{group['id']} {sanitize_name(group['name'])}"
-            / f"{member['id']} {sanitize_name(member['name'])}"
+            / f"{self._dir_id(group['id'])} {sanitize_name(group['name'])}"
+            / f"{self._dir_id(member['id'])} {sanitize_name(member['name'])}"
         )
 
     def _ensure_group_dir(self, group: dict[str, Any]) -> Path:
@@ -489,9 +524,10 @@ class SyncManager:
         the group directory; it does not create the directory itself.
 
         Raises:
+            ValueError: the group id is not an ``int`` (see :meth:`_dir_id`).
             OSError: the rename failed (nothing was changed).
         """
-        gid = group["id"]
+        gid = self._dir_id(group["id"])
         messages_dir = self.output_dir / "messages"
         group_dir = messages_dir / f"{gid} {sanitize_name(group['name'])}"
         if not group_dir.exists() and messages_dir.exists():
@@ -515,9 +551,10 @@ class SyncManager:
         target does not exist yet; never creates the directory.
 
         Raises:
+            ValueError: ``member_id`` is not an ``int`` (see :meth:`_dir_id`).
             OSError: the rename failed (a warning is logged; nothing was changed).
         """
-        member_dir = group_dir / f"{member_id} {name}"
+        member_dir = group_dir / f"{self._dir_id(member_id)} {name}"
         if not member_dir.exists() and group_dir.exists():
             prefix = f"{member_id} "
             for existing in group_dir.iterdir():
@@ -703,7 +740,14 @@ class SyncManager:
         Returns:
             Number of messages processed in this run (includes re-fetched
             overlap, so it is not a count of new messages).
+
+        Returns 0 without touching the disk when the group or member id is not an
+        integer (``Room ids refused``); numeric-string ids are used as ``int``.
         """
+        checked = self._room_ids(group, member)
+        if checked is None:
+            return 0
+        group, member = checked
         processed = await self._sync_member_messages(
             session,
             group,
@@ -916,7 +960,14 @@ class SyncManager:
                 (left untouched; a warning is logged, with the found type for a
                 non-object; 0 returned) or whose write failed (logged by the
                 write; 0 returned).
+
+        Returns 0 without touching the disk when the group or member id is not an
+        integer (``Room ids refused``); numeric-string ids are used as ``int``.
         """
+        checked = self._room_ids(group, member)
+        if checked is None:
+            return 0
+        group, member = checked
         gid, mid = group["id"], member["id"]
         if mid == roster.ROOM_AUTHOR_ID:
             logger.debug("Backfill skipped: room author", group_id=gid, member_id=mid)
@@ -1103,7 +1154,14 @@ class SyncManager:
         Returns:
             Number of letters that were not in ``letters.json`` before (all of
             them after a corrupt or missing file).
+
+        Returns 0 without touching the disk when the group or member id is not an
+        integer (``Room ids refused``); numeric-string ids are used as ``int``.
         """
+        checked = self._room_ids(group, member)
+        if checked is None:
+            return 0
+        group, member = checked
         gid, mid = group["id"], member["id"]
         if mid == roster.ROOM_AUTHOR_ID:
             logger.debug("Letters skipped: room author", group_id=gid, member_id=mid)
