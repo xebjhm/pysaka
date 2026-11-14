@@ -1010,186 +1010,190 @@ class Client:
         full_fetch = since_ts is None and since_id is None
         first_page_retried = False
 
-        while True:
-            params: dict[str, Any] = {
-                "count": 200,
-                "order": "desc",
-                # Defaults to false so a background sync does NOT advance the
-                # server-side read pointer (which would zero the user's unread
-                # badge on the official mobile app); only the caller opting in
-                # (e.g. mark_group_read) advances it.
-                "clear_unread": "true" if clear_unread else "false",
-            }
-            if current_continuation:
-                params["continuation"] = current_continuation
+        try:
+            while True:
+                params: dict[str, Any] = {
+                    "count": 200,
+                    "order": "desc",
+                    # Defaults to false so a background sync does NOT advance the
+                    # server-side read pointer (which would zero the user's unread
+                    # badge on the official mobile app); only the caller opting in
+                    # (e.g. mark_group_read) advances it.
+                    "clear_unread": "true" if clear_unread else "false",
+                }
+                if current_continuation:
+                    params["continuation"] = current_continuation
 
-            if max_id and page == 0 and not current_continuation:
-                params["max_id"] = max_id
+                if max_id and page == 0 and not current_continuation:
+                    params["max_id"] = max_id
 
-            data = await self.fetch_json(session, f"/groups/{group_id}/timeline", params)
-            if not data:
-                if page == 0 and not first_page_retried and await self.refresh_access_token(session):
-                    first_page_retried = True
-                    continue
-                # fetch_json returns None only on a genuine error (auth/unexpected
-                # status). If we have already collected earlier (newer) pages and
-                # have NOT reached the cursor/end, returning that partial newest-only
-                # set would let the caller advance its timestamp cursor PAST the
-                # un-fetched older-but-still-new messages — silent data loss. Fail
-                # closed so the sync is retried and the cursor is left untouched.
-                if all_messages:
-                    raise ApiError(
-                        f"Timeline pagination for group {group_id} aborted before "
-                        f"reaching the cursor after {len(all_messages)} message(s); "
-                        "refusing to return a partial page that would skip a gap."
-                    )
-                if full_fetch:
-                    # Without a cursor, [] reads as "empty room": a caller checking
-                    # the archive against it (room_archive_complete) would pass
-                    # vacuously and never re-read the room. Fail closed instead.
-                    logger.warning(
-                        "Timeline first page failed", group_id=group_id, reason="no_data", retried=first_page_retried
-                    )
-                    raise ApiError(f"Timeline fetch failed for group {group_id} on the first page")
-                break
-
-            messages = data.get("messages", [])
-            if not messages:
-                # An empty page mid-pagination (earlier/newer pages already
-                # collected) that STILL carries a continuation means the server
-                # claims more data exists but returned nothing — breaking here and
-                # returning the partial newest set would advance the cursor past the
-                # un-fetched gap. Fail closed, mirroring the None-page guard above.
-                # An empty page with no continuation is a legitimate end-of-timeline.
-                # On a full fetch even an empty FIRST page with a continuation
-                # fails closed: [] would read as an empty room.
-                if (all_messages or full_fetch) and data.get("continuation"):
-                    raise ApiError(
-                        f"Timeline pagination for group {group_id} returned an empty "
-                        f"page with a continuation after {len(all_messages)} "
-                        "message(s); refusing to skip a possible gap."
-                    )
-                break
-
-            known_before_page = len(all_messages)
-            accepted: list[dict[str, Any]] = []
-            for m in messages:
-                # Ids name archive files: keep only integer ids (security audit
-                # 2026-11-13); a mixed page also broke the sort below.
-                mid = as_int_id(m.get("id")) if isinstance(m, dict) else None
-                if mid is None:
-                    refused_ids += 1
-                    continue
-                if type(m["id"]) is not int:
-                    m = {**m, "id": mid}
-                all_messages[mid] = m
-                accepted.append(m)
-
-                # Legacy path: discover timestamp of since_id message
-                if need_discover_ts and mid == since_id:
-                    effective_ts = m.get("published_at")
-                    need_discover_ts = False
-
-            if not accepted:
-                # Nothing usable on the page: its oldest timestamp is unknown, so
-                # the cursor/gap checks below cannot run. Fail closed (a retry
-                # next sync) instead of returning [] that reads as an empty room.
-                logger.warning("Timeline ids refused", group_id=group_id, count=refused_ids)
-                raise ApiError(f"Timeline page for group {group_id} had no usable messages")
-
-            # Rows are newest-first, so the last accepted row is the page's oldest.
-            oldest_in_batch = accepted[-1].get("published_at")
-            if progress_callback:
-                if asyncio.iscoroutinefunction(progress_callback):
-                    await progress_callback(oldest_in_batch, len(all_messages))
-                else:
-                    progress_callback(oldest_in_batch, len(all_messages))
-
-            # Stop condition: oldest message in this batch is older than cursor
-            if effective_ts:
-                oldest_timestamp = oldest_in_batch or ""
-                if oldest_timestamp and oldest_timestamp <= effective_ts:
+                data = await self.fetch_json(session, f"/groups/{group_id}/timeline", params)
+                if not data:
+                    if page == 0 and not first_page_retried and await self.refresh_access_token(session):
+                        first_page_retried = True
+                        continue
+                    # fetch_json returns None only on a genuine error (auth/unexpected
+                    # status). If we have already collected earlier (newer) pages and
+                    # have NOT reached the cursor/end, returning that partial newest-only
+                    # set would let the caller advance its timestamp cursor PAST the
+                    # un-fetched older-but-still-new messages — silent data loss. Fail
+                    # closed so the sync is retried and the cursor is left untouched.
+                    if all_messages:
+                        raise ApiError(
+                            f"Timeline pagination for group {group_id} aborted before "
+                            f"reaching the cursor after {len(all_messages)} message(s); "
+                            "refusing to return a partial page that would skip a gap."
+                        )
+                    if full_fetch:
+                        # Without a cursor, [] reads as "empty room": a caller checking
+                        # the archive against it (room_archive_complete) would pass
+                        # vacuously and never re-read the room. Fail closed instead.
+                        logger.warning(
+                            "Timeline first page failed",
+                            group_id=group_id,
+                            reason="no_data",
+                            retried=first_page_retried,
+                        )
+                        raise ApiError(f"Timeline fetch failed for group {group_id} on the first page")
                     break
 
-            current_continuation = data.get("continuation")
-            oldest_timestamp = oldest_in_batch or ""
-            before_cursor = bool(effective_ts and oldest_timestamp and oldest_timestamp > effective_ts)
-            # Cursor not reached yet: a timestamp cursor still older than this page,
-            # or a legacy since_id whose message has not been seen yet. A full fetch
-            # has no cursor and must reach the start of the timeline, so it obeys
-            # the same end-of-timeline rules as an unreached cursor.
-            cursor_unreached = before_cursor or need_discover_ts or full_fetch
-            repeated = bool(current_continuation) and current_continuation == params.get("continuation")
-            if not current_continuation or repeated:
-                # The server offers no further page. That is the genuine START of the
-                # timeline only on a partial page (fewer than ``count``) — whether the
-                # server omits the token or echoes it — and only if the page is not a
-                # replay of messages already collected. A FULL page means more data
-                # should follow (the token was dropped), and a replay means the server
-                # ignored the token; breaking on either would let the caller advance
-                # its cursor past everything older, so fail closed while the cursor is
-                # unreached and retry next sync.
-                replayed = repeated and len(all_messages) == known_before_page
-                timeline_start = len(messages) < params["count"] and not replayed
-                probe_detail = ""
-                if cursor_unreached and not timeline_start and not replayed and not repeated:
-                    # A FULL last page with no continuation is ambiguous: dropped
-                    # token, or a history that is an exact multiple of the page
-                    # size. Ask the server for the room's first message; if we
-                    # already hold it as our OLDEST message, nothing older exists
-                    # (KNOWN_BUGS #1). Ids grow over time, so the room's first
-                    # message must be the smallest id collected; merely holding it
-                    # would also accept a server that ignores ``order=asc`` and
-                    # answers with the newest message.
-                    first_id = await self._timeline_first_id(session, group_id)
-                    oldest_id = min(all_messages) if all_messages else None
-                    timeline_start = first_id is not None and oldest_id is not None and first_id == oldest_id
-                    if not timeline_start:
-                        probe_first_id, oldest_collected_id = _int_or_none(first_id), _int_or_none(oldest_id)
+                messages = data.get("messages", [])
+                if not messages:
+                    # An empty page mid-pagination (earlier/newer pages already
+                    # collected) that STILL carries a continuation means the server
+                    # claims more data exists but returned nothing — breaking here and
+                    # returning the partial newest set would advance the cursor past the
+                    # un-fetched gap. Fail closed, mirroring the None-page guard above.
+                    # An empty page with no continuation is a legitimate end-of-timeline.
+                    # On a full fetch even an empty FIRST page with a continuation
+                    # fails closed: [] would read as an empty room.
+                    if (all_messages or full_fetch) and data.get("continuation"):
+                        raise ApiError(
+                            f"Timeline pagination for group {group_id} returned an empty "
+                            f"page with a continuation after {len(all_messages)} "
+                            "message(s); refusing to skip a possible gap."
+                        )
+                    break
+
+                known_before_page = len(all_messages)
+                accepted: list[dict[str, Any]] = []
+                for m in messages:
+                    # Ids name archive files: keep only integer ids (security audit
+                    # 2026-11-13); a mixed page also broke the sort below.
+                    mid = as_int_id(m.get("id")) if isinstance(m, dict) else None
+                    if mid is None:
+                        refused_ids += 1
+                        continue
+                    if type(m["id"]) is not int:
+                        m = {**m, "id": mid}
+                    all_messages[mid] = m
+                    accepted.append(m)
+
+                    # Legacy path: discover timestamp of since_id message
+                    if need_discover_ts and mid == since_id:
+                        effective_ts = m.get("published_at")
+                        need_discover_ts = False
+
+                if not accepted:
+                    # Nothing usable on the page: its oldest timestamp is unknown, so
+                    # the cursor/gap checks below cannot run. Fail closed (a retry
+                    # next sync) instead of returning [] that reads as an empty room.
+                    raise ApiError(f"Timeline page for group {group_id} had no usable messages")
+
+                # Rows are newest-first, so the last accepted row is the page's oldest.
+                oldest_in_batch = accepted[-1].get("published_at")
+                if progress_callback:
+                    if asyncio.iscoroutinefunction(progress_callback):
+                        await progress_callback(oldest_in_batch, len(all_messages))
+                    else:
+                        progress_callback(oldest_in_batch, len(all_messages))
+
+                # Stop condition: oldest message in this batch is older than cursor
+                if effective_ts:
+                    oldest_timestamp = oldest_in_batch or ""
+                    if oldest_timestamp and oldest_timestamp <= effective_ts:
+                        break
+
+                current_continuation = data.get("continuation")
+                oldest_timestamp = oldest_in_batch or ""
+                before_cursor = bool(effective_ts and oldest_timestamp and oldest_timestamp > effective_ts)
+                # Cursor not reached yet: a timestamp cursor still older than this page,
+                # or a legacy since_id whose message has not been seen yet. A full fetch
+                # has no cursor and must reach the start of the timeline, so it obeys
+                # the same end-of-timeline rules as an unreached cursor.
+                cursor_unreached = before_cursor or need_discover_ts or full_fetch
+                repeated = bool(current_continuation) and current_continuation == params.get("continuation")
+                if not current_continuation or repeated:
+                    # The server offers no further page. That is the genuine START of the
+                    # timeline only on a partial page (fewer than ``count``) — whether the
+                    # server omits the token or echoes it — and only if the page is not a
+                    # replay of messages already collected. A FULL page means more data
+                    # should follow (the token was dropped), and a replay means the server
+                    # ignored the token; breaking on either would let the caller advance
+                    # its cursor past everything older, so fail closed while the cursor is
+                    # unreached and retry next sync.
+                    replayed = repeated and len(all_messages) == known_before_page
+                    timeline_start = len(messages) < params["count"] and not replayed
+                    probe_detail = ""
+                    if cursor_unreached and not timeline_start and not replayed and not repeated:
+                        # A FULL last page with no continuation is ambiguous: dropped
+                        # token, or a history that is an exact multiple of the page
+                        # size. Ask the server for the room's first message; if we
+                        # already hold it as our OLDEST message, nothing older exists
+                        # (KNOWN_BUGS #1). Ids grow over time, so the room's first
+                        # message must be the smallest id collected; merely holding it
+                        # would also accept a server that ignores ``order=asc`` and
+                        # answers with the newest message.
+                        first_id = await self._timeline_first_id(session, group_id)
+                        oldest_id = min(all_messages) if all_messages else None
+                        timeline_start = first_id is not None and oldest_id is not None and first_id == oldest_id
+                        if not timeline_start:
+                            probe_first_id, oldest_collected_id = _int_or_none(first_id), _int_or_none(oldest_id)
+                            logger.warning(
+                                "Timeline start probe rejected",
+                                group_id=group_id,
+                                probe_first_id=probe_first_id,
+                                oldest_collected_id=oldest_collected_id,
+                            )
+                            probe_detail = (
+                                f" (order=asc probe: probe_first_id={probe_first_id}, "
+                                f"oldest_collected_id={oldest_collected_id})"
+                            )
+                    if cursor_unreached and not timeline_start:
+                        where = (
+                            "before the start of the timeline (full fetch)"
+                            if full_fetch
+                            else f"while the cursor (since_ts={effective_ts}, since_id={since_id}) is still unreached"
+                        )
+                        raise ApiError(
+                            f"Timeline pagination for group {group_id} ended (missing or "
+                            f"repeated continuation) on a full or replayed page {where}"
+                            f"{probe_detail}; refusing to skip a possible gap."
+                        )
+                    if before_cursor:
+                        # Routine, not a gap: e.g. a caller's overlap window subtracted
+                        # from a cursor pinned at the room's oldest message. Nothing older
+                        # exists, so raising would fail every sync and freeze the room.
                         logger.warning(
-                            "Timeline start probe rejected",
+                            "Timeline starts after cursor",
                             group_id=group_id,
-                            probe_first_id=probe_first_id,
-                            oldest_collected_id=oldest_collected_id,
+                            oldest=oldest_timestamp,
+                            cursor=effective_ts,
                         )
-                        probe_detail = (
-                            f" (order=asc probe: probe_first_id={probe_first_id}, "
-                            f"oldest_collected_id={oldest_collected_id})"
+                    elif repeated and not timeline_start:
+                        logger.warning(
+                            "Timeline pagination stuck without a cursor; returning collected pages",
+                            group_id=group_id,
+                            collected=len(all_messages),
                         )
-                if cursor_unreached and not timeline_start:
-                    where = (
-                        "before the start of the timeline (full fetch)"
-                        if full_fetch
-                        else f"while the cursor (since_ts={effective_ts}, since_id={since_id}) is still unreached"
-                    )
-                    raise ApiError(
-                        f"Timeline pagination for group {group_id} ended (missing or "
-                        f"repeated continuation) on a full or replayed page {where}"
-                        f"{probe_detail}; refusing to skip a possible gap."
-                    )
-                if before_cursor:
-                    # Routine, not a gap: e.g. a caller's overlap window subtracted
-                    # from a cursor pinned at the room's oldest message. Nothing older
-                    # exists, so raising would fail every sync and freeze the room.
-                    logger.warning(
-                        "Timeline starts after cursor",
-                        group_id=group_id,
-                        oldest=oldest_timestamp,
-                        cursor=effective_ts,
-                    )
-                elif repeated and not timeline_start:
-                    logger.warning(
-                        "Timeline pagination stuck without a cursor; returning collected pages",
-                        group_id=group_id,
-                        collected=len(all_messages),
-                    )
-                break
+                    break
 
-            page += 1
-            await asyncio.sleep(page_delay)
-
-        if refused_ids:
-            logger.warning("Timeline ids refused", group_id=group_id, count=refused_ids)
+                page += 1
+                await asyncio.sleep(page_delay)
+        finally:
+            # Logged on every exit (return or raise), code and count only.
+            if refused_ids:
+                logger.warning("Timeline ids refused", group_id=group_id, count=refused_ids)
 
         # Filter: keep only messages newer than the cursor
         if effective_ts:

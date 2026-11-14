@@ -515,3 +515,19 @@ async def test_queue_video_inside_the_output_dir_keeps_its_audio_metadata(manage
     ):
         result = await manager.process_media_queue(MagicMock(), queue)
     assert result == {member_dir: {9: {"media_duration": 3.5, "is_muted": False}}}
+
+
+@pytest.mark.asyncio
+async def test_refused_count_is_logged_when_a_later_page_fails():
+    from pysaka.exceptions import ApiError
+
+    client = _client()
+    page = {
+        "messages": [{"id": 9, "published_at": "2026-01-09T00:00:00Z"}, {"id": "../x"}, {"id": None}],
+        "continuation": "c1",
+    }
+    client.fetch_json = AsyncMock(side_effect=[page, None])
+    with capture_logs() as logs, pytest.raises(ApiError):
+        await client.get_messages(MagicMock(), group_id=1, since_ts="2026-01-01T00:00:00Z", page_delay=0)
+    assert [(e["group_id"], e["count"]) for e in logs if e["event"] == "Timeline ids refused"] == [(1, 2)]
+    assert "../x" not in repr(logs)
