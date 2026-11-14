@@ -16,6 +16,7 @@ import structlog
 
 from .credentials import get_token_manager
 from .exceptions import ApiError, RateLimitedError, RefreshFailedError, SessionExpiredError
+from .net_policy import as_int_id
 from .utils import get_jwt_remaining_seconds, get_media_extension, media_file_is_present
 
 logger = structlog.get_logger()
@@ -974,6 +975,9 @@ class Client:
             as the start of the timeline when the room's first message (probed
             with ``order=asc``) has the smallest id among the collected
             messages; merely being collected is not enough.
+            Rows whose ``id`` is not an integer (or the ASCII digits of one) are
+            dropped and counted in a ``Timeline ids refused`` warning; every
+            returned row's ``id`` is an ``int``.
 
         Raises:
             ApiError: If pagination stops in a way that could hide unfetched
@@ -990,6 +994,7 @@ class Client:
                 ``ApiError``), instead of returning ``[]`` or a partial list.
         """
         all_messages: dict[int, dict[str, Any]] = {}
+        refused_ids = 0
         page = 0
         current_continuation = None
 
@@ -1066,10 +1071,18 @@ class Client:
 
             known_before_page = len(all_messages)
             for m in messages:
-                all_messages[m["id"]] = m
+                # Ids name archive files: keep only integer ids (security audit
+                # 2026-11-13); a mixed page also broke the sort below.
+                mid = as_int_id(m.get("id")) if isinstance(m, dict) else None
+                if mid is None:
+                    refused_ids += 1
+                    continue
+                if type(m["id"]) is not int:
+                    m = {**m, "id": mid}
+                all_messages[mid] = m
 
                 # Legacy path: discover timestamp of since_id message
-                if need_discover_ts and m["id"] == since_id:
+                if need_discover_ts and mid == since_id:
                     effective_ts = m.get("published_at")
                     need_discover_ts = False
 
@@ -1162,6 +1175,9 @@ class Client:
 
             page += 1
             await asyncio.sleep(page_delay)
+
+        if refused_ids:
+            logger.warning("Timeline ids refused", group_id=group_id, count=refused_ids)
 
         # Filter: keep only messages newer than the cursor
         if effective_ts:
