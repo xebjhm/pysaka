@@ -930,3 +930,36 @@ class TestMaxPagesSafetyCap:
         assert any(e.get("event") == "blog_pagination_safety_cap_hit" for e in logs), (
             f"expected a safety-cap warning, got {[e.get('event') for e in logs]}"
         )
+
+
+class TestNogizakaApiMainImage:
+    """Ledger D1-T7: the API's ``img`` was added raw (relative) and could be listed twice."""
+
+    def _blog(self, **fields):
+        blog = {
+            "code": "1",
+            "title": "t",
+            "text": "",
+            "link": "",
+            "name": "n",
+            "arti_code": "1",
+            "date": "2026/01/08 20:17:04",
+        }
+        blog.update(fields)
+        return blog
+
+    def test_a_relative_main_image_becomes_absolute(self):
+        scraper = NogizakaBlogScraper(MagicMock())
+        entry = scraper._parse_blog_from_api(self._blog(img="/files/46/diary/main.jpg"))
+        assert entry.images == ["https://www.nogizaka46.com/files/46/diary/main.jpg"]
+
+    def test_a_main_image_also_in_the_content_is_listed_once(self):
+        scraper = NogizakaBlogScraper(MagicMock())
+        entry = scraper._parse_blog_from_api(
+            self._blog(text='<img src="/files/46/diary/a.jpg">', img="/files/46/diary/a.jpg")
+        )
+        assert entry.images == ["https://www.nogizaka46.com/files/46/diary/a.jpg"]
+
+    def test_a_non_string_main_image_is_ignored(self):
+        scraper = NogizakaBlogScraper(MagicMock())
+        assert scraper._parse_blog_from_api(self._blog(img=5)).images == []

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `NogizakaBlogScraper` entries built from the blog API (`_parse_blog_from_api`)
+  put the API's main image `img` into `BlogEntry.images` as the raw value, often
+  a relative `/files/...` path, and listed it twice when the post body also
+  contained it. Now it is made absolute on `https://www.nogizaka46.com` like the
+  body images and listed once; a non-string `img` is ignored.
+
 ## [0.4.8] - 2026-11-10
 
 ### Added

@@ -512,10 +512,13 @@ class NogizakaBlogScraper(BaseBlogScraper):
             if src:
                 images.append(self.normalize_url(src))
 
-        # Also add the main image if present
-        main_img = blog.get("img", "")
-        if main_img and main_img not in images:
-            images.insert(0, main_img)
+        # Also add the main image if present, normalized like the content images
+        # so it is absolute and not listed twice.
+        main_img = blog.get("img")
+        if isinstance(main_img, str) and main_img:
+            main_url = self.normalize_url(main_img)
+            if main_url not in images:
+                images.insert(0, main_url)
 
         return BlogEntry(
             id=blog_id,
