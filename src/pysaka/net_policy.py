@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
-MAX_ID_DIGITS = 19  # fits a signed 64-bit integer
+MAX_ID_DIGITS = 19  # 19 digits fit an unsigned 64-bit integer
 _LOCAL_SUFFIXES = (
     ".localhost",
     ".local",
@@ -72,11 +72,19 @@ def media_url_refusal(url: Any) -> Optional[str]:
     """Why ``url`` must not be downloaded (a log code), or None when it may be."""
     if not isinstance(url, str):
         return "malformed"
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in url):
+        return "control_chars"
     try:
         parts = urlsplit(url)
         port = parts.port
     except ValueError:
         return "malformed"
+    # The HTTP client normalises hosts (IDNA/NFKC, percent-decoding) where urlsplit
+    # does not, so only plain ASCII, unencoded hosts are judged by the checks below.
+    if not parts.netloc.isascii():
+        return "non_ascii_host"
+    if "%" in parts.netloc:
+        return "encoded_host"
     if parts.scheme not in _DEFAULT_PORTS:
         return "scheme"
     if parts.username is not None or parts.password is not None:
@@ -94,14 +102,14 @@ def media_url_refusal(url: Any) -> Optional[str]:
 
 
 def secure_media_url(url: str) -> str:
-    """``url`` with ``http://`` (and an explicit ``:80``) replaced by ``https://``.
+    """``url`` with ``http://`` replaced by ``https://`` and a default or empty port dropped.
 
     Call it only for a URL :func:`media_url_refusal` accepted.
     """
     parts = urlsplit(url)
-    if parts.scheme != "http":
-        return url
-    netloc = parts.netloc
-    if parts.port == 80 and netloc.endswith(":80"):
-        netloc = netloc[: -len(":80")]
-    return urlunsplit(("https", netloc, parts.path, parts.query, parts.fragment))
+    scheme = "https" if parts.scheme == "http" else parts.scheme
+    port = parts.port
+    netloc = parts.netloc.rsplit(":", 1)[0] if ":" in parts.netloc and not parts.netloc.endswith("]") else parts.netloc
+    if port is not None and port != _DEFAULT_PORTS.get(parts.scheme):
+        netloc = f"{netloc}:{port}"
+    return urlunsplit((scheme, netloc, parts.path, parts.query, parts.fragment))

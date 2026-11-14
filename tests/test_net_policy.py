@@ -40,6 +40,8 @@ def test_containment_is_lexical(tmp_path):
         "http://cdn.example.com/a.jpg",
         "https://cdn.example.com:443/a.jpg",
         "https://CDN.Example.com/a.jpg?sig=1",
+        "HTTPS://cdn.example.com/a.jpg",
+        "https://cdn.example.com:443/a.jpg",
     ],
 )
 def test_public_web_addresses_are_allowed(url):
@@ -71,6 +73,16 @@ def test_public_web_addresses_are_allowed(url):
         ("https:///a", "host"),
         ("https://cdn.example.com:99999/a", "malformed"),
         (None, "malformed"),
+        ("https://127.0.0\u30021/a", "non_ascii_host"),
+        ("https://a.b\u3002internal/a", "non_ascii_host"),
+        ("https://127.0.0.\uff10x1/a", "non_ascii_host"),
+        ("https://127%2e0%2e0%2e1/a", "encoded_host"),
+        ("https://cdn.example.com\n/a", "control_chars"),
+        ("https://cdn.example.com/a\tb", "control_chars"),
+        ("https://2130706433/", "ip_literal"),
+        ("https://0177.0.0.1/", "ip_literal"),
+        ("https://localhost./", "local_name"),
+        ("https://[::ffff:127.0.0.1]/a", "ip_literal"),
     ],
 )
 def test_other_addresses_are_refused(url, reason):
@@ -81,3 +93,6 @@ def test_http_is_upgraded_to_https():
     assert secure_media_url("http://cdn.example.com/a.jpg?x=1") == "https://cdn.example.com/a.jpg?x=1"
     assert secure_media_url("http://cdn.example.com:80/a.jpg") == "https://cdn.example.com/a.jpg"
     assert secure_media_url("https://cdn.example.com/a.jpg") == "https://cdn.example.com/a.jpg"
+    assert secure_media_url("http://cdn.example.com:080/a.jpg") == "https://cdn.example.com/a.jpg"
+    assert secure_media_url("http://cdn.example.com:/a.jpg") == "https://cdn.example.com/a.jpg"
+    assert secure_media_url("https://cdn.example.com:443/a.jpg") == "https://cdn.example.com/a.jpg"
