@@ -924,16 +924,18 @@ class Client:
         return result or []
 
     async def _timeline_first_id(self, session: aiohttp.ClientSession, group_id: int) -> Optional[int]:
-        """Id of the room's very first message (``order=asc``, one item), or None
-        if the probe failed. Used to tell the true start of a timeline apart from
-        a dropped continuation on a full page."""
+        """Id of the room's very first message (``order=asc``, one item) as an
+        ``int`` (numeric strings converted like ``get_messages`` rows), or None if
+        the probe failed or its row has no integer id. Used to tell the true start
+        of a timeline apart from a dropped continuation on a full page."""
         data = await self.fetch_json(
             session,
             f"/groups/{group_id}/timeline",
             {"count": 1, "order": "asc", "clear_unread": "false"},
         )
         messages = (data or {}).get("messages") or []
-        return messages[0].get("id") if messages else None
+        first = messages[0] if messages else None
+        return as_int_id(first.get("id")) if isinstance(first, dict) else None
 
     async def get_messages(
         self,

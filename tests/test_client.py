@@ -808,6 +808,50 @@ async def test_full_last_page_at_timeline_start_is_not_a_gap(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_full_last_page_with_numeric_string_ids_is_timeline_start(monkeypatch):
+    """Numeric-string ids are kept as ints by get_messages, so the probe's id must be
+    converted the same way: "1" from the probe matches the collected 1."""
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
+    client = Client(group=Group.HINATAZAKA46, access_token="t")
+
+    def as_strings(rows):
+        return [{**row, "id": str(row["id"])} for row in rows]
+
+    pages = [
+        {"messages": as_strings(_desc_page(201, 200, _sec_ts)), "continuation": "c1"},
+        {"messages": as_strings(_desc_page(1, 200, _sec_ts))},  # full, no continuation
+    ]
+
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return {"messages": [{"id": "1", "published_at": _sec_ts(1)}]}
+        return pages.pop(0)
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
+    msgs = await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
+    assert len(msgs) == 400
+    assert min(m["id"] for m in msgs) == 1
+
+
+@pytest.mark.asyncio
+async def test_full_last_page_raises_when_probe_row_is_not_a_dict(monkeypatch):
+    """A probe answer whose first row is not an object cannot confirm the timeline
+    start: it fails closed with ApiError instead of crashing."""
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
+    client = Client(group=Group.HINATAZAKA46, access_token="t")
+    pages = [{"messages": _desc_page(1, 200, _sec_ts)}]
+
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return {"messages": ["not-a-row"]}
+        return pages.pop(0)
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
+    with pytest.raises(ApiError):
+        await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
+
+
+@pytest.mark.asyncio
 async def test_full_last_page_still_raises_when_first_message_not_collected(monkeypatch):
     """A full last page whose room-start message (order=asc probe) was never collected
     is still a possible gap, so it raises."""
@@ -863,7 +907,7 @@ async def test_full_last_page_raises_when_probe_ignores_order(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("probe_id", "logged_first_id"), [(400, 400), ("400", None)])
+@pytest.mark.parametrize(("probe_id", "logged_first_id"), [(400, 400), ("400", 400), ("x", None)])
 async def test_probe_rejection_reports_ids(monkeypatch, probe_id, logged_first_id):
     """A rejected probe names the probed first id and the oldest collected id,
     so a frozen room can be diagnosed from the log or the error text."""
