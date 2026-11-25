@@ -9,7 +9,7 @@ from pysaka import RateLimitedError, roster
 from pysaka.client import Client, Group
 from pysaka.manager import SyncManager
 
-GROUP = {"id": 79, "name": "18th Single ひなた坂46 LIVE", "thumbnail": "https://cdn/g.png"}
+GROUP = {"id": 79, "name": "18th Single ひなた坂46 LIVE", "thumbnail": "https://cdn.example.com/g.png"}
 API = [{"id": 120, "name": "石塚 瑶季"}]
 
 
@@ -137,6 +137,6 @@ async def test_author_with_empty_and_real_rows_is_kept(manager):
 
 async def test_empty_row_with_media_is_not_skipped(manager):
     out = await manager.extra_room_members(
-        AsyncMock(), GROUP, API, [_empty(1, 29, type="picture", file="https://cdn/p.jpg")]
+        AsyncMock(), GROUP, API, [_empty(1, 29, type="picture", file="https://cdn.example.com/p.jpg")]
     )
     assert [m["id"] for m in out] == [29]

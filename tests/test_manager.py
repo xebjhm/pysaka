@@ -215,8 +215,8 @@ async def test_sync_member_prepare_failure_holds_cursor(sync_manager):
     prefetched = [
         # Valid, newer message — normalizes fine.
         {"id": 101, "type": "text", "text": "Hi", "member_id": 10, "published_at": "2023-01-01T10:00:00Z"},
-        # Malformed: no "id" -> normalize_message raises KeyError. Older timestamp.
-        {"type": "text", "text": "Broken", "member_id": 10, "published_at": "2023-01-01T09:00:00Z"},
+        # Malformed: a non-string media URL makes the row fail to prepare. Older timestamp.
+        {"id": 102, "type": "picture", "file": 123, "member_id": 10, "published_at": "2023-01-01T09:00:00Z"},
     ]
 
     count = await sync_manager.sync_member(session, group, member, media_queue, prefetched_messages=prefetched)
@@ -232,7 +232,8 @@ async def test_sync_member_prepare_failure_holds_cursor(sync_manager):
 @pytest.mark.asyncio
 async def test_process_media_queue(sync_manager):
     session = AsyncMock()
-    queue = [{"url": "u1", "path": Path("p1"), "timestamp": "t1"}, {"url": "u2", "path": Path("p2"), "timestamp": "t2"}]
+    out = sync_manager.output_dir
+    queue = [{"url": "u1", "path": out / "p1", "timestamp": "t1"}, {"url": "u2", "path": out / "p2", "timestamp": "t2"}]
     sync_manager.client.download_file.return_value = True
 
     callback = MagicMock()
@@ -563,8 +564,8 @@ async def test_reconcile_downloads_missing_from_timeline(sync_manager):
     dest = member_dir / "picture" / "103.jpg"
     missing = [{"message_id": 103, "media_type": "picture", "path": dest, "timestamp": "2026-01-03T00:00:00Z"}]
     timeline = [
-        {"id": 103, "file": "https://cdn/fresh-103.jpg", "type": "picture"},
-        {"id": 999, "file": "https://cdn/other.jpg"},
+        {"id": 103, "file": "https://cdn.example.com/fresh-103.jpg", "type": "picture"},
+        {"id": 999, "file": "https://cdn.example.com/other.jpg"},
     ]
     (member_dir / "messages.json").write_text(
         json.dumps(
@@ -922,14 +923,14 @@ def _msg(i, ts, member_id=10, **kw):
 async def test_on_new_messages_receives_only_genuinely_new(sync_manager):
     session = AsyncMock()
     group = {"id": 1, "name": "Grp"}
-    member = {"id": 10, "name": "メンバー", "phone_image": "https://cdn/x/phone.jpg"}
+    member = {"id": 10, "name": "メンバー", "phone_image": "https://cdn.example.com/x/phone.jpg"}
     sync_manager.client.get_messages.return_value = [_msg(101, "2023-01-01T10:00:00Z")]
     await sync_manager.sync_member(session, group, member, [])
 
     # Second sync re-fetches the overlap (101) plus one new message (102).
     sync_manager.client.get_messages.return_value = [
         _msg(101, "2023-01-01T10:00:00Z"),
-        _msg(102, "2023-01-01T11:00:00Z", type="voice", file="https://cdn/v.m4a"),
+        _msg(102, "2023-01-01T11:00:00Z", type="voice", file="https://cdn.example.com/v.m4a"),
     ]
     calls = []
 
@@ -944,7 +945,7 @@ async def test_on_new_messages_receives_only_genuinely_new(sync_manager):
     assert ids == [102]
     assert info["group_id"] == 1 and info["member_id"] == 10
     assert info["member_name"] == "メンバー"
-    assert info["phone_image"] == "https://cdn/x/phone.jpg"
+    assert info["phone_image"] == "https://cdn.example.com/x/phone.jpg"
     assert info["member_dir"] == sync_manager.output_dir / "messages" / "1 Grp" / "10 メンバー"
 
 

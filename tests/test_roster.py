@@ -11,7 +11,7 @@ from pysaka import roster
 from pysaka.client import Client, Group
 from pysaka.manager import SyncManager
 
-GROUP = {"id": 43, "name": "日向坂46", "thumbnail": "https://cdn/g.png"}
+GROUP = {"id": 43, "name": "日向坂46", "thumbnail": "https://cdn.example.com/g.png"}
 
 
 def _m(i, ts, member_id=..., **kw):
@@ -53,7 +53,7 @@ def test_extra_author_ids_order_and_room_author_last():
 
 
 def test_room_author_uses_room_identity():
-    assert roster.room_author(GROUP) == {"id": 0, "name": "日向坂46", "thumbnail": "https://cdn/g.png"}
+    assert roster.room_author(GROUP) == {"id": 0, "name": "日向坂46", "thumbnail": "https://cdn.example.com/g.png"}
 
 
 async def test_member_zero_takes_messages_without_member_id(manager):
@@ -364,7 +364,12 @@ async def test_sync_letters_returns_zero_when_folder_rename_fails(manager, monke
     assert any(e["event"] == "Sync skipped: folder rename failed" and e["member_id"] == 22 for e in logs)
 
 
-PIC_OLD = {"id": 15, "type": "picture", "file": "https://cdn/15.jpg", "published_at": "2020-01-01T00:00:00Z"}
+PIC_OLD = {
+    "id": 15,
+    "type": "picture",
+    "file": "https://cdn.example.com/15.jpg",
+    "published_at": "2020-01-01T00:00:00Z",
+}
 
 
 async def test_ignore_cursor_old_pending_media_does_not_pull_cursor_back(manager):
@@ -398,8 +403,9 @@ async def test_ignore_cursor_new_pending_media_still_clamps(manager):
 async def test_ignore_cursor_old_normalize_failure_does_not_pull_cursor_back(manager):
     member = {"id": 79, "name": "日向坂46"}
     await manager.sync_member(AsyncMock(), GROUP, member, [], prefetched_messages=[_m(20, "2026-01-01T00:00:00Z", 79)])
-    broken_old = {"type": "text", "text": "x", "member_id": 79, "published_at": "2020-01-01T00:00:00Z"}  # no id
-    broken_new = {**broken_old, "published_at": "2026-02-01T00:00:00Z"}
+    # A non-string media URL makes a row fail to prepare (a missing id is now dropped instead).
+    broken_old = {"id": 90, "type": "picture", "file": 123, "member_id": 79, "published_at": "2020-01-01T00:00:00Z"}
+    broken_new = {**broken_old, "id": 91, "published_at": "2026-02-01T00:00:00Z"}
     later = _m(30, "2026-03-01T00:00:00Z", 79)
 
     await manager.sync_member(

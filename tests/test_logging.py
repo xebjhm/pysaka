@@ -228,3 +228,33 @@ class TestRedactSecrets:
         assert jwt not in result["event"]
         assert jwt not in result["body"]
         assert "***REDACTED***" in result["body"]
+
+
+def test_provider_api_key_fields_are_redacted():
+    from pysaka.logging import _REDACTED, _redact_secrets
+
+    out = _redact_secrets(
+        None,
+        "info",
+        {"event": "x", "api_key": "k", "headers": {"x-goog-api-key": "g", "X-Api-Key": "a", "apikey": "b"}},
+    )
+    assert out["api_key"] == _REDACTED
+    assert out["headers"] == {"x-goog-api-key": _REDACTED, "X-Api-Key": _REDACTED, "apikey": _REDACTED}
+
+
+def test_provider_key_shapes_in_free_text_are_redacted():
+    from pysaka.logging import _redact_secrets
+
+    gemini = "AIza" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r"  # 4 + 35 characters
+    openai = "sk-" + "a" * 24
+    anthropic = "sk-ant-api03-" + "b" * 30
+    out = _redact_secrets(None, "info", {"event": f"call failed {gemini} ({openai}) {anthropic}."})
+    for key in (gemini, openai, anthropic):
+        assert key not in out["event"]
+
+
+def test_words_ending_in_sk_are_left_alone():
+    from pysaka.logging import _redact_secrets
+
+    text = "task-1234567890abcdefghijk desk-abcdefghijklmnopqrstu"
+    assert _redact_secrets(None, "info", {"event": text})["event"] == text

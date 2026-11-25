@@ -19,8 +19,8 @@ def _letter(i, upd, member_id=90, url=True):
         "group_id": 90,
         "member_id": member_id,
         "text": f"りかたん 手紙 {i} 🎉",
-        "file": f"https://cdn/letters/{i}.jpg?sig=x" if url else None,
-        "thumbnail": f"https://cdn/letters/t{i}.jpg",
+        "file": f"https://cdn.example.com/letters/{i}.jpg?sig=x" if url else None,
+        "thumbnail": f"https://cdn.example.com/letters/t{i}.jpg",
         "thumbnail_width": 300,
         "thumbnail_height": 480,
         "is_favorite": False,
@@ -132,13 +132,13 @@ async def test_boundary_letter_with_later_updated_at_does_not_lose_letters(manag
 
 async def test_failed_image_holds_cursor_and_retries(manager):
     api = FakeLetterApi([_letter(1, _ts(1))])
-    api.letters[0]["file"] = "https://cdn/fail/1.jpg"
+    api.letters[0]["file"] = "https://cdn.example.com/fail/1.jpg"
     manager.client.get_letters = api.as_mock()
 
     assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 1
     assert "letters_updated_at" not in (manager.sync_state.get("90_90") or {})
 
-    api.letters[0]["file"] = "https://cdn/ok/1.jpg"
+    api.letters[0]["file"] = "https://cdn.example.com/ok/1.jpg"
     assert await manager.sync_letters(AsyncMock(), GROUP, MEMBER) == 0
     assert api.calls[-1] is None  # no cursor yet: full refetch gives a fresh signed URL
     assert manager.sync_state["90_90"]["letters_updated_at"] == _ts(1)

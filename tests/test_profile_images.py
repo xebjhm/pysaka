@@ -11,12 +11,16 @@ from pysaka.client import Client, Group
 from pysaka.manager import SyncManager
 
 NOW = "2026-11-03T04:12:00Z"
-GROUP = {"id": 79, "name": "中川 智尋", "thumbnail": "https://cdn/public/groups/thumbnails/79-20261001-010023.jpg"}
+GROUP = {
+    "id": 79,
+    "name": "中川 智尋",
+    "thumbnail": "https://cdn.example.com/public/groups/thumbnails/79-20261001-010023.jpg",
+}
 MEMBER = {
     "id": 134,
     "name": "中川 智尋",
-    "thumbnail": "https://cdn/public/members/thumbnails/134-20260705-113257.jpeg",
-    "phone_image": "https://cdn/public/members/phone-images/134-20260223-125348.jpeg?sig=abc",
+    "thumbnail": "https://cdn.example.com/public/members/thumbnails/134-20260705-113257.jpeg",
+    "phone_image": "https://cdn.example.com/public/members/phone-images/134-20260223-125348.jpeg?sig=abc",
 }
 
 
@@ -28,11 +32,11 @@ def test_image_urls_skips_empty():
 @pytest.mark.parametrize(
     "url,expected",
     [
-        ("https://cdn/a/134-20260705-113257.jpeg", "thumbnail/134-20260705-113257.jpeg"),
-        ("https://cdn/a/x.jpeg?sig=1#f", "thumbnail/x.jpeg"),
-        ("https://cdn/a/..", "thumbnail/_"),
-        ("https://cdn/a/", None),
-        ("https://cdn/a/.", None),
+        ("https://cdn.example.com/a/134-20260705-113257.jpeg", "thumbnail/134-20260705-113257.jpeg"),
+        ("https://cdn.example.com/a/x.jpeg?sig=1#f", "thumbnail/x.jpeg"),
+        ("https://cdn.example.com/a/..", "thumbnail/_"),
+        ("https://cdn.example.com/a/", None),
+        ("https://cdn.example.com/a/.", None),
     ],
 )
 def test_relative_file(url, expected):
@@ -61,9 +65,9 @@ def test_merge_index_current_tracks_api_even_before_download():
 
 
 def test_merge_index_stores_urls_without_query_or_fragment():
-    signed = "https://cdn/private/users/thumbnails/a.jpg?Expires=1&Signature=s&Key-Pair-Id=k#f"
+    signed = "https://cdn.example.com/private/users/thumbnails/a.jpg?Expires=1&Signature=s&Key-Pair-Id=k#f"
     idx = pi.merge_index(None, {"thumbnail": ("thumbnail/a.jpg", signed)}, {"thumbnail": signed}, NOW)
-    clean = "https://cdn/private/users/thumbnails/a.jpg"
+    clean = "https://cdn.example.com/private/users/thumbnails/a.jpg"
     assert idx["current"] == {"thumbnail": clean}
     assert idx["images"][0]["url"] == clean
     assert "Signature" not in json.dumps(idx)
@@ -130,12 +134,12 @@ async def test_archive_downloads_then_skips(manager, tmp_path, time_machine):
 
 async def test_archive_failed_download_is_not_indexed_and_retried(manager, tmp_path):
     member_dir = tmp_path / "m"
-    member = {**MEMBER, "thumbnail": "https://cdn/fail/t.jpg"}
+    member = {**MEMBER, "thumbnail": "https://cdn.example.com/fail/t.jpg"}
     report = await manager.archive_profile_images(AsyncMock(), GROUP, member, member_dir)
     assert report["failed"] == 1
     idx = _index(member_dir)
     assert "thumbnail/t.jpg" not in {e["file"] for e in idx["images"]}
-    assert idx["current"]["thumbnail"] == "https://cdn/fail/t.jpg"
+    assert idx["current"]["thumbnail"] == "https://cdn.example.com/fail/t.jpg"
 
 
 async def test_archive_no_urls_writes_nothing(manager, tmp_path):
@@ -164,7 +168,7 @@ async def test_sync_member_survives_archiving_crash(manager, monkeypatch):
 
 
 async def test_archiving_crash_logs_error_type_not_message(manager, monkeypatch):
-    secret = "https://cdn/x.jpg?sig=SECRET"
+    secret = "https://cdn.example.com/x.jpg?sig=SECRET"
     monkeypatch.setattr(manager, "archive_profile_images", AsyncMock(side_effect=RuntimeError(secret)))
     with capture_logs() as logs:
         await manager._archive_profile_images_safely(AsyncMock(), GROUP, MEMBER)
@@ -175,7 +179,7 @@ async def test_archiving_crash_logs_error_type_not_message(manager, monkeypatch)
 
 async def test_archive_url_without_basename_counts_as_failed(manager, tmp_path):
     member_dir = tmp_path / "m"
-    member = {**MEMBER, "thumbnail": "https://cdn/dir/"}
+    member = {**MEMBER, "thumbnail": "https://cdn.example.com/dir/"}
     report = await manager.archive_profile_images(AsyncMock(), {"id": 1, "name": "G"}, member, member_dir)
     assert report["failed"] == 1
     assert manager.client.download_file.await_count == 1  # only phone_image was attempted
