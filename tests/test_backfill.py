@@ -52,7 +52,7 @@ async def test_backfill_merges_older_messages_and_sets_flag(manager, time_machin
     cursor_before = dict(manager.sync_state["79_134"])
     manager.client.get_past_messages.return_value = [
         _m(400, "2026-06-14T04:57:00Z"),
-        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/p.jpg"),
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn.example.com/p.jpg"),
         _m(999, "2026-06-14T10:00:00Z", member_id=1),  # other member: ignored
     ]
 
@@ -108,14 +108,14 @@ async def test_backfill_malformed_200_does_not_set_flag(manager, payload):
 async def test_backfill_missing_media_does_not_set_flag_and_retries(manager):
     path = await _first_sync(manager)
     manager.client.get_past_messages.return_value = [
-        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/fail.jpg")
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn.example.com/fail.jpg")
     ]
     assert await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER) == 1
     assert "past_backfilled_at" not in manager.sync_state["79_134"]
     assert _ids(path) == [401, 500]
 
     manager.client.get_past_messages.return_value = [
-        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/ok.jpg")
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn.example.com/ok.jpg")
     ]
     assert await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER) == 0  # already on disk
     assert "past_backfilled_at" in manager.sync_state["79_134"]
@@ -198,7 +198,7 @@ async def test_backfill_writes_media_metadata(manager, monkeypatch):
     path = await _first_sync(manager)
     monkeypatch.setattr("pysaka.manager.get_media_dimensions", lambda p, t: (640, 480))
     manager.client.get_past_messages.return_value = [
-        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/p.jpg")
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn.example.com/p.jpg")
     ]
     assert await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER) == 1
     with open(path, encoding="utf-8") as f:
@@ -267,7 +267,7 @@ async def test_backfill_partial_normalize_failure_merges_valid_and_retries(manag
 
     manager.client.get_past_messages.return_value = [
         _m(400, "2026-06-14T04:57:00Z"),
-        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn/p401.jpg"),
+        _m(401, "2026-06-14T13:40:00Z", type="picture", file="https://cdn.example.com/p401.jpg"),
     ]
     assert await manager.backfill_past_messages(AsyncMock(), GROUP, MEMBER) == 1
     assert _ids(path) == [400, 401, 500]

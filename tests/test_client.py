@@ -666,7 +666,7 @@ async def test_download_file_zero_byte_stub_is_redownloaded(tmp_path, client, mo
     resp.status = 200
     resp.read = AsyncMock(return_value=b"REALBYTES")
     resp.headers = {}
-    ok = await client.download_file(mock_session, "https://cdn/1.jpg", dest)
+    ok = await client.download_file(mock_session, "https://cdn.example.com/1.jpg", dest)
     assert ok is True
     assert dest.read_bytes() == b"REALBYTES"
 
@@ -678,7 +678,7 @@ async def test_download_file_content_length_mismatch_leaves_no_stub(tmp_path, cl
     resp.status = 200
     resp.read = AsyncMock(return_value=b"AB")
     resp.headers = {"Content-Length": "999"}
-    ok = await client.download_file(mock_session, "https://cdn/2.jpg", dest, retries=1)
+    ok = await client.download_file(mock_session, "https://cdn.example.com/2.jpg", dest, retries=1)
     assert ok is False
     assert not dest.exists()  # no truncated stub
     assert not (dest.parent / "2.jpg.part").exists()
@@ -694,7 +694,7 @@ async def test_download_file_skips_length_check_when_encoded(tmp_path, client, m
     resp.status = 200
     resp.read = AsyncMock(return_value=b"DECOMPRESSED_BYTES")
     resp.headers = {"Content-Encoding": "gzip", "Content-Length": "999"}
-    ok = await client.download_file(mock_session, "https://cdn/4.jpg", dest)
+    ok = await client.download_file(mock_session, "https://cdn.example.com/4.jpg", dest)
     assert ok is True
     assert dest.read_bytes() == b"DECOMPRESSED_BYTES"
 
@@ -709,7 +709,7 @@ async def test_download_file_retries_then_succeeds(tmp_path, client, mock_sessio
     resp_ok.read = AsyncMock(return_value=b"OK")
     resp_ok.headers = {}
     mock_session.get.return_value.__aenter__.side_effect = [resp_500, resp_ok]
-    ok = await client.download_file(mock_session, "https://cdn/3.jpg", dest, retries=3)
+    ok = await client.download_file(mock_session, "https://cdn.example.com/3.jpg", dest, retries=3)
     assert ok is True
     assert dest.read_bytes() == b"OK"
 
@@ -719,7 +719,7 @@ async def test_download_file_retries_then_succeeds(tmp_path, client, mock_sessio
 async def test_download_file_logs_never_contain_signed_query(tmp_path, client, mock_session, failure):
     from structlog.testing import capture_logs
 
-    url = "https://cdn/x.jpg?sig=SECRET#frag"
+    url = "https://cdn.example.com/x.jpg?sig=SECRET#frag"
     if failure == "status":
         resp = mock_session.get.return_value.__aenter__.return_value
         resp.status = 403
@@ -762,12 +762,12 @@ def test_redact_url_drops_userinfo(url, expected):
 async def test_download_file_with_unparseable_url_fails_cleanly(tmp_path, client, mock_session):
     from structlog.testing import capture_logs
 
-    mock_session.get.return_value.__aenter__.return_value.status = 403
     with capture_logs() as logs:
         ok = await client.download_file(mock_session, "http://[abc/x.jpg?sig=SECRET", tmp_path / "x.jpg", retries=1)
     assert ok is False
-    dumped = str(logs)
-    assert "SECRET" not in dumped and "<unparseable url>" in dumped
+    mock_session.get.assert_not_called()  # refused before any request
+    assert "SECRET" not in str(logs)
+    assert [e["reason"] for e in logs if e["event"] == "Download refused"] == ["malformed"]
 
 
 def _desc_page(start_id, n, ts_fn):
@@ -805,6 +805,50 @@ async def test_full_last_page_at_timeline_start_is_not_a_gap(monkeypatch):
     assert len(probes) == 1
     assert probes[0]["clear_unread"] == "false"
     assert probes[0]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_full_last_page_with_numeric_string_ids_is_timeline_start(monkeypatch):
+    """Numeric-string ids are kept as ints by get_messages, so the probe's id must be
+    converted the same way: "1" from the probe matches the collected 1."""
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
+    client = Client(group=Group.HINATAZAKA46, access_token="t")
+
+    def as_strings(rows):
+        return [{**row, "id": str(row["id"])} for row in rows]
+
+    pages = [
+        {"messages": as_strings(_desc_page(201, 200, _sec_ts)), "continuation": "c1"},
+        {"messages": as_strings(_desc_page(1, 200, _sec_ts))},  # full, no continuation
+    ]
+
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return {"messages": [{"id": "1", "published_at": _sec_ts(1)}]}
+        return pages.pop(0)
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
+    msgs = await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
+    assert len(msgs) == 400
+    assert min(m["id"] for m in msgs) == 1
+
+
+@pytest.mark.asyncio
+async def test_full_last_page_raises_when_probe_row_is_not_a_dict(monkeypatch):
+    """A probe answer whose first row is not an object cannot confirm the timeline
+    start: it fails closed with ApiError instead of crashing."""
+    monkeypatch.setattr("pysaka.client.asyncio.sleep", AsyncMock())
+    client = Client(group=Group.HINATAZAKA46, access_token="t")
+    pages = [{"messages": _desc_page(1, 200, _sec_ts)}]
+
+    async def fetch(session, endpoint, params=None):
+        if params.get("order") == "asc":
+            return {"messages": ["not-a-row"]}
+        return pages.pop(0)
+
+    client.fetch_json = AsyncMock(side_effect=fetch)
+    with pytest.raises(ApiError):
+        await client.get_messages(MagicMock(), 5, since_ts="2025-12-31T00:00:00Z")
 
 
 @pytest.mark.asyncio
@@ -863,7 +907,7 @@ async def test_full_last_page_raises_when_probe_ignores_order(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("probe_id", "logged_first_id"), [(400, 400), ("400", None)])
+@pytest.mark.parametrize(("probe_id", "logged_first_id"), [(400, 400), ("400", 400), ("x", None)])
 async def test_probe_rejection_reports_ids(monkeypatch, probe_id, logged_first_id):
     """A rejected probe names the probed first id and the oldest collected id,
     so a frozen room can be diagnosed from the log or the error text."""

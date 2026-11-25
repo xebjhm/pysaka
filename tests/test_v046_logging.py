@@ -171,7 +171,9 @@ async def test_stored_message_turning_canceled_is_logged(manager):
 
 
 async def test_canceled_without_captured_content_logs_content_kept_false(manager):
-    await _sync(manager, [_c(2, type="picture", text=None, file="https://cdn/p.jpg?sig=SECRETURL")])  # no text captured
+    await _sync(
+        manager, [_c(2, type="picture", text=None, file="https://cdn.example.com/p.jpg?sig=SECRETURL")]
+    )  # no text captured
     with capture_logs() as logs:
         await _sync(manager, [_c(2, state="canceled", type="picture")], ignore_cursor=True)
     (info,) = _events(logs, "Stored message turned canceled")
@@ -198,10 +200,17 @@ async def test_already_canceled_row_is_not_logged_again(manager):
 async def test_ignore_cursor_logs_exclusions_below_the_floor(manager):
     member = {"id": 79, "name": "日向坂46"}
     await _sync_room(manager, member, [_m(20, 79, ts="2026-01-01T00:00:00Z")])
-    pic = {"id": 15, "type": "picture", "file": "https://cdn/15.jpg?sig=SECRETURL", "member_id": 79}
+    pic = {"id": 15, "type": "picture", "file": "https://cdn.example.com/15.jpg?sig=SECRETURL", "member_id": 79}
     old_pic = {**pic, "published_at": "2020-01-01T00:00:00Z"}
-    bad = {"id": 16, "member_id": 79, "published_at": "2020-01-02T00:00:00Z", "type": "text", "text": SECRET}
-    del bad["id"]  # normalize_message raises KeyError -> a failed row
+    # A non-string media URL makes the row fail to prepare -> a failed row.
+    bad = {
+        "id": 16,
+        "member_id": 79,
+        "published_at": "2020-01-02T00:00:00Z",
+        "type": "picture",
+        "file": 123,
+        "text": SECRET,
+    }
     with capture_logs() as logs:
         await _sync_room(manager, member, [old_pic, bad, _m(20, 79, ts="2026-01-01T00:00:00Z")], ignore_cursor=True)
     (dbg,) = _events(logs, "Old rows excluded from cursor clamp")
@@ -307,7 +316,7 @@ async def test_get_member_non_object_body_is_logged(client, mock_session):
 
 async def test_prepare_error_logs_type_not_message_text(manager, monkeypatch):
     def boom(msg):
-        raise ValueError(f"bad row: {msg['text']} https://cdn/x.jpg?sig=SECRETURL")
+        raise ValueError(f"bad row: {msg['text']} https://cdn.example.com/x.jpg?sig=SECRETURL")
 
     monkeypatch.setattr("pysaka.manager.normalize_message", boom)
     with capture_logs() as logs:
@@ -356,8 +365,8 @@ async def test_fetch_json_unexpected_error_logs_type_only(client, mock_session):
 
 
 async def test_download_message_media_error_logs_type_only(client, mock_session, tmp_path):
-    client.download_file = AsyncMock(side_effect=RuntimeError("https://cdn/p.jpg?sig=SECRETURL " + SECRET))
-    message = {"id": 1, "type": "picture", "file": "https://cdn/p.jpg?sig=SECRETURL"}
+    client.download_file = AsyncMock(side_effect=RuntimeError("https://cdn.example.com/p.jpg?sig=SECRETURL " + SECRET))
+    message = {"id": 1, "type": "picture", "file": "https://cdn.example.com/p.jpg?sig=SECRETURL"}
     with capture_logs() as logs:
         assert await client.download_message_media(mock_session, message, tmp_path) is None
     (err,) = _events(logs, "Message media download error")
@@ -368,7 +377,7 @@ async def test_download_message_media_error_logs_type_only(client, mock_session,
 
 async def test_prepare_error_logs_text_free_origin(manager, tmp_path_factory):
     elsewhere = tmp_path_factory.mktemp("elsewhere")  # not under output_dir: relative_to raises in manager.py
-    row = {"id": 1, "type": "picture", "text": SECRET, "file": "https://cdn/p.jpg?sig=SECRETURL"}
+    row = {"id": 1, "type": "picture", "text": SECRET, "file": "https://cdn.example.com/p.jpg?sig=SECRETURL"}
     with capture_logs() as logs:
         processed, failed_ts, _ = manager.prepare_messages([row], elsewhere, [])
     assert processed == [] and failed_ts == ""
@@ -434,10 +443,12 @@ async def test_network_and_timeout_errors_log_redacted_url_and_type_only(client,
 
 
 async def test_download_ultimately_failed_logs_type_not_text(client, mock_session, tmp_path):
-    mock_session.get.side_effect = RuntimeError("https://cdn/p.jpg?sig=SECRETURL")
+    mock_session.get.side_effect = RuntimeError("https://cdn.example.com/p.jpg?sig=SECRETURL")
     with capture_logs() as logs:
         assert (
-            await client.download_file(mock_session, "https://cdn/p.jpg?sig=SECRETURL", tmp_path / "p.jpg", retries=1)
+            await client.download_file(
+                mock_session, "https://cdn.example.com/p.jpg?sig=SECRETURL", tmp_path / "p.jpg", retries=1
+            )
             is False
         )
     (err,) = _events(logs, "Download ultimately failed")
@@ -460,7 +471,10 @@ async def test_download_ultimately_failed_logs_reason_for_non_exceptions(
     resp.headers = {}
     with capture_logs() as logs:
         assert (
-            await client.download_file(mock_session, "https://cdn/p.jpg?sig=S", tmp_path / "p.jpg", retries=1) is False
+            await client.download_file(
+                mock_session, "https://cdn.example.com/p.jpg?sig=S", tmp_path / "p.jpg", retries=1
+            )
+            is False
         )
     (err,) = _events(logs, "Download ultimately failed")
     assert err["reason"] == reason and "error_type" not in err

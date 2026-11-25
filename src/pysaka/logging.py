@@ -22,6 +22,10 @@ _SENSITIVE_KEYS = {
     "cookie",
     "cookies",
     "authorization",
+    "api_key",
+    "apikey",
+    "x-api-key",
+    "x-goog-api-key",
 }
 
 # PY-SEC-02: value-level scrubbers for secrets embedded in free strings
@@ -30,6 +34,10 @@ _SENSITIVE_KEYS = {
 #   - bare JWTs (three base64url segments joined by dots)
 _BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9._~+/-]+=*", re.IGNORECASE)
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b")
+#   - provider API keys (security audit 2026-11-13, hardening #31): Gemini
+#     ``AIza`` + 35 characters and OpenAI/Anthropic-style ``sk-`` keys, unless
+#     glued to a preceding letter, digit, ``_`` or ``-`` (``task-…`` stays readable)
+_PROVIDER_KEY_RE = re.compile(r"(?<![A-Za-z0-9_-])(?:AIza[0-9A-Za-z_-]{35}|sk-[A-Za-z0-9_-]{20,})")
 
 
 def configure_logging(
@@ -174,13 +182,14 @@ def configure_logging(
 
 
 def _scrub_string(value: str) -> str:
-    """Redact secret-shaped substrings (Bearer values, bare JWTs) from a string.
+    """Redact secret-shaped substrings (Bearer values, bare JWTs, provider API keys) from a string.
 
     PY-SEC-02: catches credentials interpolated into free strings (f-strings,
     logged response bodies) that never sit under a sensitive key.
     """
     scrubbed = _BEARER_RE.sub(_REDACTED, value)
     scrubbed = _JWT_RE.sub(_REDACTED, scrubbed)
+    scrubbed = _PROVIDER_KEY_RE.sub(_REDACTED, scrubbed)
     return scrubbed
 
 
@@ -210,7 +219,7 @@ def _redact_secrets(logger: logging.Logger, method_name: str, event_dict: dict[s
     Processor to redact sensitive data from log output.
 
     Redacts (a) values under a sensitive key at any nesting depth, and (b)
-    secret-shaped substrings (Bearer values / JWTs) embedded in string values —
+    secret-shaped substrings (Bearer values, JWTs, provider API keys) embedded in string values —
     including the rendered ``event`` message. Builds a fully redacted COPY so a
     live credential dict logged by a caller is never mutated (PY-CORE-03).
     """

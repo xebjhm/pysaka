@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-11-26
+
+### Added
+- `pysaka.net_policy`: `as_int_id`, `is_contained` (with `strict=True` for
+  files), `media_url_refusal` and `secure_media_url`, the checks the SDK now
+  applies to server ids and media URLs.
+
+### Changed
+- `Client.get_messages` drops timeline rows whose `id` is not an integer (or
+  its ASCII digits) and logs `Timeline ids refused` with the count (also when a
+  later page fails); every returned row's `id` is an `int`. Before, such rows
+  were returned with their raw ids, so a string id reached file names, and a
+  page mixing them with integer ids raised `TypeError` or `KeyError`. The
+  page's oldest timestamp (progress callback, cursor stop) comes from its last
+  kept row, so a non-dict or refused last row no longer crashes or moves the
+  cursor. On full and incremental fetches alike, a page with rows but none
+  usable now raises `ApiError`.
+- `SyncManager.sync_member`, `backfill_past_messages` and `sync_letters`
+  return 0 without touching the disk when the group or member `id` is not an
+  integer (`Room ids refused`); numeric-string ids are used as `int`.
+  `room_archive_complete` returns False for such a group.
+- `SyncManager.prepare_messages` drops rows whose `id` is not an integer: they
+  are not queued, stored or checked on disk and no longer hold the cursor
+  (`earliest_failed_ts` ignores them); logged as `Messages refused`. A media
+  path that would leave the member folder is dropped the same way.
+- `SyncManager.process_media_queue` refuses items whose `path` is not a `Path` or `str`
+  or not strictly inside the manager's `output_dir` (not downloaded,
+  `item_callback(False)`, one `Media items refused` warning per `reason`:
+  `bad_path` or `outside_output_dir`). `SyncManager.scan_member_media` lists a
+  `media_file` that is not a string or is not strictly inside `output_dir`
+  under `unresolved`.
+
+### Security
+- `Client.download_file` refuses media URLs that are not public web addresses
+  (other schemes, IP literals, local names, non-default ports, user info) with
+  `Download refused` and sends no request; `http://` is fetched as `https://`.
+  Redirects are followed by hand (at most 3), each target checked the same way;
+  a refused redirect is not retried and leaves no `.part` file. Before,
+  aiohttp followed up to 10 redirects unchecked.
+- The log redaction processor also redacts `api_key`, `apikey`, `x-api-key`
+  and `x-goog-api-key` values and Gemini (`AIza...`) and `sk-...` key shapes in
+  free text.
+
+### Fixed
+- `NogizakaBlogScraper` entries built from the blog API (`_parse_blog_from_api`)
+  put the API's main image `img` into `BlogEntry.images` as the raw value, often
+  a relative `/files/...` path, and listed it twice when the post body also
+  contained it. Now it is made absolute on `https://www.nogizaka46.com` like the
+  body images and listed once; a non-string `img` is ignored.
+
 ## [0.4.8] - 2026-11-10
 
 ### Added
@@ -515,7 +565,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Secure credential storage via system keyring
 - Token refresh without storing plaintext credentials
 
-[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.8...HEAD
+[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.9...HEAD
+[0.4.9]: https://github.com/xebjhm/pysaka/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/xebjhm/pysaka/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/xebjhm/pysaka/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/xebjhm/pysaka/compare/v0.4.5...v0.4.6

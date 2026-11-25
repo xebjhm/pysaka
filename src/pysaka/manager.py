@@ -18,6 +18,7 @@ from . import profile_images, roster
 from .client import Client
 from .exceptions import RefreshFailedError, SessionExpiredError
 from .media import get_audio_metadata, get_media_dimensions
+from .net_policy import as_int_id, is_contained
 from .utils import (
     CANCELED_STATES,
     _normalized_type,
@@ -413,14 +414,18 @@ class SyncManager:
         non-dict entries are not expected. A stored ``"messages": null`` counts as
         empty. False when an author's ids are missing, or when a ``messages.json`` is
         unreadable, not a JSON object, or has a ``messages`` value that is not a list
-        (a warning with group id, member id and the reason is logged). Catches what a
+        (a warning with group id, member id and the reason is logged). False
+        (``Room ids refused``) when the group id is not an integer. Catches what a
         raised exception would not: a write that failed (``sync_member`` returns 0)
         or a message that failed to normalize.
         """
         return await asyncio.to_thread(self._room_archive_complete_sync, group, messages)
 
     def _room_archive_complete_sync(self, group: dict[str, Any], messages: list[dict[str, Any]]) -> bool:
-        gid = group["id"]
+        gid = as_int_id(group.get("id"))
+        if gid is None:
+            logger.warning("Room ids refused", kind="group")
+            return False
         wanted: dict[int, set[int]] = {}
         skipped = 0
         for m in messages:
@@ -469,13 +474,43 @@ class SyncManager:
         )
         return True
 
+    def _room_ids(
+        self, group: dict[str, Any], member: dict[str, Any]
+    ) -> Optional[tuple[dict[str, Any], dict[str, Any]]]:
+        """Copies of ``group`` and ``member`` with ``int`` ids, or None when either id is not one.
+
+        Room and member ids name archive folders, so ``"../x"`` or an absolute path
+        must never reach a path (security audit 2026-11-13). Logs ``Room ids
+        refused`` (``kind`` = ``group`` or ``member``) and returns None then.
+        """
+        gid = as_int_id(group.get("id"))
+        mid = as_int_id(member.get("id"))
+        if gid is None or mid is None:
+            logger.warning("Room ids refused", kind="group" if gid is None else "member")
+            return None
+        return {**group, "id": gid}, {**member, "id": mid}
+
+    @staticmethod
+    def _dir_id(value: Any) -> int:
+        """An id that may name a folder: a true non-negative ``int``; else ``ValueError``.
+
+        The public entry points normalise ids with :meth:`_room_ids` first; this
+        stops a caller that skipped it instead of writing outside the archive.
+        """
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("bad_id")
+        return value
+
     def _member_dir_path(self, group: dict[str, Any], member: dict[str, Any]) -> Path:
-        """The on-disk directory of a member's archive (same naming as sync_member)."""
+        """The on-disk directory of a member's archive (same naming as sync_member).
+
+        Raises ``ValueError`` for an id that is not an ``int`` (see :meth:`_dir_id`).
+        """
         return (
             self.output_dir
             / "messages"
-            / f"{group['id']} {sanitize_name(group['name'])}"
-            / f"{member['id']} {sanitize_name(member['name'])}"
+            / f"{self._dir_id(group['id'])} {sanitize_name(group['name'])}"
+            / f"{self._dir_id(member['id'])} {sanitize_name(member['name'])}"
         )
 
     def _ensure_group_dir(self, group: dict[str, Any]) -> Path:
@@ -489,9 +524,10 @@ class SyncManager:
         the group directory; it does not create the directory itself.
 
         Raises:
+            ValueError: the group id is not an ``int`` (see :meth:`_dir_id`).
             OSError: the rename failed (nothing was changed).
         """
-        gid = group["id"]
+        gid = self._dir_id(group["id"])
         messages_dir = self.output_dir / "messages"
         group_dir = messages_dir / f"{gid} {sanitize_name(group['name'])}"
         if not group_dir.exists() and messages_dir.exists():
@@ -515,9 +551,10 @@ class SyncManager:
         target does not exist yet; never creates the directory.
 
         Raises:
+            ValueError: ``member_id`` is not an ``int`` (see :meth:`_dir_id`).
             OSError: the rename failed (a warning is logged; nothing was changed).
         """
-        member_dir = group_dir / f"{member_id} {name}"
+        member_dir = group_dir / f"{self._dir_id(member_id)} {name}"
         if not member_dir.exists() and group_dir.exists():
             prefix = f"{member_id} "
             for existing in group_dir.iterdir():
@@ -703,7 +740,14 @@ class SyncManager:
         Returns:
             Number of messages processed in this run (includes re-fetched
             overlap, so it is not a count of new messages).
+
+        Returns 0 without touching the disk when the group or member id is not an
+        integer (``Room ids refused``); numeric-string ids are used as ``int``.
         """
+        checked = self._room_ids(group, member)
+        if checked is None:
+            return 0
+        group, member = checked
         processed = await self._sync_member_messages(
             session,
             group,
@@ -916,7 +960,14 @@ class SyncManager:
                 (left untouched; a warning is logged, with the found type for a
                 non-object; 0 returned) or whose write failed (logged by the
                 write; 0 returned).
+
+        Returns 0 without touching the disk when the group or member id is not an
+        integer (``Room ids refused``); numeric-string ids are used as ``int``.
         """
+        checked = self._room_ids(group, member)
+        if checked is None:
+            return 0
+        group, member = checked
         gid, mid = group["id"], member["id"]
         if mid == roster.ROOM_AUTHOR_ID:
             logger.debug("Backfill skipped: room author", group_id=gid, member_id=mid)
@@ -1103,7 +1154,14 @@ class SyncManager:
         Returns:
             Number of letters that were not in ``letters.json`` before (all of
             them after a corrupt or missing file).
+
+        Returns 0 without touching the disk when the group or member id is not an
+        integer (``Room ids refused``); numeric-string ids are used as ``int``.
         """
+        checked = self._room_ids(group, member)
+        if checked is None:
+            return 0
+        group, member = checked
         gid, mid = group["id"], member["id"]
         if mid == roster.ROOM_AUTHOR_ID:
             logger.debug("Letters skipped: room author", group_id=gid, member_id=mid)
@@ -1778,13 +1836,30 @@ class SyncManager:
             ``earliest_pending_media_ts`` is the ``published_at`` (or ``""`` if none) of
             the oldest message whose media was queued for download; ``None`` if no media
             was queued. The caller must not advance the cursor past it.
+
+        Rows whose ``id`` is not an integer (:func:`pysaka.net_policy.as_int_id`) are
+        dropped: not queued, not stored, not checked on disk and not counted in
+        ``earliest_failed_ts``; they are counted in a ``Messages refused`` warning
+        (``reason=bad_id``). A media path that would leave ``member_dir`` is dropped
+        the same way (``reason=outside_member_dir``).
         """
         processed = []
         earliest_failed_ts: Optional[str] = None
         earliest_pending_media_ts: Optional[str] = None
         below_floor_pending = 0
         below_floor_failed = 0
+        refused_ids = 0
+        refused_paths = 0
         for msg in messages:
+            # Ids name files: a row whose id cannot is dropped, not failed. Retrying
+            # never fixes it, so it must not hold the cursor (security audit
+            # 2026-11-13, ledger C-T5), and nothing is queued, stored or stat()ed.
+            msg_id = as_int_id(msg.get("id")) if isinstance(msg, dict) else None
+            if msg_id is None:
+                refused_ids += 1
+                continue
+            if type(msg["id"]) is not int:
+                msg = {**msg, "id": msg_id}
             try:
                 # Normalize core fields
                 p_msg = normalize_message(msg)
@@ -1804,7 +1879,10 @@ class SyncManager:
                     elif msg_type == "voice":
                         subdir = "voice"
 
-                    filepath = member_dir / subdir / f"{msg['id']}.{ext}"
+                    filepath = member_dir / subdir / f"{msg_id}.{ext}"
+                    if not is_contained(filepath, member_dir, strict=True):
+                        refused_paths += 1
+                        continue
 
                     # Compute presence the same way scan_member_media does: absent OR zero-byte = missing.
                     media_present = media_file_is_present(filepath)
@@ -1816,7 +1894,7 @@ class SyncManager:
                                 "url": media_url,
                                 "path": filepath,
                                 "timestamp": msg.get("published_at"),
-                                "message_id": msg["id"],
+                                "message_id": msg_id,
                                 "media_type": msg_type,
                                 "member_dir": member_dir,
                             }
@@ -1858,6 +1936,10 @@ class SyncManager:
                     below_floor_failed += 1
                 # Only the type: the exception text may quote the message that failed.
                 logger.error("Prepare error", message_id=mid, error_type=type(e).__name__, **_error_origin(e))
+        if refused_ids:
+            logger.warning("Messages refused", reason="bad_id", count=refused_ids)
+        if refused_paths:
+            logger.warning("Messages refused", reason="outside_member_dir", count=refused_paths)
         if below_floor_pending or below_floor_failed:
             logger.debug(
                 "Old rows excluded from cursor clamp",
@@ -1958,6 +2040,8 @@ class SyncManager:
             source-removed stub): they cannot be located or verified on disk, so they
             are reported separately rather than silently ignored — otherwise the
             result would claim 'all present' while such media is genuinely absent.
+            A ``media_file`` that is not a string or is not strictly inside
+            ``output_dir`` is also listed in ``unresolved`` (no path) and never checked on disk.
 
             ``error`` is ``None`` for a readable manifest. When messages.json cannot
             be used it is set to a stable id so callers can distinguish it from a
@@ -1967,6 +2051,7 @@ class SyncManager:
             object). In every case the zero/empty counts are still returned.
         """
         result: dict[str, Any] = {"checked": 0, "missing": [], "unresolved": [], "error": None}
+        refused = 0
         messages_file = member_dir / "messages.json"
         if not messages_file.exists():
             # An absent manifest is NOT the same as a fully-synced member (which also
@@ -2017,6 +2102,21 @@ class SyncManager:
                     }
                 )
                 continue
+            if not isinstance(media_file, str) or not is_contained(
+                self.output_dir / media_file, self.output_dir, strict=True
+            ):
+                # A stored path that leaves the archive is never checked or re-downloaded
+                # (security audit 2026-11-13: Verify & Fix recreated it). Paths into other
+                # folders of the archive stay "missing", as before (rename tests rely on it).
+                refused += 1
+                result["unresolved"].append(
+                    {
+                        "message_id": msg.get("id"),
+                        "media_type": mtype,
+                        "timestamp": msg.get("timestamp") or msg.get("published_at"),
+                    }
+                )
+                continue
             result["checked"] += 1
             path = self.output_dir / media_file
             present = media_file_is_present(path)
@@ -2029,6 +2129,8 @@ class SyncManager:
                         "timestamp": msg.get("timestamp") or msg.get("published_at"),
                     }
                 )
+        if refused:
+            logger.warning("saka.scan.media_file_refused", count=refused)
         return result
 
     async def process_media_queue(
@@ -2055,11 +2157,18 @@ class SyncManager:
                 async), called after each successful download; ``completed``
                 counts successes only.
             item_callback: Optional ``(ok)`` callback (sync or async), called
-                once per item after its download attempt, success (``True``) or
-                failure (``False``), so a caller can count processed items.
+                once per item: ``True`` after a successful download, ``False``
+                after a failed one or when the item is refused (see below), so a
+                caller can count processed items.
 
         A callback that raises is logged (``Media queue callback failed``, with
         the callback name and error type) and never stops the downloads.
+
+        Items whose ``path`` is not a ``Path`` (or string) are refused with
+        ``reason="bad_path"``, and those whose ``path`` is not strictly inside this
+        manager's ``output_dir`` with ``reason="outside_output_dir"``. Neither is
+        downloaded (``item_callback(False)``); each reason gets one
+        ``Media items refused`` warning with its ``count``.
 
         Returns:
             Dict mapping member_dir to {message_id: metadata_dict} for downloaded media.
@@ -2084,12 +2193,20 @@ class SyncManager:
         # acquires a pool slot via the session wrapper.
         total = len(queue)
         completed = 0
+        refused = {"bad_path": 0, "outside_output_dir": 0}
         # Group metadata by member_dir for efficient batch updates
         metadata_by_dir: dict[Path, dict[int, dict[str, Any]]] = {}
 
         async def worker(item: dict[str, Any]) -> None:
             nonlocal completed
-            res = await self.client.download_file(session, item["url"], item["path"], item["timestamp"])
+            raw_path = item.get("path")
+            path = Path(raw_path) if isinstance(raw_path, str) else raw_path
+            if not isinstance(path, Path) or not is_contained(path, self.output_dir, strict=True):
+                refused["bad_path" if not isinstance(path, Path) else "outside_output_dir"] += 1
+                if item_callback:
+                    await _call_safely(item_callback, "item", False)
+                return
+            res = await self.client.download_file(session, item["url"], path, item["timestamp"])
             if res:
                 media_type = item.get("media_type", "")
                 member_dir = item.get("member_dir")
@@ -2098,14 +2215,14 @@ class SyncManager:
 
                     # Extract dimensions for pictures and videos
                     if media_type in ("picture", "video"):
-                        width, height = get_media_dimensions(item["path"], media_type)
+                        width, height = get_media_dimensions(path, media_type)
                         if width and height:
                             metadata["width"] = width
                             metadata["height"] = height
 
                     # Extract audio metadata for videos and voice messages
                     if media_type in ("video", "voice"):
-                        audio_meta = get_audio_metadata(item["path"], media_type)
+                        audio_meta = get_audio_metadata(path, media_type)
                         if audio_meta.get("duration") is not None:
                             metadata["media_duration"] = audio_meta["duration"]
                         if audio_meta.get("is_muted") is not None:
@@ -2123,6 +2240,9 @@ class SyncManager:
                 await _call_safely(item_callback, "item", bool(res))
 
         await asyncio.gather(*[worker(item) for item in queue])
+        for reason, count in refused.items():
+            if count:
+                logger.warning("Media items refused", reason=reason, count=count)
         return metadata_by_dir
 
     async def update_message_metadata(self, messages_file: Path, metadata: dict[int, dict[str, Any]]) -> None:

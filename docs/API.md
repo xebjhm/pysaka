@@ -138,7 +138,12 @@ the seconds left (`None` when not blocked). Logging: `Timeline requests blocked`
 - **page_delay**: Seconds to wait between page requests (default `0.5`). To stay under the
   API rate limit during long full-history fetches, set `Client.timeline_min_interval` instead
   (and pass `page_delay=0` so the pause is not doubled).
-- **Returns**: List of message objects (sorted by ID ascending). A partial last
+- **Returns**: List of message objects (sorted by ID ascending). Rows whose
+  `id` is not an integer (or the ASCII digits of one, e.g. `"12"`) are dropped
+  and counted in one `Timeline ids refused` warning (`group_id`, `count`) logged on every exit, including when a later page fails;
+  every returned row's `id` is an `int`. The page's oldest timestamp (the
+  `progress_callback` date and the cursor stop) is read from its last kept row.
+  A partial last
   page (no continuation, or one echoing its continuation) is the start of the
   timeline, on a full fetch (neither `since_ts` nor `since_id`) as before the
   cursor. A full last page without a continuation is accepted as the start of
@@ -152,8 +157,9 @@ the seconds left (`None` when not blocked). Logging: `Timeline requests blocked`
   full fetch or while the cursor is still unreached, a full page with a repeated
   continuation (always), a full page with a missing continuation (unless the
   `order=asc` probe confirms the timeline start), or a page that replays
-  already-collected messages. On HTTP 429 it raises `RateLimitedError` instead
-  of returning an empty list.
+  already-collected messages; or a page that has rows but none with an integer
+  `id` (nothing usable, so the room is never read as empty). On HTTP 429 it
+  raises `RateLimitedError` instead of returning an empty list.
 
 #### `download_file(session, url: str, filepath: Path, timestamp: str = None) -> bool`
 - **url**: Signed media URL. Failure logs carry only its scheme, host, port and path (never the
@@ -161,6 +167,16 @@ the seconds left (`None` when not blocked). Logging: `Timeline requests blocked`
 - **filepath**: Local destination path.
 - **timestamp**: (Optional) Timestamp metadata.
 - **Returns**: `True` if success/exists.
+- **Refusals** (return `False`, log `Download refused` with a `reason`, no
+  request sent): a URL that `pysaka.net_policy.media_url_refusal` rejects
+  (`malformed`, `control_chars`, `non_ascii_host`, `encoded_host`, `scheme`,
+  `userinfo`, `host`, `ip_literal`, `local_name`, `port`). An `http://` URL is
+  fetched as `https://`.
+- **Redirects** are followed by hand, at most 3 (so at most 4 requests), each
+  target resolved against the current URL, checked the same way and upgraded to
+  `https://`; every request, the first included, is sent with `allow_redirects=False`. A refused
+  redirect (`redirect_<reason>`, `redirect_without_location`, `redirect_limit`)
+  returns `False` at once, without retries, and leaves no `.part` file.
 
 #### `get_profile(session) -> Optional[dict]`
 - **Returns**: Dict containing profile info (nickname, etc.), or `None` when the request failed
@@ -304,6 +320,12 @@ High-level manager for syncing messages and media.
 #### `__init__(client: Client, output_dir: Path)`
 - **client**: Authenticated `Client` instance.
 - **output_dir**: Base directory for downloaded content (already service-specific).
+
+Room and member `id`s name archive folders, so `sync_member`, `backfill_past_messages` and
+`sync_letters` use them only as integers: a numeric string is converted to `int`; any other value
+(`"../x"`, an absolute path, `True`, a negative number) makes the call return `0` without touching
+the disk or the network, after a `Room ids refused` warning (`kind` = `group` or `member`).
+`room_archive_complete` returns `False` for a group `id` that is not an integer.
 
 #### `sync_member(session, group: dict, member: dict, media_queue: list, progress_callback = None, prefetched_messages: list = None, *, on_new_messages = None, ignore_cursor: bool = False) -> int`
 Sync one member's messages, queue their media, and archive the member's profile images.
@@ -485,11 +507,18 @@ Not called by `sync_member`; call it once per service.
   logged by `Client.download_file` with the URL's scheme, host, port and path (query string and any
   `user:password@` redacted).
 
-#### `process_media_queue(session, queue: list, concurrency: int = 5, progress_callback = None) -> dict[Path, dict[int, dict]]`
+#### `process_media_queue(session, queue: list, concurrency: int = 5, progress_callback = None, item_callback = None) -> dict[Path, dict[int, dict]]`
 Download every media item in `queue` and extract media metadata.
 - **queue**: A list of media descriptor **dicts**, each with keys `url`, `path`
   (`Path`), `timestamp`, `message_id`, `media_type`, and `member_dir` (`Path`).
-  (These are the dicts `sync_member` appended.)
+  (These are the dicts `sync_member` appended.) An item whose `path` is not a
+  `Path` (or string) is not downloaded (`reason="bad_path"`), nor is one whose
+  `path` is not strictly inside the manager's `output_dir`
+  (`reason="outside_output_dir"`); each reason gets one `Media items refused`
+  warning with its `count`, and `item_callback(False)` is called for the item.
+- **item_callback**: Optional `(ok: bool)` callback (sync or async), called once
+  per item including refused and failed ones; one that raises is logged and
+  never stops the queue.
 - **concurrency**: Deprecated and ignored — concurrency is governed by the
   caller's session/pool wrapper.
 - **Returns**: A dict mapping each `member_dir` (`Path`) to
@@ -509,7 +538,10 @@ Offline scan of a member's `messages.json` for missing media (no network).
 - **Returns**: `{"checked": int, "missing": list[dict], "unresolved": list[dict],
   "error": str | None}`. `missing` items are `{message_id, media_type, path,
   timestamp}`; `unresolved` items (media-type messages with no recorded
-  `media_file`) are `{message_id, media_type, timestamp}`. `error` is `None` for
+  `media_file`, or one that is not a string or does not point strictly inside
+  `output_dir`, which is never checked on disk and counted in a
+  `saka.scan.media_file_refused` warning) are `{message_id, media_type,
+  timestamp}`. `error` is `None` for
   a readable manifest, else one of `"manifest_missing"` / `"manifest_unreadable"`
   / `"manifest_invalid"` so an unsynced member is distinguishable from a fully
   present one.
@@ -565,6 +597,27 @@ Recommended caller sequence per room when `history_scanned(gid)` is False:
 3. `room_archive_complete(group, timeline)`.
 4. `mark_history_scanned(gid)` only if step 3 returned True; otherwise the next run scans again.
 
+### `SyncManager.prepare_messages`
+Rows whose `id` is not an integer are dropped (not queued, not stored, not checked on disk and not
+held against the cursor via `earliest_failed_ts`) and counted in a `Messages refused` warning with
+`reason="bad_id"`; a media path that would not stay strictly inside the member folder is dropped
+the same way with `reason="outside_member_dir"`. Numeric-string ids are stored as `int`.
+
+## Network policy helpers
+
+### `pysaka.net_policy`
+Checks on server-supplied ids and URLs before they reach the disk or the network. No I/O.
+
+- `as_int_id(value) -> Optional[int]`: `value` as a non-negative `int` (`bool` excluded; a string
+  only when ASCII digits, at most 19), else `None`.
+- `is_contained(path: Path, base: Path, *, strict: bool = False) -> bool`: whether `path` is
+  `base` or inside it, judged lexically (`..` collapsed, links not followed). With `strict=True`
+  `base` itself does not count.
+- `media_url_refusal(url) -> Optional[str]`: why `url` must not be downloaded (a log code, see
+  `download_file`), or `None`. Host names that resolve to private addresses are not refused.
+- `secure_media_url(url: str) -> str`: `url` with `http://` replaced by `https://` and a default
+  or empty port dropped; call it only for a URL `media_url_refusal` accepted.
+
 ## Roster helpers
 
 ### `pysaka.roster`
@@ -614,6 +667,16 @@ migrated on first read.
 #### `delete_session(group: str)`
 - **group**: Group identifier.
 Remove stored credentials for this group.
+
+## Logging
+
+### `pysaka.logging.configure_logging`
+Log output is redacted at any nesting depth. A value under one of the keys `access_token`,
+`refresh_token`, `token`, `password`, `secret`, `cookie`, `cookies`, `authorization`, `api_key`,
+`apikey`, `x-api-key` or `x-goog-api-key` (matched case-insensitively) becomes `***REDACTED***`.
+In every string (including the event message) `Bearer` values, bare JWTs, Gemini API keys (`AIza`
+plus 35 characters) and `sk-` keys (20 or more characters after the prefix) are replaced the same
+way; a key glued to a preceding letter, digit, `_` or `-` (as in `task-...`) is left readable.
 
 ## Media Utilities
 
