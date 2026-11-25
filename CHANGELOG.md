@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-11-26
+
 ### Added
 - `pysaka.net_policy`: `as_int_id`, `is_contained` (with `strict=True` for
   files), `media_url_refusal` and `secure_media_url`, the checks the SDK now
@@ -563,7 +565,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Secure credential storage via system keyring
 - Token refresh without storing plaintext credentials
 
-[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.8...HEAD
+[Unreleased]: https://github.com/xebjhm/pysaka/compare/v0.4.9...HEAD
+[0.4.9]: https://github.com/xebjhm/pysaka/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/xebjhm/pysaka/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/xebjhm/pysaka/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/xebjhm/pysaka/compare/v0.4.5...v0.4.6
