@@ -2040,8 +2040,8 @@ class SyncManager:
             source-removed stub): they cannot be located or verified on disk, so they
             are reported separately rather than silently ignored — otherwise the
             result would claim 'all present' while such media is genuinely absent.
-            A ``media_file`` that is not a string or points outside ``output_dir`` is
-            also listed in ``unresolved`` (no path) and never checked on disk.
+            A ``media_file`` that is not a string or is not strictly inside
+            ``output_dir`` is also listed in ``unresolved`` (no path) and never checked on disk.
 
             ``error`` is ``None`` for a readable manifest. When messages.json cannot
             be used it is set to a stable id so callers can distinguish it from a
@@ -2157,8 +2157,9 @@ class SyncManager:
                 async), called after each successful download; ``completed``
                 counts successes only.
             item_callback: Optional ``(ok)`` callback (sync or async), called
-                once per item after its download attempt, success (``True``) or
-                failure (``False``), so a caller can count processed items.
+                once per item: ``True`` after a successful download, ``False``
+                after a failed one or when the item is refused (see below), so a
+                caller can count processed items.
 
         A callback that raises is logged (``Media queue callback failed``, with
         the callback name and error type) and never stops the downloads.

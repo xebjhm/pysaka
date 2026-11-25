@@ -36,7 +36,7 @@ _BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9._~+/-]+=*", re.IGNORECASE)
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b")
 #   - provider API keys (security audit 2026-11-13, hardening #31): Gemini
 #     ``AIza`` + 35 characters and OpenAI/Anthropic-style ``sk-`` keys, unless
-#     glued to a preceding letter or digit (``task-…`` stays readable)
+#     glued to a preceding letter, digit, ``_`` or ``-`` (``task-…`` stays readable)
 _PROVIDER_KEY_RE = re.compile(r"(?<![A-Za-z0-9_-])(?:AIza[0-9A-Za-z_-]{35}|sk-[A-Za-z0-9_-]{20,})")
 
 
